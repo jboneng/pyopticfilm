@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Sweep GL128 crop scans across resolution / exposure / priming for analysis.
+"""Sweep GL128 crop scans across resolution / exposure / priming / quiet-drain for analysis.
 
 Built to investigate the jittery 7200 dpi scans and scan-to-scan image
 movement that GL128 priming is a rough workaround for. Runs a grid of real
@@ -23,12 +23,18 @@ in that *same* session is a no-op. So each priming condition here gets its
 own fresh ``Scanner.open()`` ... ``close()`` bracket — comparing "on" vs
 "off" is only meaningful across separate sessions, never within one.
 
+``--quiet-drain`` (Adaptive quiet USB drain, ``asic.image_usb_pace_s``) has
+no such constraint — it's a plain per-scan attribute, toggled fresh before
+every scan regardless of session.
+
 Usage (from repo root)::
 
     uv run python tools/scan_sweep.py --dry-run
     uv run python tools/scan_sweep.py --resolutions 1200,3600,7200 --repeat 3
     uv run python tools/scan_sweep.py --mode me --me-long-exposures auto,60000,90000
     uv run python tools/scan_sweep.py --resolutions 7200 --prime off --repeat 5 --yes
+    uv run python tools/scan_sweep.py --resolutions 1200,3600,7200 --prime both \\
+        --quiet-drain both --repeat 8 --order shuffled --seed 1 --max-scans 300 --yes
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ CLIP_THRESHOLD = 64000
 @dataclass(frozen=True)
 class ScanSpec:
     prime: bool
+    quiet_drain: bool
     resolution: int
     mode: str  # "single" or "me"
     single_pass_exposure: int | None
@@ -68,7 +75,8 @@ class ScanSpec:
 
     def filename(self, index: int) -> str:
         prime_label = "on" if self.prime else "off"
-        return f"{index:04d}_p-{prime_label}_r{self.resolution}_{self.combo_label}_n{self.repeat_index}.png"
+        quiet_label = "on" if self.quiet_drain else "off"
+        return f"{index:04d}_p-{prime_label}_q-{quiet_label}_r{self.resolution}_{self.combo_label}_n{self.repeat_index}.png"
 
 
 def _parse_int_list_or_auto(raw: str) -> list[int | None]:
@@ -111,35 +119,38 @@ def _build_group_specs(
     me_exposure_mode: str,
     repeat: int,
     prime: bool,
+    quiet_drain_values: list[bool],
     order: str,
     seed: int,
 ) -> list[ScanSpec]:
     specs: list[ScanSpec] = []
     modes = ["single", "me"] if mode == "both" else [mode]
     for resolution in resolutions:
-        for m in modes:
-            if m == "single":
-                combos: list[tuple[int | None, int | None, int | None]] = [
-                    (v, None, None) for v in single_exposures
-                ]
-            else:
-                combos = [
-                    (None, s, l) for s in me_short_exposures for l in me_long_exposures
-                ]
-            for single_v, short_v, long_v in combos:
-                for rep in range(1, repeat + 1):
-                    specs.append(
-                        ScanSpec(
-                            prime=prime,
-                            resolution=resolution,
-                            mode=m,
-                            single_pass_exposure=single_v,
-                            me_short_exposure=short_v,
-                            me_long_exposure=long_v,
-                            me_exposure_mode=me_exposure_mode,
-                            repeat_index=rep,
+        for quiet_drain in quiet_drain_values:
+            for m in modes:
+                if m == "single":
+                    combos: list[tuple[int | None, int | None, int | None]] = [
+                        (v, None, None) for v in single_exposures
+                    ]
+                else:
+                    combos = [
+                        (None, s, l) for s in me_short_exposures for l in me_long_exposures
+                    ]
+                for single_v, short_v, long_v in combos:
+                    for rep in range(1, repeat + 1):
+                        specs.append(
+                            ScanSpec(
+                                prime=prime,
+                                quiet_drain=quiet_drain,
+                                resolution=resolution,
+                                mode=m,
+                                single_pass_exposure=single_v,
+                                me_short_exposure=short_v,
+                                me_long_exposure=long_v,
+                                me_exposure_mode=me_exposure_mode,
+                                repeat_index=rep,
+                            )
                         )
-                    )
     if order == "shuffled":
         random.Random(seed).shuffle(specs)
     return specs
@@ -182,6 +193,7 @@ def _run_one(scanner, spec: ScanSpec, index: int, area, out_dir: Path, preview_m
         "timestamp": datetime.now(UTC).isoformat(),
         "filename": filename,
         "prime": spec.prime,
+        "quiet_drain": spec.quiet_drain,
         "resolution": spec.resolution,
         "mode": spec.mode,
         "single_pass_exposure": spec.single_pass_exposure,
@@ -198,6 +210,9 @@ def _run_one(scanner, spec: ScanSpec, index: int, area, out_dir: Path, preview_m
         "error": None,
     }
     try:
+        from pyopticfilm.scan.session_gl128 import IMAGE_USB_PACE_S
+
+        scanner._asic.image_usb_pace_s = IMAGE_USB_PACE_S if spec.quiet_drain else 0.0
         image = scanner.scan(
             resolution=spec.resolution,
             mode="color",
@@ -240,7 +255,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--me-long-exposures", default="auto", help="Comma list of 'auto' or int (ME long exposure)")
     parser.add_argument("--me-exposure-mode", choices=["adaptive", "fixed"], default="adaptive", help="Only matters when --me-long-exposures includes 'auto'")
     parser.add_argument("--prime", choices=["on", "off", "both"], default="both")
-    parser.add_argument("--repeat", type=int, default=3, help="Repeats per (prime, resolution, exposure combo)")
+    parser.add_argument("--quiet-drain", choices=["on", "off", "both"], default="on", help="Adaptive quiet USB drain (asic.image_usb_pace_s) — default 'on' keeps today's default behavior; unlike --prime this needs no fresh session")
+    parser.add_argument("--repeat", type=int, default=3, help="Repeats per (prime, quiet-drain, resolution, exposure combo)")
     parser.add_argument("--order", choices=["sequential", "shuffled"], default="sequential", help="Shuffling is scoped within one priming condition, never across")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for --order shuffled")
     parser.add_argument("--no-apply-calib", action="store_true")
@@ -264,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     me_long_exposures = _parse_int_list_or_auto(args.me_long_exposures)
 
     prime_conditions = {"on": [True], "off": [False], "both": [True, False]}[args.prime]
+    quiet_drain_values = {"on": [True], "off": [False], "both": [True, False]}[args.quiet_drain]
     groups = {
         p: _build_group_specs(
             resolutions=resolutions,
@@ -274,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             me_exposure_mode=args.me_exposure_mode,
             repeat=args.repeat,
             prime=p,
+            quiet_drain_values=quiet_drain_values,
             order=args.order,
             seed=args.seed,
         )
@@ -281,7 +299,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     total = sum(len(v) for v in groups.values())
 
-    print(f"Planned sweep: {total} scans across {len(prime_conditions)} priming condition(s), crop={crop}")
+    print(
+        f"Planned sweep: {total} scans across {len(prime_conditions)} priming "
+        f"condition(s) x {len(quiet_drain_values)} quiet-drain condition(s), crop={crop}"
+    )
     for p in prime_conditions:
         specs = groups[p]
         print(f"  prime={p}: {len(specs)} scans, e.g. {[s.filename(i) for i, s in enumerate(specs[:3], 1)]}")
