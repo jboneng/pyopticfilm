@@ -204,6 +204,18 @@ class Gl128:
         #: Set after a successful :meth:`run_asic_shading` upload this session.
         #: IR Lab never sets this — ASIC DVDSET clipped IR to full scale.
         self.asic_shading_ready = False
+        #: EXPERIMENTAL, default off. Positioning feeds (home->reference,
+        #: reference->scan-start) always upload SLOPE_TABLE_FAST — the
+        #: fastest ramp in the whole capture set, real vendor-driver
+        #: behavior, never toggled by anything (unlike the image-pass creep,
+        #: which already has ``image_slope_slow``). A benchmark found
+        #: ~8px mean / up to 220px max Y-only drift between otherwise
+        #: identical repeat scans, consistent with occasional lost steps
+        #: during an aggressive feed ramp. Flip this on to try
+        #: SLOPE_TABLE_SLOW for feeds instead and A/B the drift before
+        #: considering it for a real fix — this changes real hardware motor
+        #: behavior, not just image processing.
+        self.experimental_feed_slope_slow: bool = False
         #: Equalized per-column IR white (one value/column) for host flatten.
         self.last_ir_host_white: list[int] | None = None
         #: True when :attr:`last_ir_host_white` passed the IR validator.
@@ -1087,8 +1099,8 @@ class Gl128:
         unity→white window (session 03/04: exposure AHB only).
 
         When ``image_slope_slow`` is set (Scan Lab acoustic probe), non-shading
-        uploads also use the slow ramp. Fast feeds still call
-        :meth:`_upload_fast_slopes` directly.
+        uploads also use the slow ramp. Feeds still call
+        :meth:`_upload_feed_slopes` directly (see ``experimental_feed_slope_slow``).
         """
         r = self.registers
         if slope:
@@ -1284,9 +1296,14 @@ class Gl128:
             )
         return int(limit_mm * self.model.feed_steps_per_inch / MM_PER_INCH)
 
-    def _upload_fast_slopes(self) -> None:
-        """Upload the fast motor ramp to both AHB slope windows."""
-        slope = _u16_table_bytes(SLOPE_TABLE_FAST)
+    def _upload_feed_slopes(self) -> None:
+        """Upload the feed motor ramp to both AHB slope windows.
+
+        Real vendor behavior is always ``SLOPE_TABLE_FAST`` here. See
+        ``experimental_feed_slope_slow`` for the (unconfirmed) A/B toggle.
+        """
+        use_slow = getattr(self, "experimental_feed_slope_slow", False)
+        slope = _u16_table_bytes(SLOPE_TABLE_SLOW if use_slow else SLOPE_TABLE_FAST)
         r = self.registers
         self.protocol.write_ahb(r.AHB_SLOPE_SCAN, slope)
         self.protocol.write_ahb(r.AHB_SLOPE_FAST, slope)
@@ -1337,7 +1354,7 @@ class Gl128:
         self._write_many(setup)
         self.protocol.write_u24(r.REG_FEEDL, steps)
         self._write(r.REG_0x02, r.MTRPWR | r.FASTFED)  # 0x18
-        self._upload_fast_slopes()
+        self._upload_feed_slopes()
         # This recipe deliberately does not clear the counter, so the probe and
         # FEEDFSH still carry the previous feed's completion. Sample them now so
         # the wait below knows not to believe the first "done" it sees.

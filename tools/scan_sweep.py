@@ -56,6 +56,7 @@ CLIP_THRESHOLD = 64000
 class ScanSpec:
     prime: bool
     quiet_drain: bool
+    feed_slope_slow: bool
     resolution: int
     mode: str  # "single" or "me"
     single_pass_exposure: int | None
@@ -76,7 +77,11 @@ class ScanSpec:
     def filename(self, index: int) -> str:
         prime_label = "on" if self.prime else "off"
         quiet_label = "on" if self.quiet_drain else "off"
-        return f"{index:04d}_p-{prime_label}_q-{quiet_label}_r{self.resolution}_{self.combo_label}_n{self.repeat_index}.png"
+        slope_label = "slow" if self.feed_slope_slow else "fast"
+        return (
+            f"{index:04d}_p-{prime_label}_q-{quiet_label}_f-{slope_label}_"
+            f"r{self.resolution}_{self.combo_label}_n{self.repeat_index}.png"
+        )
 
 
 def _parse_int_list_or_auto(raw: str) -> list[int | None]:
@@ -120,6 +125,7 @@ def _build_group_specs(
     repeat: int,
     prime: bool,
     quiet_drain_values: list[bool],
+    feed_slope_values: list[bool],
     order: str,
     seed: int,
 ) -> list[ScanSpec]:
@@ -127,30 +133,32 @@ def _build_group_specs(
     modes = ["single", "me"] if mode == "both" else [mode]
     for resolution in resolutions:
         for quiet_drain in quiet_drain_values:
-            for m in modes:
-                if m == "single":
-                    combos: list[tuple[int | None, int | None, int | None]] = [
-                        (v, None, None) for v in single_exposures
-                    ]
-                else:
-                    combos = [
-                        (None, s, l) for s in me_short_exposures for l in me_long_exposures
-                    ]
-                for single_v, short_v, long_v in combos:
-                    for rep in range(1, repeat + 1):
-                        specs.append(
-                            ScanSpec(
-                                prime=prime,
-                                quiet_drain=quiet_drain,
-                                resolution=resolution,
-                                mode=m,
-                                single_pass_exposure=single_v,
-                                me_short_exposure=short_v,
-                                me_long_exposure=long_v,
-                                me_exposure_mode=me_exposure_mode,
-                                repeat_index=rep,
+            for feed_slope_slow in feed_slope_values:
+                for m in modes:
+                    if m == "single":
+                        combos: list[tuple[int | None, int | None, int | None]] = [
+                            (v, None, None) for v in single_exposures
+                        ]
+                    else:
+                        combos = [
+                            (None, s, l) for s in me_short_exposures for l in me_long_exposures
+                        ]
+                    for single_v, short_v, long_v in combos:
+                        for rep in range(1, repeat + 1):
+                            specs.append(
+                                ScanSpec(
+                                    prime=prime,
+                                    quiet_drain=quiet_drain,
+                                    feed_slope_slow=feed_slope_slow,
+                                    resolution=resolution,
+                                    mode=m,
+                                    single_pass_exposure=single_v,
+                                    me_short_exposure=short_v,
+                                    me_long_exposure=long_v,
+                                    me_exposure_mode=me_exposure_mode,
+                                    repeat_index=rep,
+                                )
                             )
-                        )
     if order == "shuffled":
         random.Random(seed).shuffle(specs)
     return specs
@@ -194,6 +202,7 @@ def _run_one(scanner, spec: ScanSpec, index: int, area, out_dir: Path, preview_m
         "filename": filename,
         "prime": spec.prime,
         "quiet_drain": spec.quiet_drain,
+        "feed_slope_slow": spec.feed_slope_slow,
         "resolution": spec.resolution,
         "mode": spec.mode,
         "single_pass_exposure": spec.single_pass_exposure,
@@ -213,6 +222,7 @@ def _run_one(scanner, spec: ScanSpec, index: int, area, out_dir: Path, preview_m
         from pyopticfilm.scan.session_gl128 import IMAGE_USB_PACE_S
 
         scanner._asic.image_usb_pace_s = IMAGE_USB_PACE_S if spec.quiet_drain else 0.0
+        scanner._asic.experimental_feed_slope_slow = spec.feed_slope_slow
         image = scanner.scan(
             resolution=spec.resolution,
             mode="color",
@@ -256,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--me-exposure-mode", choices=["adaptive", "fixed"], default="adaptive", help="Only matters when --me-long-exposures includes 'auto'")
     parser.add_argument("--prime", choices=["on", "off", "both"], default="both")
     parser.add_argument("--quiet-drain", choices=["on", "off", "both"], default="on", help="Adaptive quiet USB drain (asic.image_usb_pace_s) — default 'on' keeps today's default behavior; unlike --prime this needs no fresh session")
-    parser.add_argument("--repeat", type=int, default=3, help="Repeats per (prime, quiet-drain, resolution, exposure combo)")
+    parser.add_argument("--feed-slope", choices=["fast", "slow", "both"], default="fast", help="Positioning-feed motor ramp (asic.experimental_feed_slope_slow) — default 'fast' keeps today's (real vendor) behavior; 'slow' A/B tests SLOPE_TABLE_SLOW for feeds instead, to test whether an aggressive ramp is losing steps")
+    parser.add_argument("--repeat", type=int, default=3, help="Repeats per (prime, quiet-drain, feed-slope, resolution, exposure combo)")
     parser.add_argument("--order", choices=["sequential", "shuffled"], default="sequential", help="Shuffling is scoped within one priming condition, never across")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for --order shuffled")
     parser.add_argument("--no-apply-calib", action="store_true")
@@ -281,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
 
     prime_conditions = {"on": [True], "off": [False], "both": [True, False]}[args.prime]
     quiet_drain_values = {"on": [True], "off": [False], "both": [True, False]}[args.quiet_drain]
+    feed_slope_values = {"fast": [False], "slow": [True], "both": [False, True]}[args.feed_slope]
     groups = {
         p: _build_group_specs(
             resolutions=resolutions,
@@ -292,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
             repeat=args.repeat,
             prime=p,
             quiet_drain_values=quiet_drain_values,
+            feed_slope_values=feed_slope_values,
             order=args.order,
             seed=args.seed,
         )
@@ -301,7 +314,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"Planned sweep: {total} scans across {len(prime_conditions)} priming "
-        f"condition(s) x {len(quiet_drain_values)} quiet-drain condition(s), crop={crop}"
+        f"condition(s) x {len(quiet_drain_values)} quiet-drain condition(s) x "
+        f"{len(feed_slope_values)} feed-slope condition(s), crop={crop}"
     )
     for p in prime_conditions:
         specs = groups[p]

@@ -44,6 +44,7 @@ def _config_key(record: dict) -> tuple:
     return (
         record["prime"],
         record.get("quiet_drain", True),
+        record.get("feed_slope_slow", False),
         record["resolution"],
         record["mode"],
         record["single_pass_exposure"],
@@ -54,9 +55,10 @@ def _config_key(record: dict) -> tuple:
 
 
 def _config_label(key: tuple) -> str:
-    prime, quiet_drain, resolution, mode, single_exp, short_exp, long_exp, me_mode = key
+    prime, quiet_drain, feed_slope_slow, resolution, mode, single_exp, short_exp, long_exp, me_mode = key
     prime_label = "on" if prime else "off"
     quiet_label = "on" if quiet_drain else "off"
+    slope_label = "slow" if feed_slope_slow else "fast"
     if mode == "single":
         exp_label = "auto" if single_exp is None else str(single_exp)
         combo = f"single_{exp_label}"
@@ -64,7 +66,7 @@ def _config_label(key: tuple) -> str:
         s = "auto" if short_exp is None else str(short_exp)
         l = "auto" if long_exp is None else str(long_exp)
         combo = f"me_s{s}_l{l}({me_mode})"
-    return f"p-{prime_label}_q-{quiet_label}_r{resolution}_{combo}"
+    return f"p-{prime_label}_q-{quiet_label}_f-{slope_label}_r{resolution}_{combo}"
 
 
 def _load_manifest(sweep_dir: Path) -> list[dict]:
@@ -96,6 +98,8 @@ def _phase_correlate_shift(a, b) -> tuple[float, float]:
 
 @dataclass
 class PairShift:
+    index_a: int
+    index_b: int
     repeat_a: int
     repeat_b: int
     dx: float
@@ -124,7 +128,11 @@ def _analyze_group(sweep_dir: Path, key: tuple, records: list[dict]) -> GroupRes
 
     label = _config_label(key)
     errors = [r for r in records if r.get("error")]
-    ok_records = sorted((r for r in records if not r.get("error")), key=lambda r: r["repeat_index"])
+    # Sort by manifest `index` (true execution order), not `repeat_index`:
+    # with --order shuffled, repeat_index no longer reflects when a scan
+    # actually ran, so pairing by it would compare non-adjacent scans and
+    # sometimes even walk backwards in time.
+    ok_records = sorted((r for r in records if not r.get("error")), key=lambda r: r["index"])
     clip_fractions = [r["clip_fraction"] for r in ok_records if r.get("clip_fraction") is not None]
     mean_clip = sum(clip_fractions) / len(clip_fractions) if clip_fractions else None
 
@@ -132,14 +140,24 @@ def _analyze_group(sweep_dir: Path, key: tuple, records: list[dict]) -> GroupRes
     for r in ok_records:
         img = cv2.imread(str(sweep_dir / r["filename"]), cv2.IMREAD_GRAYSCALE)
         if img is not None:
-            loaded.append((r["repeat_index"], img))
+            loaded.append((r["index"], r["repeat_index"], img))
 
     pairs: list[PairShift] = []
-    for (rep_a, a), (rep_b, b) in pairwise(loaded):
+    for (idx_a, rep_a, a), (idx_b, rep_b, b) in pairwise(loaded):
         if a.shape != b.shape:
             continue
         dx, dy = _phase_correlate_shift(a, b)
-        pairs.append(PairShift(repeat_a=rep_a, repeat_b=rep_b, dx=dx, dy=dy, magnitude=(dx * dx + dy * dy) ** 0.5))
+        pairs.append(
+            PairShift(
+                index_a=idx_a,
+                index_b=idx_b,
+                repeat_a=rep_a,
+                repeat_b=rep_b,
+                dx=dx,
+                dy=dy,
+                magnitude=(dx * dx + dy * dy) ** 0.5,
+            )
+        )
 
     magnitudes = [p.magnitude for p in pairs]
     dxs = [p.dx for p in pairs]
@@ -199,7 +217,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.verbose:
             for p in g.pairs:
-                print(f"    repeat {p.repeat_a}->{p.repeat_b}: dx={p.dx:.2f} dy={p.dy:.2f} |shift|={p.magnitude:.2f}")
+                print(
+                    f"    scan idx {p.index_a} (rep {p.repeat_a}) -> idx {p.index_b} (rep {p.repeat_b}): "
+                    f"dx={p.dx:.2f} dy={p.dy:.2f} |shift|={p.magnitude:.2f}"
+                )
 
     if args.csv is not None:
         with args.csv.open("w", newline="", encoding="utf-8") as f:
@@ -220,10 +241,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.pairs_csv is not None:
         with args.pairs_csv.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["config", "repeat_a", "repeat_b", "dx", "dy", "magnitude"])
+            writer.writerow(["config", "index_a", "index_b", "repeat_a", "repeat_b", "dx", "dy", "magnitude"])
             for g in results:
                 for p in g.pairs:
-                    writer.writerow([g.label, p.repeat_a, p.repeat_b, p.dx, p.dy, p.magnitude])
+                    writer.writerow([g.label, p.index_a, p.index_b, p.repeat_a, p.repeat_b, p.dx, p.dy, p.magnitude])
         print(f"Wrote {args.pairs_csv}")
 
     return 0
