@@ -95,7 +95,7 @@ class ScanLabWindow(QMainWindow):
 
         self.run_mock = QCheckBox("Run against MOCK")
         self.run_mock.setChecked(True)
-        self.run_mock.toggled.connect(self._refresh_banner)
+        self.run_mock.toggled.connect(self._on_run_mock_toggled)
         form.addWidget(self.run_mock)
 
         self.override_hw_gate = QCheckBox("Override safety HW gate")
@@ -375,6 +375,11 @@ class ScanLabWindow(QMainWindow):
             self.ir_pass.setChecked(False)
         is_gl128 = getattr(target.model, "asic", "") == "GL128"
         self.me_pass.setEnabled(is_gl128)
+        was_connected = getattr(self.forensic_tab, "_is_connected", False)
+        self._worker.close_scanner()
+        self._refresh_banner()
+        if was_connected:
+            self._on_forensic_connect()
         if not is_gl128:
             self.me_pass.setChecked(False)
         self.me_fixed_long.setEnabled(is_gl128 and self.me_pass.isChecked())
@@ -639,6 +644,18 @@ class ScanLabWindow(QMainWindow):
         self._refresh_banner()
         if self._capture is not None:
             self._decode_loaded_capture()
+
+    def _on_run_mock_toggled(self, _checked: bool) -> None:
+        # A stale open Scanner/RecordingTransport (real or mock) would
+        # otherwise linger until the next Prescan/Scan/Forensic-connect
+        # happens to notice the LabTarget.mock mismatch - close it now so
+        # the banner and, if Forensic-connected, the live session/badge
+        # follow the toggle immediately in both directions.
+        was_connected = getattr(self.forensic_tab, "_is_connected", False)
+        self._worker.close_scanner()
+        self._refresh_banner()
+        if was_connected:
+            self._on_forensic_connect()
 
     def _on_open_capture(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

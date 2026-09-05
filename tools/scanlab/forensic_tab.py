@@ -52,7 +52,13 @@ from tools.register_reference import parse_addr
 from tools.scanlab.forensic_anomaly import detect_anomalies, format_anomalies
 from tools.scanlab.forensic_diff import first_divergence, format_divergence
 from tools.scanlab.forensic_event_inspector import format_event, load_decoded_events, load_event
-from tools.scanlab.forensic_milestones import build_milestones_for_run, format_milestones
+from tools.scanlab.forensic_milestones import (
+    build_milestones_for_run,
+    collect_known_values,
+    collect_unknown_registers,
+    derive_states,
+    format_milestones,
+)
 from tools.scanlab.forensic_pcap_import import import_pcap
 from tools.scanlab.forensic_reference import (
     KNOWN_REGISTERS,
@@ -63,7 +69,8 @@ from tools.scanlab.forensic_reference import (
 )
 from tools.scanlab.forensic_report_export import build_ai_report
 from tools.scanlab.forensic_session import export_run_zip, get_baseline, list_runs, set_baseline
-from tools.scanlab.forensic_timeline_view import TimelineGraphView
+from tools.scanlab.forensic_timeline_view import TimelineGraphView, legend_html
+from tools.scanlab.forensic_values_panel import ValuesPanel
 
 _IDLE_STOP_MS = 1000  # auto-record: stop this long after traffic goes idle
 
@@ -272,7 +279,7 @@ class ForensicTabPage(QWidget):
 
     def _build_timeline_graph_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
 
         toolbar = QHBoxLayout()
         btn_clear = QPushButton("Clear")
@@ -285,24 +292,68 @@ class ForensicTabPage(QWidget):
         toolbar.addWidget(btn_clear)
         toolbar.addWidget(btn_fit)
         toolbar.addWidget(btn_live)
+        self.timeline_duration_label = QLabel("Total: --")
+        toolbar.addWidget(self.timeline_duration_label)
         toolbar.addStretch(1)
         toolbar.addWidget(QLabel("Scroll to zoom, drag to pan, click a mark to inspect it below."))
-        layout.addLayout(toolbar)
+        outer.addLayout(toolbar)
+
+        legend = QLabel(legend_html())
+        legend.setStyleSheet("color: #444;")
+        outer.addWidget(legend)
+
+        timeline_col = QWidget()
+        layout = QVBoxLayout(timeline_col)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self.timeline_graph = TimelineGraphView()
         self.timeline_graph.event_selected.connect(self._on_timeline_event_selected)
-        layout.addWidget(self.timeline_graph, 2)
 
-        layout.addWidget(QLabel("Event Inspector — raw bytes, decoded fields, and register meaning together"))
+        inspector_col = QWidget()
+        inspector_layout = QVBoxLayout(inspector_col)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_layout.addWidget(QLabel("Event Inspector — raw bytes, decoded fields, and register meaning together"))
         self.event_inspector = QPlainTextEdit()
         self.event_inspector.setReadOnly(True)
         self.event_inspector.setPlaceholderText("Click a mark on the timeline above, or a milestone/anomaly row.")
-        layout.addWidget(self.event_inspector, 1)
+        inspector_layout.addWidget(self.event_inspector)
+
+        # setStretchFactor alone only governs how EXTRA space is distributed
+        # on resize, not the initial split - QSplitter defaults new children
+        # to equal sizes otherwise, which is what was silently overriding
+        # the intended timeline-heavy layout. setSizes() sets the initial
+        # split; the stretch factors above still apply to later resizes.
+        vertical_split = QSplitter(Qt.Orientation.Vertical)
+        vertical_split.addWidget(self.timeline_graph)
+        vertical_split.addWidget(inspector_col)
+        vertical_split.setStretchFactor(0, 5)
+        vertical_split.setStretchFactor(1, 1)
+        vertical_split.setSizes([900, 160])
+        layout.addWidget(vertical_split)
+
+        self.values_panel = ValuesPanel()
+        horizontal_split = QSplitter(Qt.Orientation.Horizontal)
+        horizontal_split.addWidget(timeline_col)
+        horizontal_split.addWidget(self.values_panel)
+        horizontal_split.setStretchFactor(0, 4)
+        horizontal_split.setStretchFactor(1, 1)
+        horizontal_split.setSizes([1200, 300])
+        # Stretch factor 1 here (vs. the toolbar/legend's implicit 0 above)
+        # means Qt gives ALL leftover vertical space to the splitter and
+        # leaves the toolbar/legend at their natural sizeHint - without
+        # this, QVBoxLayout divides leftover space roughly evenly across
+        # every item when all stretch factors are 0, which is what was
+        # inflating the toolbar and legend rows to ~1/3 of the tab's height
+        # each, squeezing the actual timeline into a sliver at the bottom.
+        outer.addWidget(horizontal_split, 1)
+        self.timeline_tab_page = page
         return page
 
     def _on_timeline_clear_clicked(self) -> None:
         self.timeline_graph.clear()
         self.event_inspector.clear()
+        self.values_panel.clear()
+        self.timeline_duration_label.setText("Total: --")
 
     def _on_timeline_event_selected(self, index: int) -> None:
         if self._inspector_run_dir is None:
@@ -415,8 +466,10 @@ class ForensicTabPage(QWidget):
         # Switch this Forensic tab's own right-hand tab widget to "Timeline"
         # (the caller — app.py's ScanLabWindow — has its own outer QTabWidget
         # with a "Forensic" tab; switching to that one, if needed, is the
-        # caller's responsibility, not this widget's).
-        idx = self.right_tabs.indexOf(self.timeline_graph.parentWidget())
+        # caller's responsibility, not this widget's). Uses the tab page
+        # itself, not timeline_graph.parentWidget() - the graph now sits
+        # inside a QSplitter, so its direct parent isn't the tab page.
+        idx = self.right_tabs.indexOf(self.timeline_tab_page)
         if idx >= 0:
             self.right_tabs.setCurrentIndex(idx)
         if self._inspector_run_dir is None:
@@ -487,8 +540,6 @@ class ForensicTabPage(QWidget):
         export_col = QVBoxLayout()
         self.btn_export_run = QPushButton("Export selected run (.zip)")
         self.btn_export_run.clicked.connect(self._on_export_run_clicked)
-        self.btn_export_detail = QPushButton("Export shown text…")
-        self.btn_export_detail.clicked.connect(self._on_export_detail_clicked)
         self.btn_export_ai_report = QPushButton("Export AI bug report…")
         self.btn_export_ai_report.setToolTip(
             "Bundles this run's summary, phase durations, milestones, and "
@@ -498,7 +549,6 @@ class ForensicTabPage(QWidget):
         )
         self.btn_export_ai_report.clicked.connect(self._on_export_ai_report_clicked)
         export_col.addWidget(self.btn_export_run)
-        export_col.addWidget(self.btn_export_detail)
         export_col.addWidget(self.btn_export_ai_report)
         list_col.addLayout(export_col)
 
@@ -844,9 +894,31 @@ class ForensicTabPage(QWidget):
 
         # Also drive the graphical Timeline tab + Event Inspector for this
         # run - post-hoc, whole-run render (as opposed to the live append_*
-        # path used while a Session is still active).
+        # path used while a Session is still active). Feed-timing milestones
+        # become duration brackets; LPERIOD/EXPOSURE/pixel-clock values go to
+        # the Known-values panel instead of the timeline (that's what was
+        # crowding the marker row) - only host-side phase markers stay there.
+        feed_spans = [
+            {
+                "start_rel_s": m["evidence"].get("start_rel_s"),
+                "end_rel_s": m["evidence"].get("end_rel_s"),
+                # Terser than the milestone's own label (which can be wider
+                # than a short span, overflowing into the next one) - the
+                # full "Positioning feed FEEDL=..." text is still in the
+                # Known-values panel and the text report.
+                "label": f"{m['evidence'].get('slope_table') or '?'} {m['evidence'].get('duration_s', 0):.2f}s",
+            }
+            for m in milestones
+            if m["kind"] == "feed_timing"
+            and m["evidence"].get("start_rel_s") is not None
+            and m["evidence"].get("end_rel_s") is not None
+        ]
+        states = derive_states(decoded_events)
         self._inspector_run_dir = run_dir
-        self.timeline_graph.set_data(decoded_events, phase_markers, anomalies)
+        self.timeline_graph.set_data(decoded_events, phase_markers, anomalies, feed_spans, states)
+        duration = self.timeline_graph.total_duration_s()
+        self.timeline_duration_label.setText(f"Total: {duration:.2f}s" if duration is not None else "Total: --")
+        self.values_panel.set_data(collect_known_values(milestones), collect_unknown_registers(decoded_events))
 
     @staticmethod
     def _read_decoded_events(run_dir: Path) -> list[dict]:
@@ -907,19 +979,6 @@ class ForensicTabPage(QWidget):
             QMessageBox.warning(self, "Export run", f"Failed to export:\n{exc}")
             return
         self.append_timeline_line(f"[export] {run_dir} -> {dest}")
-
-    def _on_export_detail_clicked(self) -> None:
-        dest, _ = QFileDialog.getSaveFileName(
-            self, "Export shown text", "forensic_report.md", "Markdown (*.md);;Text (*.txt);;All files (*.*)"
-        )
-        if not dest:
-            return
-        try:
-            Path(dest).write_text(self.run_detail.toPlainText(), encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.warning(self, "Export", f"Failed to write file:\n{exc}")
-            return
-        self.append_timeline_line(f"[export] shown text -> {dest}")
 
     def _on_export_ai_report_clicked(self) -> None:
         pair = self._selected_run_and_baseline()

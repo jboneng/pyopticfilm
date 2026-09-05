@@ -42,8 +42,9 @@ def build_ai_report(run_dir: Path, *, baseline_dir: Path | None = None) -> str:
     result = _load_json(run_dir / "result.json")
     decoded_events = _load_jsonl(run_dir / "decoded_events.jsonl")
     phase_markers = _load_jsonl(run_dir / "phase_markers.jsonl")
+    raw_events = _load_jsonl(run_dir / "usb_raw.jsonl")
 
-    milestones = build_milestones(decoded_events)
+    milestones = build_milestones(decoded_events, raw_events)
     anomalies = detect_anomalies(decoded_events, phase_markers=phase_markers)
 
     env = manifest.get("environment", {})
@@ -91,7 +92,16 @@ def build_ai_report(run_dir: Path, *, baseline_dir: Path | None = None) -> str:
     else:
         lines.append("(no phase markers recorded for this run)")
 
+    timing_kinds = {"feed_timing", "lperiod", "exposure", "pixel_clock"}
+    timing_milestones = [m for m in milestones if m["kind"] in timing_kinds]
     lines += [
+        "",
+        "## Positioning & timing",
+        (
+            format_milestones(timing_milestones, collapse_repeats=False)
+            if timing_milestones
+            else "(no positioning-feed or timing-register milestones found)"
+        ),
         "",
         "## Anomalies",
         format_anomalies(anomalies),

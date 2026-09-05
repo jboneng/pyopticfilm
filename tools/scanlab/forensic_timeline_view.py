@@ -49,10 +49,24 @@ SEVERITY_COLORS = {"info": QColor("#888888"), "warning": QColor("#c07a20"), "cri
 _LANE_H = 22
 _TOP_MARGIN = 50  # room for rotated marker labels
 _AXIS_H = 24
+_SPAN_H = 16  # feed-timing / other duration brackets, between axis and lanes
+_SPAN_COLOR = QColor("#1f7a4d")
+_STATE_NAMES = ["Motor", "Lamp"]  # fixed order/rows for the on/off state band
+_STATE_H = 14
+_STATE_COLOR = QColor("#3a6fa5")
 
 
 def lane_for_kind(kind: str) -> str:
     return _KIND_TO_LANE.get(kind, "unclassified")
+
+
+def legend_html() -> str:
+    """Rich-text legend for a QLabel placed above the timeline - answers
+    "what does this color/shape mean" without a tooltip or a click."""
+    chips = [f'<span style="color:{c.name()}">●</span> {name}' for name, c in LANE_COLORS.items()]
+    chips.append(f'<span style="color:{_SPAN_COLOR.name()}">━</span> feed timing')
+    chips += [f'<span style="color:{c.name()}">▲</span> {sev}' for sev, c in SEVERITY_COLORS.items()]
+    return "&nbsp;&nbsp;".join(chips)
 
 
 @dataclass
@@ -98,11 +112,15 @@ class TimelineGraphView(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setMinimumHeight(_TOP_MARGIN + _AXIS_H + _LANE_H * len(LANES) + 10)
+        self.setMinimumHeight(
+            _TOP_MARGIN + _AXIS_H + _SPAN_H + _STATE_H * len(_STATE_NAMES) + _LANE_H * len(LANES) + 10
+        )
         self.setMouseTracking(True)
         self._points: dict[str, list[tuple[float, int]]] = {lane: [] for lane in LANES}
         self._markers: list[tuple[float, str]] = []  # (rel_s, label)
         self._anomalies: list[tuple[float, str, int]] = []  # (rel_s, severity, index)
+        self._spans: list[tuple[float, float, str]] = []  # (start_s, end_s, label)
+        self._states: dict[str, list[tuple[float, bool]]] = {name: [] for name in _STATE_NAMES}
         self._t_data_min: float | None = None
         self._t_data_max: float | None = None
         self._t_view_min = 0.0
@@ -117,6 +135,8 @@ class TimelineGraphView(QWidget):
         self._points = {lane: [] for lane in LANES}
         self._markers = []
         self._anomalies = []
+        self._spans = []
+        self._states = {name: [] for name in _STATE_NAMES}
         self._t_data_min = None
         self._t_data_max = None
         self._t_view_min = 0.0
@@ -129,6 +149,8 @@ class TimelineGraphView(QWidget):
         decoded_events: list[dict],
         phase_markers: list[dict] | None = None,
         anomalies: list | None = None,
+        spans: list[dict] | None = None,
+        states: dict[str, list[dict]] | None = None,
     ) -> None:
         """Post-hoc: render a whole saved run at once. ``decoded_events``
         entries carry ``raw_t0`` (absolute perf_counter, from usb/decode.py)
@@ -151,6 +173,13 @@ class TimelineGraphView(QWidget):
             index = getattr(a, "index", None) if not isinstance(a, dict) else a.get("index")
             if rel_s is not None and index is not None:
                 self.append_anomaly(rel_s, severity or "info", index)
+        for s in spans or []:
+            if s.get("start_rel_s") is not None and s.get("end_rel_s") is not None:
+                self.append_span(s["start_rel_s"], s["end_rel_s"], s.get("label", ""))
+        for name, changes in (states or {}).items():
+            for c in changes:
+                if c.get("rel_s") is not None and c.get("value") is not None:
+                    self.append_state_change(name, c["rel_s"], bool(c["value"]))
         self._auto_follow = False
         self._fit_all()
 
@@ -169,6 +198,22 @@ class TimelineGraphView(QWidget):
 
     def append_anomaly(self, rel_s: float, severity: str, index: int) -> None:
         self._anomalies.append((rel_s, severity, index))
+        self._extend_range(rel_s)
+        self.update()
+
+    def append_span(self, start_s: float, end_s: float, label: str) -> None:
+        self._spans.append((start_s, end_s, label))
+        self._extend_range(start_s)
+        self._extend_range(end_s)
+        self.update()
+
+    def append_state_change(self, name: str, rel_s: float, value: bool) -> None:
+        """Record a boolean signal transition (e.g. motor/lamp on-off) at
+        ``rel_s``. Unrecognized ``name``s are ignored - ``_STATE_NAMES`` is
+        the fixed set of rows this widget knows how to draw."""
+        if name not in self._states:
+            return
+        self._states[name].append((rel_s, value))
         self._extend_range(rel_s)
         self.update()
 
@@ -207,6 +252,22 @@ class TimelineGraphView(QWidget):
         span = self._t_view_max - self._t_view_min
         return self._t_view_min + (x / max(width, 1)) * span
 
+    def _lane_height(self) -> float:
+        """Lane row height, stretched to fill whatever vertical space this
+        widget is actually given (e.g. by a QSplitter) instead of leaving
+        blank space below a fixed-size block of rows - never smaller than
+        ``_LANE_H`` even in a cramped view."""
+        fixed = _TOP_MARGIN + _AXIS_H + _SPAN_H + _STATE_H * len(_STATE_NAMES) + 10
+        available = max(self.height() - fixed, _LANE_H * len(LANES))
+        return available / len(LANES)
+
+    def total_duration_s(self) -> float | None:
+        """Full recorded span (last event minus first) - independent of
+        the current zoom/pan, unlike ``_t_view_min``/``_t_view_max``."""
+        if self._t_data_min is None or self._t_data_max is None:
+            return None
+        return self._t_data_max - self._t_data_min
+
     # -- painting ------------------------------------------------------------
 
     def paintEvent(self, event) -> None:
@@ -219,8 +280,13 @@ class TimelineGraphView(QWidget):
         span = max(self._t_view_max - self._t_view_min, 1e-9)
         pixel_s = span / max(width, 1)
 
-        # phase/button markers: vertical dashed lines + rotated label
+        # phase/button markers: vertical dashed lines + rotated label.
+        # Labels are skipped (tick line stays) when they'd overlap the
+        # previous one - a rotated label's own bounding box is awkward to
+        # get exactly right, so horizontalAdvance is used as a conservative
+        # stand-in for "would this collide," not a precise layout.
         painter.setFont(QFont("", 8))
+        last_label_x: float | None = None
         for rel_s, label in self._markers:
             if not (self._t_view_min <= rel_s <= self._t_view_max):
                 continue
@@ -229,11 +295,16 @@ class TimelineGraphView(QWidget):
             pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawLine(QPointF(x, _TOP_MARGIN), QPointF(x, height))
+            shown = label[:40]
+            text_w = painter.fontMetrics().horizontalAdvance(shown)
+            if last_label_x is not None and x < last_label_x + text_w * 0.7:
+                continue
+            last_label_x = x
             painter.save()
             painter.translate(x + 2, _TOP_MARGIN - 6)
             painter.rotate(-30)
             painter.setPen(QColor("#555555"))
-            painter.drawText(0, 0, label[:40])
+            painter.drawText(0, 0, shown)
             painter.restore()
 
         # axis
@@ -246,21 +317,61 @@ class TimelineGraphView(QWidget):
             painter.drawLine(QPointF(x, _TOP_MARGIN + _AXIS_H - 4), QPointF(x, _TOP_MARGIN + _AXIS_H))
             painter.drawText(QPointF(x + 2, _TOP_MARGIN + _AXIS_H - 6), format_timecode(t))
 
-        # lanes
-        lane_y0 = _TOP_MARGIN + _AXIS_H
-        for li, lane in enumerate(LANES):
-            y = lane_y0 + li * _LANE_H
+        # spans: duration brackets (e.g. feed-timing) between the axis and lanes
+        span_y0 = _TOP_MARGIN + _AXIS_H
+        span_mid = span_y0 + _SPAN_H / 2
+        painter.setFont(QFont("", 7))
+        for start_s, end_s, label in self._spans:
+            if end_s < self._t_view_min or start_s > self._t_view_max:
+                continue
+            x1 = self._x_for_t(max(start_s, self._t_view_min), width)
+            x2 = self._x_for_t(min(end_s, self._t_view_max), width)
+            pen = QPen(_SPAN_COLOR)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(x1, span_mid), QPointF(x2, span_mid))
+            painter.drawLine(QPointF(x1, span_y0 + 2), QPointF(x1, span_y0 + _SPAN_H - 2))
+            painter.drawLine(QPointF(x2, span_y0 + 2), QPointF(x2, span_y0 + _SPAN_H - 2))
+            if label:
+                painter.setPen(_SPAN_COLOR)
+                painter.drawText(QPointF(x1 + 3, span_y0 + _SPAN_H - 4), label[:60])
+
+        # states: on/off bars (Motor, Lamp) between spans and lanes
+        state_y0 = _TOP_MARGIN + _AXIS_H + _SPAN_H
+        painter.setFont(QFont("", 7))
+        for si, name in enumerate(_STATE_NAMES):
+            y = state_y0 + si * _STATE_H
             painter.setPen(QColor("#eeeeee"))
             painter.drawLine(0, y, width, y)
             painter.setPen(QColor("#999999"))
-            painter.drawText(4, y + _LANE_H - 6, lane)
+            painter.drawText(4, y + _STATE_H - 3, name)
+            changes = sorted(self._states.get(name, []), key=lambda c: c[0])
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_STATE_COLOR)
+            for (t0, val), (t1, _next_val) in zip(changes, changes[1:] + [(self._t_view_max, None)]):
+                if not val or t1 < self._t_view_min or t0 > self._t_view_max:
+                    continue
+                x1 = self._x_for_t(max(t0, self._t_view_min), width)
+                x2 = self._x_for_t(min(t1, self._t_view_max), width)
+                painter.drawRect(QRectF(x1, y + 2, max(x2 - x1, 1.0), _STATE_H - 4))
+
+        # lanes
+        lane_y0 = state_y0 + _STATE_H * len(_STATE_NAMES)
+        lane_h = self._lane_height()
+        for li, lane in enumerate(LANES):
+            y = lane_y0 + li * lane_h
+            painter.setPen(QColor("#eeeeee"))
+            painter.drawLine(0, int(y), width, int(y))
+            painter.setPen(QColor("#999999"))
+            painter.drawText(4, int(y + lane_h - 6), lane)
 
             visible = [(t, i) for t, i in self._points[lane] if self._t_view_min <= t <= self._t_view_max]
             color = LANE_COLORS[lane]
             for cluster in cluster_points(visible, pixel_s):
                 x = self._x_for_t(cluster.t_center, width)
-                cy = y + _LANE_H / 2
-                r = 3.0 if cluster.count == 1 else min(3.0 + cluster.count**0.5, 10.0)
+                cy = y + lane_h / 2
+                r_max = max(3.0, lane_h / 2 - 2.0)
+                r = min(3.0, r_max) if cluster.count == 1 else min(3.0 + cluster.count**0.5, r_max)
                 painter.setBrush(color)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawEllipse(QPointF(x, cy), r, r)
@@ -315,8 +426,8 @@ class TimelineGraphView(QWidget):
         self._drag_last_x = None
 
     def _index_near(self, x: float, y: float) -> int | None:
-        lane_y0 = _TOP_MARGIN + _AXIS_H
-        lane_idx = int((y - lane_y0) // _LANE_H)
+        lane_y0 = _TOP_MARGIN + _AXIS_H + _SPAN_H + _STATE_H * len(_STATE_NAMES)
+        lane_idx = int((y - lane_y0) // self._lane_height())
         if not (0 <= lane_idx < len(LANES)):
             return None
         lane = LANES[lane_idx]
