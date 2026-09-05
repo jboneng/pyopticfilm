@@ -105,6 +105,40 @@ class Model8100V2(Gl128Common):
     # Two independent V2 captures (plus recovered 04_color_7200.pcapng).
     # 8200i SE is the inverse (slow reference feed, fast final feed).
     use_slow_final_positioning_feed: bool = True
+    # 2026-08-30: n_brackets > 2 (N-bracket ME) validated on real V2 hardware
+    # specifically at the fixed 42000 top exposure (SilverFast known-good
+    # colour-long, see clamp_me_long_for_dpi). Real per-frame adaptive
+    # selection has not been separately validated for the N-bracket path on
+    # this model, so brackets stay pinned to that one proven-safe value by
+    # default. Still fully overridable via Scanner.scan(me_exposure_mode=
+    # "adaptive"). Does not affect n_brackets == 2, which is unchanged.
+    me_default_exposure_mode: str = "fixed"
+    # 2026-08-31: V2 hardware validation of the ME long ceiling has only
+    # covered 42000 (see me_default_exposure_mode above) — no per-DPI data
+    # yet the way the SE's 7200-dpi-vs-other split has. Until further
+    # hardware testing, pin the ceiling flat at 42000 for every resolution
+    # (no DPI-keyed entries → every lookup falls through to the default).
+    # Loosen this once V2 is validated at higher exposures / other DPIs.
+    me_long_exposure_ceiling_by_dpi: Mapping[int, int] = field(default_factory=dict)
+    me_long_exposure_ceiling_default: int = 42000
+
+    #: Use row-banded pass alignment (pyopticfilm.pass_align.
+    #: align_pass_to_reference_banded) and the N-bracket merge's luma-only
+    #: misalignment gate for the 2-bracket ME path too, not just
+    #: n_brackets > 2. V2-only: independently measured near-pure Y-axis
+    #: drift that grows along a tall pass (see jboneng/pyopticfilm#33) and
+    #: real-hardware ghosting on flat/neutral content this addresses are
+    #: both V2-specific so far; SE keeps the original byte-identical path.
+    me_use_banded_alignment: bool = True
+
+    def me_n_bracket_long_exposure_ceiling(self, resolution: int) -> int:
+        """Pin N-bracket (``n_brackets > 2``) longs at 42000 for every DPI.
+
+        The only top exposure validated on real V2 hardware for N-bracket ME.
+        Two-bracket scans still use :meth:`me_long_exposure_ceiling` /
+        ``clamp_me_long_for_dpi`` (85000 at non-7200).
+        """
+        return 42_000
 
     def shading_strip_clocks(self, resolution: int, *, dvdset: bool) -> tuple[int, int, int]:
         """Return ``(dummy, clk_a, clk_b)`` for a shading strip.

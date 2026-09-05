@@ -368,3 +368,229 @@ def _merge_snr(
         exposure_ratio_used=float(r),
     )
     return out, stats
+
+
+def _subsample_for_stats_n(frames: list[np.ndarray]) -> list[np.ndarray]:
+    """N-frame generalization of :func:`_subsample_for_stats` (stride shared
+    across all frames, derived from ``frames[0]``'s shape)."""
+    h, w = frames[0].shape[:2]
+    sy = max(1, h // _STATS_MAX_SIDE)
+    sx = max(1, w // _STATS_MAX_SIDE)
+    if sy == 1 and sx == 1:
+        return frames
+    return [f[::sy, ::sx] for f in frames]
+
+
+def _estimate_z_median_n(
+    frames: list[np.ndarray],
+    exposures: list[int],
+    *,
+    alpha: float,
+    beta: float,
+) -> list[float]:
+    """Per-bracket global residual-gate median vs ``frames[0]``, generalizing
+    :func:`_estimate_z_median` to N brackets (one median per non-reference
+    bracket, same subsampled-luma z statistic)."""
+    subs = _subsample_for_stats_n(frames)
+    lum_ref = subs[0].astype(np.float32).mean(axis=2)
+    va_lum = alpha * np.maximum(lum_ref, 0.0) + beta
+    e0 = float(exposures[0])
+    medians: list[float] = []
+    for raw, e in zip(subs[1:], exposures[1:], strict=True):
+        raw_f = raw.astype(np.float32)
+        r = float(e) / e0
+        lum_raw = raw_f.mean(axis=2)
+        xb_lum = lum_raw / r
+        vb_lum = (alpha * np.maximum(lum_raw, 0.0) + beta) / (r * r)
+        z = (lum_ref - xb_lum) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
+        medians.append(float(np.median(z)))
+    return medians
+
+
+def merge_n_exposures(
+    frames: list[np.ndarray],
+    exposures: list[int],
+    *,
+    alpha: float = _SNR_ALPHA,
+    beta: float = _SNR_BETA,
+) -> MergeResult:
+    """N-bracket generalization of :func:`merge_exposures_result`'s IVW fusion.
+
+    Reduces exactly to the pairwise formula at ``len(frames) == 2`` — the
+    per-pixel weight ``w_i = c_i / v_i`` and merged value
+    ``sum(w_i * x_i) / sum(w_i)`` are algebraically identical to
+    :func:`_merge_snr_rows`'s ``wa``/``wb``/``ivw`` when there are only two
+    brackets, since bracket 0 is always the reference scale (``r_0 = 1``).
+    The residual-disagreement gate and misalignment fallback below are the
+    same generalization: at N=2 there is exactly one non-reference bracket,
+    so ``c_res_eff``/``prefer``/``misaligned`` collapse to
+    :func:`_merge_snr_rows`'s formulas exactly.
+
+    Residual-disagreement gate: for each non-reference bracket ``i``, a
+    z-score of its luma vs ``frames[0]`` (bias-corrected by a global,
+    subsampled per-bracket median — see :func:`_estimate_z_median_n`) yields
+    a per-pixel confidence ``c_res_i``. The pixel's overall confidence is the
+    *worst* (minimum) across all brackets — one bracket disagreeing sharply
+    with the reference is enough to distrust the pure IVW blend there. Where
+    confidence is low, the output blends toward ``prefer``: the single
+    bracket with the highest individual weight at that pixel (the N-way
+    equivalent of the pairwise "pick short or long, whichever is more
+    trusted" fallback).
+
+    Misalignment edge fallback: when the worst per-bracket luma disagreement
+    exceeds its threshold, the pixel falls back to ``frames[0]`` verbatim.
+    Deliberately luma-only — no cross-channel-spread requirement, unlike the
+    2-way merge's ``misaligned`` gate (which ANDs in a spread check — see
+    :func:`_merge_snr_rows`, kept as-is to preserve the ``n_brackets == 2``
+    production path's byte-identical guarantee). Measured empirically on
+    both directions of this tradeoff:
+
+    - Requiring cross-channel spread too (the 2-way gate's AND) misses real
+      Y-axis drift on flat/neutral-toned content (skin, cream fabric — see
+      jboneng/pyopticfilm#33 for independently measured Y-only drift on
+      this hardware): misregistered-but-neutral pixels disagree badly in
+      luminance but stay close to grey either way, so the AND never fires
+      and the ghosting blends straight through — the original real-hardware
+      bug this function's fallback is meant to catch.
+    - OR-ing spread in instead (rather than dropping it) is *worse*: any
+      saturated, well-aligned color patch has ``max(R,G,B)-min(R,G,B)``
+      far above ``_IVW_CHANNEL_SPREAD_TAU`` from real scene color alone —
+      verified on a synthetic well-aligned RGB-patch scene, where OR-gating
+      made every pixel fall back to ``frames[0]``, i.e. no fusion at all.
+    - Luma disagreement alone reproduced neither failure in the same
+      checks: ~0% false-trigger on a well-aligned saturated-color scene and
+      a well-aligned sharp achromatic edge, ~100% correct-trigger on a
+      genuinely 5px-drifted neutral gradient.
+
+    So N=2 through this function is *not* bit-for-bit against
+    :func:`_merge_snr_rows` on frames where the dropped spread condition
+    would have mattered — the N=2 equivalence documented above is, in
+    general, only for the confidence/IVW arithmetic itself (see
+    ``test_merge_n_exposures_two_frames_matches_pairwise_ivw``).
+
+    Frames must already be pairwise-aligned to ``frames[0]`` by the caller
+    (e.g. via repeated :func:`pyopticfilm.pass_align.align_pass_to_reference`
+    calls) — this function does no alignment of its own.
+
+    Args:
+        frames: N uint16 HxWx3 arrays, ascending exposure order, already
+            aligned to ``frames[0]``.
+        exposures: N positive exposure values, same order as ``frames``.
+
+    Returns:
+        MergeResult with the fused uint16 HxWx3 array and FusionStats
+        (``mean_short_weight``/``mean_long_weight`` report bracket 0 / the
+        last bracket specifically, for compatibility with the 2-way stats
+        shape; ``exposure_ratio_used`` is ``exposures[-1] / exposures[0]``;
+        ``mean_residual_confidence`` is the mean of the per-pixel overall
+        ``c_res_eff`` across the frame, same meaning as the 2-way stat).
+
+    Raises:
+        ValueError: fewer than 2 frames, mismatched lengths/shapes, or a
+            non-positive exposure.
+    """
+    if len(frames) != len(exposures):
+        raise ValueError(
+            f"frames ({len(frames)}) and exposures ({len(exposures)}) length mismatch"
+        )
+    if len(frames) < 2:
+        raise ValueError(f"merge_n_exposures needs >= 2 frames, got {len(frames)}")
+    if any(e <= 0 for e in exposures):
+        raise ValueError(f"all exposures must be positive, got {exposures}")
+    ref = np.asarray(frames[0], dtype=np.uint16)
+    if ref.ndim != 3 or ref.shape[2] != 3:
+        raise ValueError(f"expected HxWx3 arrays, got {ref.shape}")
+    for i, f in enumerate(frames[1:], 1):
+        fa = np.asarray(f, dtype=np.uint16)
+        if fa.shape != ref.shape:
+            raise ValueError(
+                f"frame {i} shape {fa.shape} does not match frame 0 shape {ref.shape}"
+            )
+
+    e0 = float(exposures[0])
+    ratios = [float(e) / e0 for e in exposures]
+    h, w = ref.shape[:2]
+    out = np.empty((h, w, 3), dtype=np.uint16)
+    w0_sum = 0.0
+    wn_sum = 0.0
+    n_weights = 0
+    zero_count = 0
+    c_res_sum = 0.0
+    total_pixels = int(h * w)
+
+    z_medians = _estimate_z_median_n(frames, exposures, alpha=alpha, beta=beta)
+
+    for y0 in range(0, h, _MERGE_CHUNK_ROWS):
+        y1 = min(h, y0 + _MERGE_CHUNK_ROWS)
+        raw_fs: list[np.ndarray] = []
+        xs: list[np.ndarray] = []
+        cs: list[np.ndarray] = []
+        weights: list[np.ndarray] = []
+        for raw, r in zip(frames, ratios, strict=True):
+            raw_f = np.asarray(raw[y0:y1], dtype=np.float32)
+            x = raw_f / r
+            c = _smooth_confidence(
+                raw_f, floor=_SNR_FLOOR, clip_start=_SNR_CLIP_START, clip_end=_SNR_CLIP_END
+            )
+            v = (alpha * np.maximum(raw_f, 0.0) + beta) / (r * r)
+            weight = c / np.maximum(v, 1e-12)
+            raw_fs.append(raw_f)
+            xs.append(x)
+            cs.append(c)
+            weights.append(weight)
+
+        acc = weights[0] * xs[0]
+        w_sum = weights[0].copy()
+        all_zero_conf = cs[0] <= 1e-6
+        for x, c, weight in zip(xs[1:], cs[1:], weights[1:], strict=True):
+            acc += weight * x
+            w_sum += weight
+            all_zero_conf &= c <= 1e-6
+        ivw = acc / np.maximum(w_sum, 1e-12)
+
+        lum_ref = xs[0].mean(axis=2)
+        va_lum = alpha * np.maximum(lum_ref, 0.0) + beta
+        c_res_eff = np.ones_like(lum_ref, dtype=np.float32)
+        lum_diff_max = np.zeros_like(lum_ref, dtype=np.float32)
+        for raw_f, x, c, r, z_median in zip(
+            raw_fs[1:], xs[1:], cs[1:], ratios[1:], z_medians, strict=True
+        ):
+            lum_raw = raw_f.mean(axis=2)
+            lum_x = x.mean(axis=2)
+            vb_lum = (alpha * np.maximum(lum_raw, 0.0) + beta) / (r * r)
+            z = (lum_ref - lum_x) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
+            z_local = z - z_median
+            c_res_i = _residual_confidence(z_local)
+            gate_i = np.minimum(cs[0], c).mean(axis=2)
+            c_res_eff_i = 1.0 - gate_i * (1.0 - c_res_i)
+            c_res_eff = np.minimum(c_res_eff, c_res_eff_i)
+            lum_diff_max = np.maximum(lum_diff_max, np.abs(lum_ref - lum_x))
+
+        weight_stack = np.stack(weights, axis=0)
+        x_stack = np.stack(xs, axis=0)
+        best_idx = np.argmax(weight_stack, axis=0)
+        prefer = np.take_along_axis(x_stack, best_idx[np.newaxis, ...], axis=0)[0]
+
+        merged = c_res_eff[..., np.newaxis] * ivw + (1.0 - c_res_eff[..., np.newaxis]) * prefer
+        # Luma disagreement alone — no cross-channel spread requirement, see
+        # the misalignment-edge-fallback docstring above.
+        misaligned = lum_diff_max > _LUMA_DISAGREE_TAU
+        chunk = np.where(misaligned[..., np.newaxis], xs[0], merged)
+        chunk = np.where(all_zero_conf, 0.0, chunk)
+
+        out[y0:y1] = np.clip(chunk, 0, 65535).astype(np.uint16)
+        w0_sum += float(weights[0].sum())
+        wn_sum += float(weights[-1].sum())
+        n_weights += int(weights[0].size)
+        zero_count += int(np.count_nonzero(np.all(all_zero_conf, axis=-1)))
+        c_res_sum += float(c_res_eff.sum())
+
+    stats = FusionStats(
+        mean_short_weight=w0_sum / max(n_weights, 1),
+        mean_long_weight=wn_sum / max(n_weights, 1),
+        zero_weight_pixels=zero_count,
+        total_pixels=total_pixels,
+        mean_residual_confidence=c_res_sum / max(total_pixels, 1),
+        exposure_ratio_used=float(exposures[-1]) / e0,
+    )
+    return MergeResult(rgb=out, fusion_stats=stats)

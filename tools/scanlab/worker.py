@@ -55,13 +55,21 @@ class ScanRequest:
     ir_pass: bool
     me_pass: bool
     apply_calib: bool
-    me_exposure_mode: str = "adaptive"
+    #: None defers to the model's own default (Model.me_default_exposure_mode)
+    #: at n_brackets > 2; always "adaptive" at n_brackets == 2 regardless.
+    me_exposure_mode: str | None = None
     single_pass_exposure: int | None = None
     me_short_exposure: int | None = None
     me_long_exposure: int | None = None
+    #: Clamped "manual" ME bracket target (held inside the model's own
+    #: floor/ceiling envelope) — distinct from me_long_exposure, which is
+    #: the raw, unrestricted Scan Lab debug override. Mutually exclusive
+    #: with me_long_exposure (enforced by Scanner.scan()).
+    me_target_exposure: int | None = None
     gl128_prime: bool | None = None
     crop_norm: tuple[float, float, float, float] | None = None
     scan_kw: dict[str, Any] | None = None
+    n_brackets: int = 2
 
 
 class ScanWorker(QObject):
@@ -350,12 +358,17 @@ class ScanWorker(QObject):
             me=request.me_pass,
             crop=request.crop_norm,
             apply_calib=bool(request.apply_calib),
-            me_exposure_mode=str(request.me_exposure_mode or "adaptive"),
+            # Preserve None (not "adaptive") — n_brackets > 2 defers to the
+            # model's own default in that case; coercing to "adaptive" here
+            # would silently override it, same as before this PR.
+            me_exposure_mode=request.me_exposure_mode,
             single_pass_exposure=request.single_pass_exposure,
             me_short_exposure=request.me_short_exposure,
             me_long_exposure=request.me_long_exposure,
+            me_target_exposure=request.me_target_exposure,
             gl128_prime=request.gl128_prime,
             scan_kw=request.scan_kw,
+            n_brackets=int(request.n_brackets),
         )
 
     def _run(
@@ -368,12 +381,14 @@ class ScanWorker(QObject):
         me: bool,
         crop: tuple[float, float, float, float] | None,
         apply_calib: bool,
-        me_exposure_mode: str = "adaptive",
+        me_exposure_mode: str | None = None,
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_target_exposure: int | None = None,
         gl128_prime: bool | None = None,
         scan_kw: dict[str, Any] | None = None,
+        n_brackets: int = 2,
     ) -> None:
         self.busy_changed.emit(True)
         self._is_busy = True
@@ -402,9 +417,9 @@ class ScanWorker(QObject):
                 self._usb_divider(f"SCAN {dpi} dpi")
                 self.usb_line.emit(format_scan_window_log(crop, scan_kw))
                 if me:
-                    self._usb_divider(
-                        f"ME multi-pass ({me_exposure_mode})"
-                    )
+                    mode_label = me_exposure_mode or "model default"
+                    brackets_label = f", {n_brackets} brackets" if n_brackets != 2 else ""
+                    self._usb_divider(f"ME multi-pass ({mode_label}{brackets_label})")
                 if ir:
                     self._usb_divider("IR pass")
                 image: ScanImage = scanner.scan(
@@ -419,7 +434,9 @@ class ScanWorker(QObject):
                     single_pass_exposure=single_pass_exposure,
                     me_short_exposure=me_short_exposure,
                     me_long_exposure=me_long_exposure,
+                    me_target_exposure=me_target_exposure,
                     gl128_prime=gl128_prime,
+                    n_brackets=n_brackets,
                     **scan_kw,
                 )
                 self.me_debug_ready.emit(getattr(scanner, "last_me_debug", None))

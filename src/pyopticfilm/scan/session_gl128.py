@@ -23,7 +23,7 @@ from collections.abc import Callable
 from pyopticfilm.asic.gl128 import DEFAULT_IMAGE_USB_PACE_S
 from pyopticfilm.asic.registers import Gl128Registers
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
-from pyopticfilm.device.protocol import AsicDriver, FilmModel
+from pyopticfilm.device.protocol import AsicDriver, FilmModel, MultiExposureFilmModel
 from pyopticfilm.exceptions import AsicError, ScanCancelled, ScanError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
@@ -50,24 +50,23 @@ _LINE_PERIOD_TO_SECONDS = 1.0 / 4_500_000.0
 #: empty (start/stop creep). Applied only when quiet drain is on.
 _QUIET_DRAIN_LAG = 1.05
 
-#: ME colour-long ``REG_EXPOSURE`` floor (short bin / SilverFast ME short).
-_ME_LONG_MIN = 14_000
-#: ME colour-long ceiling at non-7200 PPI (dynamic / raised longs).
-_ME_LONG_MAX = 85_000
-#: ME colour-long ceiling at 7200 dpi (SilverFast known-good colour-long).
-_ME_LONG_MAX_AT_7200 = 42_000
-
-
-def clamp_me_long_for_dpi(resolution: int, exp_long: int) -> int:
+def clamp_me_long_for_dpi(
+    resolution: int, exp_long: int, model: MultiExposureFilmModel | None = None
+) -> int:
     """Clamp ME colour-long exposure for the requested PPI.
 
-    At 7200 dpi the long bin is capped at 42000 (SilverFast parity / HW-safe).
-    At other PPI the allowed range is 14000–85000.
+    Floor and DPI-keyed ceiling come from ``model``
+    (:attr:`~pyopticfilm.device.model_8200i_se.Model8200iSE.exposure_short` /
+    :meth:`~pyopticfilm.device.model_8200i_se.Model8200iSE.me_long_exposure_ceiling`
+    — the single source of truth shared with adaptive selection and any
+    clamped manual override). Defaults to the 8200i SE table (14000 floor,
+    42000 at 7200 dpi, 85000 elsewhere) when no model is given.
     """
+    mdl = model if model is not None else MODEL_8200I_SE
     value = int(exp_long)
-    if int(resolution) == 7200:
-        return min(max(value, _ME_LONG_MIN), _ME_LONG_MAX_AT_7200)
-    return min(max(value, _ME_LONG_MIN), _ME_LONG_MAX)
+    floor = int(mdl.exposure_short)
+    ceiling = mdl.me_long_exposure_ceiling(int(resolution))
+    return min(max(value, floor), ceiling)
 
 
 try:
@@ -127,19 +126,33 @@ class Gl128ScanSession(ScanSession):
         multi_exposure: bool = False,
         infrared: bool = False,
         align_passes: bool = True,
-        me_exposure_mode: str = "adaptive",
+        me_exposure_mode: str | None = None,
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_target_exposure: int | None = None,
+        n_brackets: int = 2,
         **kwargs,
     ):  # type: ignore[no-untyped-def]
-        """Refuse unless the ASIC explicitly arms motor moves."""
-        if not getattr(self.asic, "_motor_moves_enabled", False):
-            raise AsicError(_MOTOR_GATED_HINT)
-        # Fail fast on bad manual-exposure input before any register write.
+        # Fail fast on bad manual-exposure input before any ASIC state check —
+        # same order as Scanner.scan() so a direct-session caller sees the
+        # same ValueError a Scanner.scan() caller would, not an unrelated
+        # AsicError from the motor gate below.
         validate_manual_exposure(single_pass_exposure, label="single_pass_exposure")
         validate_manual_exposure(me_short_exposure, label="me_short_exposure")
         validate_manual_exposure(me_long_exposure, label="me_long_exposure")
+        validate_manual_exposure(me_target_exposure, label="me_target_exposure")
+        if me_long_exposure is not None and me_target_exposure is not None:
+            raise ValueError(
+                "me_long_exposure (unrestricted debug override) and "
+                "me_target_exposure (model-envelope-clamped) are mutually "
+                "exclusive — pass only one."
+            )
+        if not (2 <= n_brackets <= 9):
+            raise ValueError(f"n_brackets must be between 2 and 9, got {n_brackets!r}")
+        # Refuse unless the ASIC explicitly arms motor moves.
+        if not getattr(self.asic, "_motor_moves_enabled", False):
+            raise AsicError(_MOTOR_GATED_HINT)
         if multi_exposure or (infrared and kwargs.get("mode", "color") == "color"):
             if infrared and not getattr(self.model, "supports_infrared", False):
                 raise ScanError(
@@ -155,6 +168,8 @@ class Gl128ScanSession(ScanSession):
                 me_exposure_mode=me_exposure_mode,
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
+                me_target_exposure=me_target_exposure,
+                n_brackets=n_brackets,
                 **kwargs,
             )
         if single_pass_exposure is None:
@@ -350,15 +365,22 @@ class Gl128ScanSession(ScanSession):
         multi_exposure: bool = False,
         infrared: bool = False,
         align_passes: bool = True,
-        me_exposure_mode: str = "adaptive",
+        me_exposure_mode: str | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_target_exposure: int | None = None,
+        n_brackets: int = 2,
     ):
         from pyopticfilm.image import ScanImage
-        from pyopticfilm.pass_align import align_pass_to_reference, estimate_pass_shift, warn_if_align_unavailable
-        from pyopticfilm.scan.exposure_merge import merge_exposures_result
+        from pyopticfilm.pass_align import (
+            align_pass_to_reference,
+            align_pass_to_reference_banded,
+            estimate_pass_shift,
+            warn_if_align_unavailable,
+        )
+        from pyopticfilm.scan.exposure_merge import merge_exposures_result, merge_n_exposures
         from pyopticfilm.scan.geometry import compute_geometry
-        from pyopticfilm.scan.me_debug import MeScanDebug
+        from pyopticfilm.scan.me_debug import BracketDebug, MeScanDebug
         from pyopticfilm.scan.me_exposure import fixed_long_exposure, select_long_exposure
 
         if mode == "infrared":
@@ -375,10 +397,21 @@ class Gl128ScanSession(ScanSession):
             else int(getattr(model, "exposure_short", model.exposure_lperiod))
         )
         exp_long = int(getattr(model, "exposure_long", exp_short * 3))
-        mode_norm = str(me_exposure_mode or "adaptive").strip().lower()
+        if me_exposure_mode is not None:
+            # Explicit caller choice always wins, regardless of n_brackets.
+            mode_norm = str(me_exposure_mode).strip().lower()
+        elif n_brackets > 2:
+            # No explicit choice: n_brackets > 2 defers to the model's own
+            # default (Model.me_default_exposure_mode) — e.g. the 8100 V2
+            # stays pinned to its one real-hardware-validated exposure
+            # rather than adaptively varying per frame in the new N-bracket
+            # path. n_brackets == 2 is untouched (see the branch below).
+            mode_norm = str(getattr(model, "me_default_exposure_mode", "adaptive")).strip().lower()
+        else:
+            mode_norm = "adaptive"
         if mode_norm not in ("adaptive", "fixed"):
             raise ValueError(
-                f"me_exposure_mode must be 'adaptive' or 'fixed', got {me_exposure_mode!r}"
+                f"me_exposure_mode must be 'adaptive' or 'fixed', got {mode_norm!r}"
             )
 
         if not self.asic._initialized:
@@ -396,13 +429,16 @@ class Gl128ScanSession(ScanSession):
         ]
         if infrared:
             early.append(("ir", "infrared", exp_short, False, False, short_manual))
-        n_pass = len(early) + (1 if multi_exposure else 0)
+        # n_brackets counts the short pass too, so n_brackets-1 additional
+        # bracket passes get acquired when multi_exposure is set.
+        n_pass = len(early) + ((n_brackets - 1) if multi_exposure else 0)
 
         logger.info(
-            "GL128 multi-pass %ddpi passes=%d me=%s ir=%s me_exposure_mode=%s",
+            "GL128 multi-pass %ddpi passes=%d me=%s n_brackets=%d ir=%s me_exposure_mode=%s",
             geometry.resolution,
             n_pass,
             multi_exposure,
+            n_brackets,
             infrared,
             mode_norm,
         )
@@ -524,9 +560,9 @@ class Gl128ScanSession(ScanSession):
 
         assert rgb_short is not None
 
-        long_manual = me_long_exposure is not None
+        long_manual = me_long_exposure is not None or me_target_exposure is not None
         if multi_exposure:
-            if long_manual:
+            if me_long_exposure is not None:
                 # Explicit override: use the caller's value verbatim and skip
                 # adaptive/fixed selection, the DPI clamp, and the hardware-max
                 # clamp entirely — me_exposure_mode does not apply here.
@@ -536,19 +572,49 @@ class Gl128ScanSession(ScanSession):
                     exp_long,
                     mode_norm,
                 )
+            elif me_target_exposure is not None:
+                # "Manual" bracket target for end-user selection (NegPy): the
+                # caller's value is honored, but held inside the same
+                # per-model floor/ceiling adaptive uses (model.exposure_short /
+                # model.me_long_exposure_ceiling) — unlike me_long_exposure,
+                # which is a raw, unrestricted Scan Lab debug escape hatch.
+                requested = int(me_target_exposure)
+                exp_long = clamp_me_long_for_dpi(geometry.resolution, requested, model=model)
+                if exp_long != requested:
+                    logger.warning(
+                        "ME target exposure clamped at %d dpi: %d -> %d",
+                        geometry.resolution,
+                        requested,
+                        exp_long,
+                    )
+                logger.info(
+                    "ME long exposure: manual-target requested=%d selected=%d "
+                    "(me_exposure_mode=%s ignored)",
+                    requested,
+                    exp_long,
+                    mode_norm,
+                )
             else:
-                # DPI-aware ME long ceiling (7200 → 42k; other PPI → 85k).
+                # Intersect each model envelope field with the DPI ceiling —
+                # not a redundant re-expression of me_long_exposure_ceiling():
+                # a model may set me_adaptive_max_exposure/me_hardware_max_
+                # exposure below the DPI ceiling, and clamp_me_long_for_dpi
+                # correctly picks the smaller of the two. They only equal the
+                # ceiling outright for SE/V2 today because both fields are
+                # >= every DPI's ceiling on those two models.
                 dpi_adaptive_max = clamp_me_long_for_dpi(
                     geometry.resolution,
                     int(getattr(model, "me_adaptive_max_exposure", exp_long)),
+                    model=model,
                 )
                 dpi_hardware_max = clamp_me_long_for_dpi(
                     geometry.resolution,
                     int(getattr(model, "me_hardware_max_exposure", exp_long)),
+                    model=model,
                 )
                 if mode_norm == "fixed":
                     exposure_decision = fixed_long_exposure(
-                        clamp_me_long_for_dpi(geometry.resolution, exp_long),
+                        clamp_me_long_for_dpi(geometry.resolution, exp_long, model=model),
                         short_rgb=rgb_short,
                         short_exposure=exp_short,
                         black_level=float(getattr(model, "me_black_level", 0.0)),
@@ -566,10 +632,10 @@ class Gl128ScanSession(ScanSession):
                         adaptive_max=dpi_adaptive_max,
                         hardware_max=dpi_hardware_max,
                         max_ratio=float(getattr(model, "me_max_exposure_ratio", 5.0)),
-                        default_long=clamp_me_long_for_dpi(geometry.resolution, exp_long),
+                        default_long=clamp_me_long_for_dpi(geometry.resolution, exp_long, model=model),
                     )
                 exp_long = int(exposure_decision.selected)
-                clamped = clamp_me_long_for_dpi(geometry.resolution, exp_long)
+                clamped = clamp_me_long_for_dpi(geometry.resolution, exp_long, model=model)
                 if clamped != exp_long:
                     logger.warning(
                         "ME colour-long exposure clamped at %d dpi: %d → %d",
@@ -596,22 +662,59 @@ class Gl128ScanSession(ScanSession):
                     exp_long,
                     exposure_decision.reason,
                 )
-            _acquire_pass(
-                idx=len(early),
-                key="color_long",
-                method="transparency",
-                exposure=exp_long,
-                remeasure=True,
-                long_pass=True,
-                manual=long_manual,
-            )
+            if n_brackets == 2:
+                # Unchanged original 2-bracket path — kept byte-identical.
+                _acquire_pass(
+                    idx=len(early),
+                    key="color_long",
+                    method="transparency",
+                    exposure=exp_long,
+                    remeasure=True,
+                    long_pass=True,
+                    manual=long_manual,
+                )
+            else:
+                # n_brackets-1 non-short brackets, geometrically spaced
+                # between exp_short and the adaptively-chosen exp_long
+                # (itself unchanged from the block above — same safety
+                # ceiling as today). The last scheduled value is exp_long
+                # exactly, so the acquisition loop's final iteration is
+                # equivalent to the n_brackets==2 case's single long pass.
+                ratio = exp_long / exp_short
+                schedule = [
+                    round(exp_short * (ratio ** (i / (n_brackets - 1))))
+                    for i in range(1, n_brackets)
+                ]
+                schedule[-1] = exp_long
+                # (exposure, decoded rgb) per non-short bracket, ascending order.
+                bracket_planes = []
+                for i, e in enumerate(schedule):
+                    _acquire_pass(
+                        idx=len(early) + i,
+                        key="color_long",
+                        method="transparency",
+                        exposure=e,
+                        remeasure=True,
+                        long_pass=True,
+                        manual=long_manual and i == len(schedule) - 1,
+                    )
+                    bracket_planes.append((e, rgb_long))
 
         align_shift_long: tuple[float, float] | None = None
         align_shift_ir: tuple[float, float] | None = None
+        # Model-gated: see Model8100V2.me_use_banded_alignment. Routes the
+        # 2-bracket path through the same row-banded alignment + luma-only
+        # misalignment gate already used for n_brackets > 2, instead of
+        # merge_exposures_result's whole-frame shift + AND-gated fallback.
+        # SE keeps the original byte-identical path (flag defaults False).
+        use_banded_me = n_brackets == 2 and bool(model.me_use_banded_alignment)
 
-        if align_passes and rgb_long is not None:
+        if n_brackets == 2 and align_passes and rgb_long is not None:
             warn_if_align_unavailable("ME long")
-            align_shift_long = estimate_pass_shift(rgb_short, rgb_long)
+            if use_banded_me:
+                rgb_long, align_shift_long = align_pass_to_reference_banded(rgb_short, rgb_long)
+            else:
+                align_shift_long = estimate_pass_shift(rgb_short, rgb_long)
             logger.info(
                 "ME long pass shift (dx, dy)=(%.3f, %.3f)",
                 align_shift_long[0],
@@ -629,19 +732,36 @@ class Gl128ScanSession(ScanSession):
 
         primary = rgb_short
         fusion_stats = None
-        if multi_exposure and rgb_long is not None:
-            shift = align_shift_long if align_passes else (0.0, 0.0)
-            alpha = float(getattr(model, "me_noise_alpha", 1.0))
-            beta = float(getattr(model, "me_noise_beta", 4096.0))
-            merged = merge_exposures_result(
-                rgb_short,
-                rgb_long,
-                exposure_short=exp_short,
-                exposure_long=exp_long,
-                align_shift=shift,
-                alpha=alpha,
-                beta=beta,
-            )
+        # Shared across both branches below — the adaptive/fixed decision and
+        # manual-override bookkeeping don't depend on n_brackets.
+        exposure_proposed = None if exposure_decision is None else exposure_decision.proposed
+        exposure_reason = (
+            "manual-target" if me_target_exposure is not None
+            else "manual-override" if long_manual
+            else (None if exposure_decision is None else exposure_decision.reason)
+        )
+        me_alpha = float(getattr(model, "me_noise_alpha", 1.0))
+        me_beta = float(getattr(model, "me_noise_beta", 4096.0))
+
+        if multi_exposure and n_brackets == 2 and rgb_long is not None:
+            if use_banded_me:
+                # rgb_long is already banded-aligned above (or untouched if
+                # align_passes was False, matching the non-banded path's own
+                # "no alignment requested" semantics).
+                merged = merge_n_exposures(
+                    [rgb_short, rgb_long], [exp_short, exp_long], alpha=me_alpha, beta=me_beta
+                )
+            else:
+                shift = align_shift_long if align_passes else (0.0, 0.0)
+                merged = merge_exposures_result(
+                    rgb_short,
+                    rgb_long,
+                    exposure_short=exp_short,
+                    exposure_long=exp_long,
+                    align_shift=shift,
+                    alpha=me_alpha,
+                    beta=me_beta,
+                )
             primary = merged.rgb
             fusion_stats = merged.fusion_stats
             self.last_me_debug = MeScanDebug(
@@ -652,14 +772,59 @@ class Gl128ScanSession(ScanSession):
                 fusion_stats=fusion_stats,
                 align_shift_long=align_shift_long,
                 align_shift_ir=align_shift_ir,
-                exposure_proposed=(
-                    None if exposure_decision is None else exposure_decision.proposed
-                ),
-                exposure_reason=(
-                    "manual-override"
-                    if long_manual
-                    else (None if exposure_decision is None else exposure_decision.reason)
-                ),
+                exposure_proposed=exposure_proposed,
+                exposure_reason=exposure_reason,
+                brackets=[
+                    BracketDebug(rgb=rgb_short, exposure=exp_short, align_shift=None),
+                    BracketDebug(rgb=rgb_long, exposure=exp_long, align_shift=align_shift_long),
+                ],
+            )
+        elif multi_exposure and n_brackets > 2 and bracket_planes:
+            # Align every non-short bracket to rgb_short individually, then
+            # fuse with the N-way IVW generalization — see exposure_merge.py::
+            # merge_n_exposures, which also carries the residual-disagreement
+            # gate and misalignment fallback from the 2-way merge.
+            #
+            # Uses the row-banded estimator (not the single whole-frame
+            # align_pass_to_reference used by the 2-bracket path above) —
+            # these are typically the tallest passes (crop/strip windows),
+            # where drift can vary along the pass rather than being one
+            # constant offset; see align_pass_to_reference_banded.
+            frames = [rgb_short]
+            exposures = [exp_short]
+            bracket_debugs = [BracketDebug(rgb=rgb_short, exposure=exp_short, align_shift=None)]
+            for e, rgb in bracket_planes:
+                if align_passes:
+                    warn_if_align_unavailable("ME bracket")
+                    warped, shift = align_pass_to_reference_banded(rgb_short, rgb)
+                else:
+                    warped, shift = rgb, None
+                frames.append(warped)
+                exposures.append(e)
+                bracket_debugs.append(BracketDebug(rgb=warped, exposure=e, align_shift=shift))
+                logger.info(
+                    "ME bracket exposure=%d shift=%s",
+                    e,
+                    None if shift is None else (round(shift[0], 3), round(shift[1], 3)),
+                )
+            # Backward-compat field: shift of the top/last bracket (same role
+            # as the 2-bracket case's "shift of the long pass").
+            align_shift_long = bracket_debugs[-1].align_shift
+
+            merged = merge_n_exposures(frames, exposures, alpha=me_alpha, beta=me_beta)
+            primary = merged.rgb
+            fusion_stats = merged.fusion_stats
+            self.last_me_debug = MeScanDebug(
+                rgb_short=rgb_short,
+                rgb_long=frames[-1],
+                exposure_short=exp_short,
+                exposure_long=exposures[-1],
+                fusion_stats=fusion_stats,
+                align_shift_long=align_shift_long,
+                align_shift_ir=align_shift_ir,
+                exposure_proposed=exposure_proposed,
+                exposure_reason=exposure_reason,
+                brackets=bracket_debugs,
             )
 
         # Single film-base makeup on the deliverable only (not on bracket planes).

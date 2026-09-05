@@ -81,5 +81,31 @@ class Model8200iSE(Gl128Common):
     #: Required GL128 knob (V2 is the inverse). Do not omit this field.
     use_slow_final_positioning_feed: bool = False
 
+    #: DPI-keyed ME colour-long ceiling override (SilverFast known-good value
+    #: at 7200 dpi: 42000). Missing DPI entries fall back to
+    #: :attr:`me_long_exposure_ceiling_default`. Single source of truth for
+    #: :func:`pyopticfilm.scan.session_gl128.clamp_me_long_for_dpi` and any
+    #: clamped manual ME override — see :meth:`me_long_exposure_ceiling`.
+    me_long_exposure_ceiling_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: {7200: 42000}
+    )
+    #: Ceiling at any DPI not listed in :attr:`me_long_exposure_ceiling_by_dpi`.
+    me_long_exposure_ceiling_default: int = 85000
+
+    #: Default me_exposure_mode ("adaptive"/"fixed") when a caller passes
+    #: n_brackets > 1 to Scanner.scan() without an explicit override — SE
+    #: has no dedicated real-hardware exposure-selection validation the way
+    #: V2 does (see Model8100V2's override), so content-driven adaptive
+    #: selection is the SE default. An explicit me_exposure_mode always
+    #: wins regardless of this default; n_brackets == 2 is unaffected
+    #: (always "adaptive" unless explicitly overridden, unchanged from
+    #: before this attribute existed).
+    me_default_exposure_mode: str = "adaptive"
+
+    #: Row-banded alignment / luma-only misalignment gate for the 2-bracket
+    #: ME path — see Model8100V2 for why. Not validated on SE hardware;
+    #: keep the original byte-identical 2-bracket path here.
+    me_use_banded_alignment: bool = False
+
 
 MODEL_8200I_SE = Model8200iSE()

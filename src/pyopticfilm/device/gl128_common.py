@@ -261,6 +261,10 @@ GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
         "max_image_lincnt_by_feed2",
         "ladder_feed2_steps",
         "use_slow_final_positioning_feed",
+        "me_default_exposure_mode",
+        "me_long_exposure_ceiling_by_dpi",
+        "me_long_exposure_ceiling_default",
+        "me_use_banded_alignment",
     }
 )
 
@@ -323,6 +327,8 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "me_target_dense_dn",
         "me_dense_percentile",
         "me_black_level",
+        "me_noise_alpha",
+        "me_noise_beta",
         "motor_base_ydpi",
         "optical_resolution",
         "feed_steps_per_inch",
@@ -434,6 +440,13 @@ class Gl128Common:
     me_target_dense_dn: float = 10000.0
     me_dense_percentile: float = 5.0
     me_black_level: float = 0.0
+    #: Provisional Poisson-Gaussian DN^2 noise model for IVW merge fusion
+    #: (var ~= alpha*mean + beta); matches exposure_merge.py's own
+    #: _SNR_ALPHA/_SNR_BETA module defaults. Override per model once a
+    #: real flat-field fit is available (see
+    #: exposure_merge.estimate_pg_noise_params).
+    me_noise_alpha: float = 1.0
+    me_noise_beta: float = 4096.0
     motor_base_ydpi: int = 7200
     optical_resolution: int = 7200
     feed_steps_per_inch: int = 14400
@@ -517,6 +530,16 @@ class Gl128Common:
     def image_exposure(self, *, long_exposure: bool = False) -> int:
         """``REG_EXPOSURE`` for short or long ME bracket."""
         return int(self.exposure_long if long_exposure else self.exposure_short)
+
+    def me_long_exposure_ceiling(self, resolution: int) -> int:
+        """DPI-aware ME colour-long ceiling — single source of truth for
+        adaptive selection, N-bracket scheduling, and any clamped manual
+        override (see :attr:`me_long_exposure_ceiling_by_dpi`)."""
+        return int(
+            self.me_long_exposure_ceiling_by_dpi.get(
+                int(resolution), self.me_long_exposure_ceiling_default
+            )
+        )
 
     def feed_to_scan_steps_for_area(
         self,

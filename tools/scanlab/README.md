@@ -95,9 +95,9 @@ scan-ready GL128 **8100 (V2)** (`07b3:1824`).
 | **Refresh devices** | Re-enumerate USB and rebuild the device list. |
 | **PPI** | Resolutions from the selected model’s `resolutions_dpi` (Scan only; Prescan uses a fixed low dpi). |
 | **IR pass** | After colour Scan, run a second infrared pass (disabled if the model has no IR). |
-| **Multi-exposure (ME)** | GL128 / hardware-tested models: short + adaptive long colour passes (42k–85k safety envelope, capped at 42000 at 7200 dpi; fallback 42000); host SNR/IVW merge into ``rgb``. Bracket planes on ``Scanner.last_me_debug`` (not ``ScanImage``). |
-| **Fixed 42k long (A/B)** | When ME is on: force SilverFast-style long exposure 42000 instead of adaptive selection. |
-| **Manual exposure overrides** | GL128 debug/testing only — see [Manual exposure overrides](#manual-exposure-overrides) below. |
+| **Multi-exposure** | GL128 only — one mode dropdown: **Off** (single-pass Scan), **Dynamic** (short + adaptive long, today's default selection), **Fixed Fast** (short + long pinned to the SilverFast-validated 42000), **N-Exposure** (2–9 geometrically-spaced brackets, host SNR/IVW-fused into `rgb`). See [Multi-exposure modes](#multi-exposure-modes) below. |
+| **Brackets** | N-Exposure only: number of exposures (2–9) fused per scan, geometrically spaced between the short floor and the top (adaptive or fixed) exposure. Grayed out for every other mode. |
+| **Debug: manual exposure override** | Off (default). On: reveals three GL128 debug/testing text fields — see [Manual exposure overrides](#manual-exposure-overrides) below. |
 | **Prescan** | Low-res preview (GL128: 1200 dpi safe window; non-scan-ready: lowest dpi + short Y strip). |
 | **Scan** | Colour scan at the chosen PPI; optional IR and/or ME. Uses the prescan crop when one is set (clamped on non-scan-ready). |
 | **Open capture…** | Open a USBPcap ``.pcap`` / ``.pcapng``. Decodes the largest bulk IN through the selected model’s image pipeline and diffs FEEDL / LINCNT / DPISET vs Lab geometry (Capture tab). |
@@ -106,28 +106,58 @@ scan-ready GL128 **8100 (V2)** (`07b3:1824`).
 The yellow banner states MOCK vs REAL for the current selection (HW gate override
 and USB RGB layout when relevant).
 
+## Multi-exposure modes
+
+The **Multi-exposure** dropdown replaces per-parameter checkboxes with one mode
+selection — the same taxonomy end-user hosts (e.g. NegPy) are expected to
+present, so Scan Lab's behavior here is the reference for that UI, not just a
+debug tool:
+
+| Mode | Passes | `me_exposure_mode` sent |
+|------|--------|--------------------------|
+| **Off** | Single colour pass (today's non-ME `Scan`). | n/a |
+| **Dynamic** | Short + long, long chosen adaptively from short-pass image content (42k–85k envelope, capped at 42000 at 7200 dpi). | `None` — content-driven selection. |
+| **Fixed Fast** | Short + long, long pinned to the SilverFast-validated 42000 instead of adaptive selection. | `"fixed"`. |
+| **N-Exposure** | **Brackets** (2–9) exposures, geometrically spaced between the short floor and the top exposure (itself adaptive or fixed, per the model's own default — see `Model.me_default_exposure_mode`); host SNR/IVW-fused into `rgb`. At 2 brackets this is identical to Dynamic/Fixed Fast. | `None` (model default) unless the underlying model pins one. |
+
+Bracket planes and per-bracket exposure/alignment are available on
+`Scanner.last_me_debug` (not `ScanImage`) regardless of mode — see the
+[Color long](#color-long) tab below for how Scan Lab surfaces them.
+
 ## Manual exposure overrides
 
-Three GL128-only text fields let Scan Lab send an exact `REG_EXPOSURE` value for
-debugging/testing, bypassing the driver's normal soft limits:
+Checking **Debug: manual exposure override** reveals three GL128-only text
+fields that send an exact `REG_EXPOSURE` value for debugging/testing,
+bypassing the driver's normal soft limits — left unchecked (default), none of
+these apply and every scan uses normal driver-derived/clamped exposure:
 
 | Field | Controls | Empty (default) |
 |-------|----------|------------------|
-| **Single-pass exposure** | The retained Scan pass when ME is off. | Model-derived exposure, still clamped to the hardware max. |
-| **ME short exposure** | The ME short pass only. | Model-derived short exposure, still clamped to the hardware max. |
-| **ME long exposure** | The ME long pass only; overrides **Adaptive**/**Fixed 42k long** entirely. | Normal Adaptive/Fixed selection (42k–85k envelope, DPI clamp). |
+| **Single-pass exposure** | The retained Scan pass when Multi-exposure is Off. | Model-derived exposure, still clamped to the hardware max. |
+| **ME short exposure** | The ME short pass only (any mode but Off). | Model-derived short exposure, still clamped to the hardware max. |
+| **ME long exposure** | The ME long/top-bracket pass only; overrides the selected mode entirely. | Normal mode-driven selection (adaptive/fixed envelope, DPI clamp). |
 
-Each field is grayed out when it does not apply to the current pass selection
-(e.g. the single-pass field while ME is on). A value is written to
-`REG_EXPOSURE` **verbatim** — it skips the adaptive selection, the DPI clamp,
-and the hardware-max clamp that apply to normal (automatic) exposure. The only
-limit enforced is the actual 24-bit register range (1–16777215 / `0xFFFFFF`);
-an out-of-range value is rejected with a clear error rather than clamped.
+Each field is additionally grayed out when it does not apply to the current
+mode (e.g. the single-pass field while a Multi-exposure mode is selected). A
+value is written to `REG_EXPOSURE` **verbatim** — it skips the adaptive
+selection, the DPI clamp, and the hardware-max clamp that apply to normal
+(automatic) exposure. The only limit enforced is the actual 24-bit register
+range (1–16777215 / `0xFFFFFF`); an out-of-range value is rejected with a
+clear error rather than clamped.
 
 These overrides exist for hardware/debugging experiments — an excessive value
 can produce severe overexposure/clipping, and the software intentionally does
 not prevent that. They apply only to the retained Scan pass, never to the
-discarded GL128 priming pass.
+discarded GL128 priming pass. Toggling the mode dropdown or unchecking the
+debug disclosure clears whichever field no longer applies, so a value typed
+earlier cannot silently leak into a later scan.
+
+`Scanner.scan()` also accepts `me_target_exposure` — a *clamped* manual
+bracket-target parameter (held inside the same per-model floor/ceiling
+envelope adaptive selection uses) intended for end-user hosts like NegPy.
+Scan Lab does not expose a control for it yet; its debug fields above use the
+unrestricted `me_long_exposure` path instead, which is deliberately kept
+separate and mutually exclusive with `me_target_exposure`.
 
 ## Tabs
 
@@ -151,9 +181,15 @@ saved short plane from disk (e.g. exported earlier or from NegPy).
 
 ### Color long
 
-Long ME exposure frame when **Multi-exposure** was enabled (linear; should look
-brighter than Color short). **Load 16-bit TIFF…** opens a saved long plane. When
-both short and long are loaded (from scan or disk), the **Merged** tab shows the
+Long/top-bracket ME exposure frame when **Multi-exposure** is not Off (linear;
+should look brighter than Color short). For **N-Exposure** scans with more
+than 2 brackets, a **Bracket** dropdown appears above the image so any
+captured exposure — not just the top one — can be viewed (each entry shows its
+exposure and, for non-reference brackets, its alignment shift vs. the short
+plane); it is hidden for 2-bracket scans (Dynamic/Fixed Fast/N-Exposure at
+Brackets=2), where Color long is simply the one long pass. **Load 16-bit
+TIFF…** opens a saved long plane (clears the bracket selector). When both
+short and long are loaded (from scan or disk), the **Merged** tab shows the
 SNR/IVW host merge without rescanning.
 
 ### Merged
@@ -197,6 +233,10 @@ line format; repeated bulk-IN lengths are collapsed as ``×N``).
 - Dividers mark `PRIMING` (or `PRIMING SKIPPED (debug)` when priming is skipped), `PRESCAN`, `SCAN`, `IR`, and `CAPTURE` sections.
 - **Jump** buttons scroll to those dividers when present.
 - **Clear USB log** empties the buffer (Prescan also clears the log).
+- Any ME scan logs a summary line (`ME long exposure: short=... selected=...`);
+  **N-Exposure** scans with more than 2 brackets additionally log one line per
+  bracket (`exposure=... align dx=... dy=...`) — the same data shown in the
+  [Color long](#color-long) tab's bracket dropdown.
 
 Progress for the active pass is shown in the status bar. On the first scan
 after open (GL128), the status bar shows **Priming scanner…** if an explicit

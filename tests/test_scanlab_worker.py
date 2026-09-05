@@ -35,6 +35,20 @@ def test_run_prescan_accepts_positional_signal_args():
     assert keyword_only == []
 
 
+def test_scan_request_has_n_brackets_field():
+    tree = ast.parse(_WORKER.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "ScanRequest":
+            fields = {
+                t.target.id
+                for t in node.body
+                if isinstance(t, ast.AnnAssign) and isinstance(t.target, ast.Name)
+            }
+            assert "n_brackets" in fields
+            return
+    raise AssertionError("ScanRequest not found")
+
+
 def test_request_scan_is_single_object_signal():
     tree = ast.parse(_WORKER.read_text(encoding="utf-8"))
     names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}

@@ -61,6 +61,10 @@ def test_divergent_fields_match_capture_catalog():
     assert MODEL_8100_V2.ladder_feed2_steps == 13128
     assert MODEL_8200I_SE.use_slow_final_positioning_feed is False
     assert MODEL_8100_V2.use_slow_final_positioning_feed is True
+    assert MODEL_8200I_SE.me_default_exposure_mode == "adaptive"
+    assert MODEL_8100_V2.me_default_exposure_mode == "fixed"
+    assert MODEL_8200I_SE.me_use_banded_alignment is False
+    assert MODEL_8100_V2.me_use_banded_alignment is True
     assert MODEL_8200I_SE.lperiod_by_dpi[7200] == 15963
     assert MODEL_8100_V2.lperiod_by_dpi[7200] == 16035
     assert dict(MODEL_8200I_SE.max_image_lincnt_by_feed2) == {

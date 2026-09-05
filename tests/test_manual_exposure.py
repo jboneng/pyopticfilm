@@ -8,8 +8,11 @@ clamp; an explicitly supplied value is written to ``REG_EXPOSURE`` verbatim.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
+from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.select import create_asic
@@ -42,11 +45,15 @@ def _mock_gl128_session() -> tuple[Gl128ScanSession, MockScannerTransport]:
 
 def _mock_gl128_session_armed() -> tuple[Gl128ScanSession, MockScannerTransport]:
     """For full ``run()`` calls — motor moves armed, required by the run() gate."""
+    return _mock_gl128_session_armed_for(MODEL_8200I_SE)
+
+
+def _mock_gl128_session_armed_for(model) -> tuple[Gl128ScanSession, MockScannerTransport]:
     usb = MockScannerTransport()
-    asic = create_asic(GenesysUsbProtocol(usb), MODEL_8200I_SE)
+    asic = create_asic(GenesysUsbProtocol(usb), model)
     asic._motor_moves_enabled = True
     asic.init()
-    return Gl128ScanSession(asic, MODEL_8200I_SE), usb
+    return Gl128ScanSession(asic, model), usb
 
 
 # --- validation ----------------------------------------------------------
@@ -208,6 +215,76 @@ def test_me_long_manual_overrides_exposure_mode(me_exposure_mode):
     assert session.last_me_debug.exposure_reason == "manual-override"
 
 
+# --- ME target: clamped manual bracket selection (NegPy) ------------------
+
+
+def test_me_target_exposure_within_envelope_reaches_register_unchanged():
+    session, _usb = _mock_gl128_session_armed()
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        me_target_exposure=60000,
+    )
+    assert session.last_me_debug.exposure_long == 60000
+    assert session.last_me_debug.exposure_reason == "manual-target"
+
+
+def test_me_target_exposure_below_floor_is_clamped_to_exposure_short():
+    session, _usb = _mock_gl128_session_armed()
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        me_target_exposure=5000,  # below exposure_short=14000
+    )
+    assert session.last_me_debug.exposure_long == MODEL_8200I_SE.exposure_short
+
+
+def test_me_target_exposure_above_dpi_ceiling_is_clamped_at_7200dpi():
+    """Unlike me_long_exposure, me_target_exposure stays inside the DPI ceiling."""
+    session, _usb = _mock_gl128_session_armed()
+    session.run(
+        resolution=7200,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        me_target_exposure=150000,
+    )
+    assert session.last_me_debug.exposure_long == 42000
+
+
+def test_me_target_exposure_clamped_to_v2_flat_ceiling_off_7200dpi():
+    """V2's ceiling is pinned at 42000 for every DPI, not just 7200 (SE's shape)."""
+    session, _usb = _mock_gl128_session_armed_for(MODEL_8100_V2)
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        me_target_exposure=80000,
+    )
+    assert session.last_me_debug.exposure_long == 42000
+
+
+def test_me_target_exposure_and_me_long_exposure_are_mutually_exclusive():
+    scanner = Scanner.open_fake(MODEL_8200I_SE)
+    try:
+        with pytest.raises(ValueError):
+            scanner.scan(
+                resolution=150,
+                area=_TINY,
+                apply_calib=False,
+                me_long_exposure=50000,
+                me_target_exposure=50000,
+            )
+        assert not scanner._asic._initialized
+    finally:
+        scanner.close()
+
+
 def test_me_long_default_none_uses_adaptive_selection():
     session, _usb = _mock_gl128_session_armed()
     session.run(
@@ -300,3 +377,160 @@ def test_scanner_scan_single_pass_exposure_not_implemented_for_non_gl128():
             scanner.scan(resolution=900, area=_TINY, apply_calib=False, single_pass_exposure=5000)
     finally:
         scanner.close()
+
+
+# --- n_brackets (N-way ME) -------------------------------------------------
+
+
+def test_n_brackets_default_matches_two_bracket_debug():
+    session, _usb = _mock_gl128_session_armed()
+    session.run(resolution=1800, area=_TINY, apply_calib=False, multi_exposure=True)
+    debug = session.last_me_debug
+    assert debug.brackets is not None
+    assert len(debug.brackets) == 2
+    assert debug.brackets[0].exposure == debug.exposure_short
+    assert debug.brackets[-1].exposure == debug.exposure_long
+
+
+def test_two_bracket_v2_routes_through_banded_luma_only_merge():
+    """Model8100V2.me_use_banded_alignment routes n_brackets==2 through
+    merge_n_exposures (banded alignment + luma-only misalignment gate),
+    not merge_exposures_result's whole-frame-shift + AND-gated path."""
+    from pyopticfilm.scan import exposure_merge
+
+    session, _usb = _mock_gl128_session_armed_for(MODEL_8100_V2)
+    with (
+        patch.object(
+            exposure_merge, "merge_n_exposures", wraps=exposure_merge.merge_n_exposures
+        ) as spy_n,
+        patch.object(
+            exposure_merge, "merge_exposures_result", wraps=exposure_merge.merge_exposures_result
+        ) as spy_pairwise,
+    ):
+        session.run(resolution=1800, area=_TINY, apply_calib=False, multi_exposure=True)
+    assert spy_n.call_count == 1
+    assert spy_pairwise.call_count == 0
+
+
+def test_two_bracket_se_keeps_original_pairwise_merge():
+    """SE (me_use_banded_alignment=False) is unaffected — still routes
+    n_brackets==2 through merge_exposures_result, byte-identical."""
+    from pyopticfilm.scan import exposure_merge
+
+    session, _usb = _mock_gl128_session_armed()  # defaults to MODEL_8200I_SE
+    with (
+        patch.object(
+            exposure_merge, "merge_n_exposures", wraps=exposure_merge.merge_n_exposures
+        ) as spy_n,
+        patch.object(
+            exposure_merge, "merge_exposures_result", wraps=exposure_merge.merge_exposures_result
+        ) as spy_pairwise,
+    ):
+        session.run(resolution=1800, area=_TINY, apply_calib=False, multi_exposure=True)
+    assert spy_pairwise.call_count == 1
+    assert spy_n.call_count == 0
+
+
+def test_n_brackets_five_captures_five_ascending_exposures():
+    session, _usb = _mock_gl128_session_armed()
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        n_brackets=5,
+    )
+    debug = session.last_me_debug
+    assert debug.brackets is not None
+    assert len(debug.brackets) == 5
+    exposures = [b.exposure for b in debug.brackets]
+    assert exposures == sorted(exposures)
+    assert len(set(exposures)) == 5
+    assert exposures[0] == debug.exposure_short
+    assert exposures[-1] == debug.exposure_long
+
+
+def test_n_brackets_nine_is_accepted():
+    session, _usb = _mock_gl128_session_armed()
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        n_brackets=9,
+    )
+    assert len(session.last_me_debug.brackets) == 9
+
+
+@pytest.mark.parametrize("n_brackets", [1, 10])
+def test_n_brackets_out_of_range_raises(n_brackets):
+    scanner = Scanner.open_fake(MODEL_8200I_SE)
+    try:
+        with pytest.raises(ValueError):
+            scanner.scan(
+                resolution=1800,
+                area=_TINY,
+                apply_calib=False,
+                multi_exposure=True,
+                n_brackets=n_brackets,
+            )
+    finally:
+        scanner.close()
+
+
+# --- n_brackets model-aware exposure-mode default --------------------------
+#
+# n_brackets > 2 with no explicit me_exposure_mode defers to
+# Model.me_default_exposure_mode: "fixed" (pinned to the one
+# real-hardware-validated exposure) on the 8100 V2, "adaptive" on the SE
+# (no dedicated N-bracket hardware validation for SE yet). n_brackets == 2
+# is unaffected either way — always "adaptive" by default, unchanged.
+
+
+def test_n_brackets_v2_defaults_to_fixed_when_unset():
+    session, _usb = _mock_gl128_session_armed_for(MODEL_8100_V2)
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        n_brackets=5,
+    )
+    debug = session.last_me_debug
+    assert debug.exposure_reason == "fixed"
+    assert debug.exposure_long == 42000
+
+
+def test_n_brackets_se_defaults_to_adaptive_when_unset():
+    session, _usb = _mock_gl128_session_armed_for(MODEL_8200I_SE)
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        n_brackets=5,
+    )
+    debug = session.last_me_debug
+    assert debug.exposure_reason != "fixed"
+
+
+def test_n_brackets_two_v2_still_defaults_to_adaptive():
+    """n_brackets == 2 is unaffected by the model default — unchanged behavior."""
+    session, _usb = _mock_gl128_session_armed_for(MODEL_8100_V2)
+    session.run(resolution=1800, area=_TINY, apply_calib=False, multi_exposure=True)
+    debug = session.last_me_debug
+    assert debug.exposure_reason != "fixed"
+
+
+def test_n_brackets_explicit_mode_overrides_v2_default():
+    session, _usb = _mock_gl128_session_armed_for(MODEL_8100_V2)
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        n_brackets=5,
+        me_exposure_mode="adaptive",
+    )
+    debug = session.last_me_debug
+    assert debug.exposure_reason != "fixed"

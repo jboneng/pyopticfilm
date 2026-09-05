@@ -13,6 +13,16 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class BracketDebug:
+    """One captured exposure bracket (linear, pre-merge)."""
+
+    rgb: np.ndarray
+    exposure: int
+    #: Shift into bracket 0's frame (``None`` for bracket 0 itself).
+    align_shift: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
 class MeScanDebug:
     """Bracket planes and IVW stats from a GL128 ME scan.
 
@@ -32,3 +42,8 @@ class MeScanDebug:
     exposure_proposed: int | None = None
     #: Why ``exposure_long`` was chosen (adaptive / clamped / fixed / fallback).
     exposure_reason: str | None = None
+    #: Every captured bracket (ascending exposure), bracket 0 = rgb_short,
+    #: bracket -1 = rgb_long. Populated whenever n_brackets is passed to
+    #: Scanner.scan() (including n_brackets=2); None for legacy call sites
+    #: that never set it.
+    brackets: list[BracketDebug] | None = None

@@ -133,6 +133,10 @@ class Gl128Model(FilmModel, Protocol):
     me_target_dense_dn: float
     me_dense_percentile: float
     me_black_level: float
+    me_noise_alpha: float
+    me_noise_beta: float
+    me_default_exposure_mode: str
+    me_use_banded_alignment: bool
     feed_steps_per_inch: int
     feed_to_reference_steps: int
     feed_to_scan_steps: int
@@ -179,6 +183,38 @@ class Gl128Model(FilmModel, Protocol):
     def lincnt_for_travel_mm(self, travel_mm: float, resolution: int) -> int: ...
 
     def ladder_lincnt_for(self, resolution: int) -> int: ...
+
+
+@runtime_checkable
+class MultiExposureFilmModel(FilmModel, Protocol):
+    """FilmModel + GL128 multi-exposure (ME) fields.
+
+    Not every FilmModel has a colour-long ME pass (GL845 models do not), so
+    these cannot live on the base Protocol; GL128-only session/merge code
+    (session_gl128.py, me_exposure.py, exposure_merge.py) should type its
+    ``model`` parameters as this Protocol instead of the bare ``FilmModel``
+    so ME field access is checked rather than relying on
+    ``getattr(model, "...", default)``. See device.model_8200i_se.Model8200iSE
+    for the concrete definitions.
+    """
+
+    exposure_short: int
+    exposure_long: int
+    multi_exposure_factor: int
+    me_adaptive_min_exposure: int
+    me_adaptive_max_exposure: int
+    me_hardware_max_exposure: int
+    me_max_exposure_ratio: float
+    me_long_exposure_ceiling_by_dpi: Mapping[int, int]
+    me_long_exposure_ceiling_default: int
+    me_target_dense_dn: float
+    me_dense_percentile: float
+    me_black_level: float
+    me_default_exposure_mode: str
+    me_noise_alpha: float
+    me_noise_beta: float
+
+    def me_long_exposure_ceiling(self, resolution: int) -> int: ...
 
 
 @runtime_checkable

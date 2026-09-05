@@ -6,14 +6,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread
-from PyQt6.QtGui import QIntValidator, QTextCursor
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -52,7 +51,7 @@ from tools.scanlab.capture_pcap import (
     motor_register_diff,
 )
 from tools.scanlab.forensic_tab import ForensicTabPage
-from tools.scanlab.widgets import ImageTabPage
+from tools.scanlab.widgets import ImageTabPage, MeControls, MeMode
 from tools.scanlab.worker import ScanRequest, ScanWorker
 
 
@@ -69,6 +68,9 @@ class ScanLabWindow(QMainWindow):
         self._me_debug = None
         self._loaded_me_short = None
         self._loaded_me_long = None
+        #: Plane per MeScanDebug.brackets entry, indexed by bracket_selector.
+        self._bracket_planes: list = []
+        self._bracket_dpi: int | None = None
         self._last_prescan_dpi: int | None = None
         self._pending_crop_meta: dict | None = None
         self._pending_crop_norm: tuple[float, float, float, float] | None = None
@@ -158,59 +160,9 @@ class ScanLabWindow(QMainWindow):
         self.ir_pass = QCheckBox("IR pass (second scan)")
         form.addWidget(self.ir_pass)
 
-        self.me_pass = QCheckBox("Multi-exposure (ME)")
-        form.addWidget(self.me_pass)
-
-        self.me_fixed_long = QCheckBox("Fixed 42k long (A/B)")
-        self.me_fixed_long.setToolTip(
-            "When ME is on, force SilverFast-style long exposure 42000 "
-            "instead of frame-adaptive selection (42k–85k)."
-        )
-        self.me_fixed_long.setEnabled(False)
-        form.addWidget(self.me_fixed_long)
-
-        # Manual exposure overrides (GL128 debug/testing only): empty means
-        # normal driver behavior; a value bypasses the driver's soft
-        # adaptive/hardware-max clamps and is written to REG_EXPOSURE as-is
-        # (still limited to the 24-bit register range, 1..0xFFFFFF).
-        self._exposure_validator = QIntValidator(1, MAX_EXPOSURE_REGISTER, self)
-
-        form.addWidget(QLabel("Manual exposure overrides (debug — bypasses safety clamps)"))
-
-        self.single_pass_exposure = QLineEdit()
-        self.single_pass_exposure.setPlaceholderText("auto (non-ME Scan)")
-        self.single_pass_exposure.setValidator(self._exposure_validator)
-        self.single_pass_exposure.setToolTip(
-            "REG_EXPOSURE for a single (non-ME) Scan pass. Empty = normal "
-            "driver-derived exposure with the hardware-max clamp. A value "
-            "here is written verbatim, bypassing that clamp — up to "
-            f"{MAX_EXPOSURE_REGISTER} (0x{MAX_EXPOSURE_REGISTER:06X})."
-        )
-        form.addWidget(self.single_pass_exposure)
-
-        self.me_short_exposure = QLineEdit()
-        self.me_short_exposure.setPlaceholderText("auto (ME short)")
-        self.me_short_exposure.setValidator(self._exposure_validator)
-        self.me_short_exposure.setToolTip(
-            "REG_EXPOSURE for the ME short pass. Empty = model-derived short "
-            "exposure. A value here bypasses the hardware-max clamp."
-        )
-        self.me_short_exposure.setEnabled(False)
-        form.addWidget(self.me_short_exposure)
-
-        self.me_long_exposure = QLineEdit()
-        self.me_long_exposure.setPlaceholderText("auto (ME long)")
-        self.me_long_exposure.setValidator(self._exposure_validator)
-        self.me_long_exposure.setToolTip(
-            "REG_EXPOSURE for the ME long pass. Empty = normal Adaptive/Fixed "
-            "selection (see Fixed 42k long above). A value here overrides "
-            "Adaptive/Fixed entirely, skips the DPI/adaptive/hardware-max "
-            "clamps, and is written verbatim."
-        )
-        self.me_long_exposure.setEnabled(False)
-        form.addWidget(self.me_long_exposure)
-
-        self.me_pass.toggled.connect(self._on_me_pass_toggled)
+        self.me_controls = MeControls()
+        form.addWidget(self.me_controls)
+        self.me_controls.changed.connect(self._on_me_controls_changed)
 
         self.banner = QLabel()
         self.banner.setWordWrap(True)
@@ -236,6 +188,23 @@ class ScanLabWindow(QMainWindow):
         self.prescan_view = ImageTabPage(default_stem="prescan", allow_crop=True)
         self.scan_view = ImageTabPage(default_stem="color_short", allow_load=True)
         self.me_long_view = ImageTabPage(default_stem="color_long", allow_load=True)
+        # Bracket selector shown above the "Color long"/"Brackets" tab —
+        # surfaces MeScanDebug.brackets (every captured exposure, not just
+        # the top one) for N-Exposure scans instead of only ever showing
+        # the last bracket. Hidden (1 item) for n_brackets==2 / no debug.
+        self.bracket_selector_row = QWidget()
+        bracket_row_layout = QHBoxLayout(self.bracket_selector_row)
+        bracket_row_layout.setContentsMargins(4, 4, 4, 0)
+        bracket_row_layout.addWidget(QLabel("Bracket"))
+        self.bracket_selector = QComboBox()
+        self.bracket_selector.currentIndexChanged.connect(self._on_bracket_selected)
+        bracket_row_layout.addWidget(self.bracket_selector, 1)
+        self.bracket_selector_row.setVisible(False)
+        self.me_long_container = QWidget()
+        me_long_layout = QVBoxLayout(self.me_long_container)
+        me_long_layout.setContentsMargins(0, 0, 0, 0)
+        me_long_layout.addWidget(self.bracket_selector_row)
+        me_long_layout.addWidget(self.me_long_view)
         self.merged_view = ImageTabPage(default_stem="merged")
         self.ir_view = ImageTabPage(default_stem="ir")
         self.capture_diff = QPlainTextEdit()
@@ -273,7 +242,7 @@ class ScanLabWindow(QMainWindow):
 
         tabs.addTab(self.prescan_view, "Prescan")
         tabs.addTab(self.scan_view, "Color short")
-        tabs.addTab(self.me_long_view, "Color long")
+        tabs.addTab(self.me_long_container, "Color long")
         tabs.addTab(self.merged_view, "Merged")
         tabs.addTab(self.ir_view, "IR")
         tabs.addTab(self.capture_diff, "Capture")
@@ -374,13 +343,7 @@ class ScanLabWindow(QMainWindow):
         if not self.ir_pass.isEnabled():
             self.ir_pass.setChecked(False)
         is_gl128 = getattr(target.model, "asic", "") == "GL128"
-        self.me_pass.setEnabled(is_gl128)
-        if not is_gl128:
-            self.me_pass.setChecked(False)
-        self.me_fixed_long.setEnabled(is_gl128 and self.me_pass.isChecked())
-        if not self.me_fixed_long.isEnabled():
-            self.me_fixed_long.setChecked(False)
-        self._sync_manual_exposure_enabled()
+        self.me_controls.set_gl128_enabled(is_gl128)
         self._update_me_tabs_visible()
         self._refresh_banner()
         self.prescan_view.clear_crop()
@@ -475,32 +438,11 @@ class ScanLabWindow(QMainWindow):
             msg += f"; IR {self._format_align_shift(ir_align)}"
         return msg
 
-    def _on_me_pass_toggled(self, checked: bool) -> None:
-        checked = bool(checked)
-        self.me_fixed_long.setEnabled(checked and self.me_pass.isEnabled())
-        if not checked:
-            self.me_fixed_long.setChecked(False)
-        self._sync_manual_exposure_enabled()
-        # ME on/off changes which override applies — drop the one that no
-        # longer makes sense rather than leaving a hidden value to surprise
-        # a later scan.
-        stale = (self.me_short_exposure, self.me_long_exposure) if not checked else (self.single_pass_exposure,)
-        for edit in stale:
-            edit.clear()
+    def _on_me_controls_changed(self) -> None:
+        """MeControls owns its own enable-cascade (mode -> brackets/manual
+        override fields) internally; this only needs to react to whatever
+        else in the window depends on "what ME mode is selected"."""
         self._update_me_tabs_visible()
-
-    def _sync_manual_exposure_enabled(self) -> None:
-        """Manual overrides only apply to the pass they name — gray out the rest."""
-        me_active = self.me_pass.isEnabled() and self.me_pass.isChecked()
-        self.single_pass_exposure.setEnabled(self.me_pass.isEnabled() and not me_active)
-        self.me_short_exposure.setEnabled(me_active)
-        self.me_long_exposure.setEnabled(me_active)
-
-    def _manual_exposure_value(self, edit: QLineEdit) -> int | None:
-        if not edit.isEnabled():
-            return None
-        text = edit.text().strip()
-        return int(text) if text else None
 
     def _default_dpi(self) -> int:
         data = self.ppi.currentData()
@@ -552,6 +494,7 @@ class ScanLabWindow(QMainWindow):
             return
 
         self._me_debug = None
+        self._clear_bracket_selector()
         short = self._loaded_me_short
         long = self._loaded_me_long
 
@@ -598,8 +541,8 @@ class ScanLabWindow(QMainWindow):
 
     def _update_me_tabs_visible(self) -> None:
         has_me_result = self._me_planes_ready()
-        me = (self.me_pass.isEnabled() and self.me_pass.isChecked()) or has_me_result
-        idx_long = self.tabs.indexOf(self.me_long_view)
+        me = self.me_controls.me_pass_enabled() or has_me_result
+        idx_long = self.tabs.indexOf(self.me_long_container)
         idx_merged = self.tabs.indexOf(self.merged_view)
         if idx_long >= 0:
             self.tabs.setTabVisible(idx_long, me)
@@ -721,7 +664,8 @@ class ScanLabWindow(QMainWindow):
             if decoded.color_me is not None:
                 rgb_me, geo = decoded.color_me
                 self.me_long_view.set_rgb(rgb_me, dpi=geo.resolution, auto_level=True)
-                self.me_pass.setChecked(True)
+                if self.me_controls.mode() == MeMode.OFF:
+                    self.me_controls.set_mode(MeMode.DYNAMIC)
                 self._update_me_tabs_visible()
             else:
                 self.me_long_view.set_rgb(None)
@@ -942,9 +886,7 @@ class ScanLabWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Ok:
                 return
         try:
-            single_pass_exposure = self._manual_exposure_value(self.single_pass_exposure)
-            me_short_exposure = self._manual_exposure_value(self.me_short_exposure)
-            me_long_exposure = self._manual_exposure_value(self.me_long_exposure)
+            manual = self.me_controls.manual_exposure_kwargs()
         except ValueError:
             QMessageBox.warning(
                 self,
@@ -980,15 +922,20 @@ class ScanLabWindow(QMainWindow):
                 target=target,
                 dpi=dpi,
                 ir_pass=self.ir_pass.isChecked(),
-                me_pass=self.me_pass.isChecked(),
+                me_pass=self.me_controls.me_pass_enabled(),
                 apply_calib=self.apply_calib.isChecked(),
-                me_exposure_mode="fixed" if self.me_fixed_long.isChecked() else "adaptive",
-                single_pass_exposure=single_pass_exposure,
-                me_short_exposure=me_short_exposure,
-                me_long_exposure=me_long_exposure,
+                # None (not "adaptive") for Dynamic/N-Exposure: lets
+                # n_brackets > 2 defer to the model's own default (8100 V2:
+                # fixed; 8200i SE: adaptive) instead of forcing "adaptive"
+                # regardless of model. Behaviorally identical to explicit
+                # "adaptive" at n_brackets == 2, since that model default is
+                # always "adaptive" there too.
+                me_exposure_mode=self.me_controls.me_exposure_mode_kwarg(),
                 gl128_prime=self._gl128_prime_arg(),
                 crop_norm=crop,
                 scan_kw=scan_kw,
+                n_brackets=self.me_controls.n_brackets_value(),
+                **manual,
             )
         )
 
@@ -1066,6 +1013,55 @@ class ScanLabWindow(QMainWindow):
             line += f" ({reason})"
         self._append_usb(line)
         self.statusBar().showMessage(line)
+        # Per-bracket exposure + align_shift (populated for every ME scan,
+        # not just N-Exposure — see MeScanDebug.brackets). At n_brackets==2
+        # this duplicates the short/long line above, so only log it once
+        # there is a genuinely intermediate bracket to see.
+        brackets = getattr(debug, "brackets", None)
+        if brackets and len(brackets) > 2:
+            self._append_usb(f"ME brackets ({len(brackets)}):")
+            for i, b in enumerate(brackets):
+                shift = self._format_align_shift(b.align_shift) if b.align_shift else "ref"
+                self._append_usb(f"  [{i}] exposure={b.exposure} {shift}")
+
+    def _populate_bracket_selector(self, debug, *, dpi: int) -> None:
+        """Fill the "Color long" tab's bracket dropdown from
+        MeScanDebug.brackets so any captured exposure is viewable, not just
+        the top one — surfaces data every ME scan already collects
+        (session_gl128.py populates it for n_brackets==2 as well) but the
+        UI previously never read."""
+        self._bracket_dpi = dpi
+        brackets = getattr(debug, "brackets", None)
+        self.bracket_selector.blockSignals(True)
+        self.bracket_selector.clear()
+        if brackets:
+            for i, b in enumerate(brackets):
+                role = " (short)" if i == 0 else " (top)" if i == len(brackets) - 1 else ""
+                self.bracket_selector.addItem(f"[{i}] {b.exposure}{role}", i)
+            self._bracket_planes = [b.rgb for b in brackets]
+        else:
+            # Legacy/no-brackets debug: fall back to the single long plane.
+            self.bracket_selector.addItem(f"long {debug.exposure_long}", 0)
+            self._bracket_planes = [debug.rgb_long]
+        self.bracket_selector.blockSignals(False)
+        self.bracket_selector_row.setVisible(len(self._bracket_planes) > 2)
+        self.bracket_selector.setCurrentIndex(len(self._bracket_planes) - 1)
+        self._on_bracket_selected(len(self._bracket_planes) - 1)
+
+    def _clear_bracket_selector(self) -> None:
+        self._bracket_planes = []
+        self.bracket_selector.blockSignals(True)
+        self.bracket_selector.clear()
+        self.bracket_selector.blockSignals(False)
+        self.bracket_selector_row.setVisible(False)
+        self.me_long_view.set_rgb(None)
+
+    def _on_bracket_selected(self, index: int) -> None:
+        if not self._bracket_planes or not (0 <= index < len(self._bracket_planes)):
+            return
+        self.me_long_view.set_rgb(
+            self._bracket_planes[index], dpi=self._bracket_dpi, auto_level=False
+        )
 
     def _on_scan_ready(self, image: ScanImage) -> None:
         self._last_scan = image
@@ -1078,7 +1074,7 @@ class ScanLabWindow(QMainWindow):
         debug = self._me_debug
         if debug is not None:
             self.scan_view.set_rgb(debug.rgb_short, dpi=image.dpi, auto_level=False)
-            self.me_long_view.set_rgb(debug.rgb_long, dpi=image.dpi)
+            self._populate_bracket_selector(debug, dpi=image.dpi)
             self.merged_view.set_rgb(image.rgb, dpi=image.dpi, auto_level=False)
             stats = debug.fusion_stats
             if stats is not None:
@@ -1096,7 +1092,7 @@ class ScanLabWindow(QMainWindow):
                 self.merged_view.set_caption("Merge: SNR / IVW")
         else:
             self.scan_view.set_rgb(image.rgb, dpi=image.dpi)
-            self.me_long_view.set_rgb(None)
+            self._clear_bracket_selector()
             self.merged_view.set_rgb(None)
             self.merged_view.set_caption("")
         if image.ir is not None:
@@ -1199,11 +1195,9 @@ class ScanLabWindow(QMainWindow):
             self._current_target() is not None
             and getattr(self._current_target().model, "asic", "") == "GL128"
         )
-        self.me_pass.setEnabled(not busy and is_gl128)
-        self.me_fixed_long.setEnabled(
-            not busy and is_gl128 and self.me_pass.isChecked()
-        )
-        self._sync_manual_exposure_enabled()
+        # Temporary (busy) disable only — do not reset mode the way
+        # set_gl128_enabled(False) would on an actual device change.
+        self.me_controls.setEnabled(not busy and is_gl128)
         self.run_mock.setEnabled(not busy)
         self.override_hw_gate.setEnabled(not busy)
         self.apply_calib.setEnabled(not busy)
