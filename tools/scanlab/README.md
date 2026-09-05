@@ -216,7 +216,18 @@ per model or shared across the GL128 family). Sub-pages:
 - **Live timeline** — plain-text scrolling log of every decoded USB event.
 - **Timeline** — a graphical, colour-lane timeline (per event kind) with
   click-to-inspect; the Event Inspector shows raw bytes, decoded fields,
-  and the matching register's catalog meaning together.
+  and the matching register's catalog meaning together. A legend above the
+  graph explains every lane colour, the anomaly severity markers, and the
+  feed-timing span colour. Below the axis, duration brackets mark each
+  positioning feed — labelled with the slope table actually uploaded for it
+  (**FAST**/**SLOW**/**CUSTOM**, identified by comparing the raw AHB upload
+  payload byte-for-byte against the known tables) and how long the motor was
+  enabled for that feed — above a Motor/Lamp on-off state band. A toolbar
+  label reports the run's total recorded duration. A **Known/Unknown
+  values** panel alongside the graph lists every distinct register value
+  the run touched (slope table per feed, LPERIOD, EXPOSURE, pixel clock)
+  next to any register addresses seen with no catalog entry to explain
+  them, so unrecognized traffic stays visible instead of silently dropped.
 - **Reference** — every known status bit and register, filterable, rows
   coloured by confidence; a register flagged with a hardware-safety note
   (e.g. the FEEDL positioning-feed slope tables, or the 8100 V2 feed-probe
@@ -225,7 +236,9 @@ per model or shared across the GL128 family). Sub-pages:
   Timeline tab and reports how many events in the currently loaded run
   reference that register.
 - **Run browser** — saved run list, baseline/compare, milestones and
-  anomalies for a selected run, and Wireshark/USBPcap import.
+  anomalies for a selected run, and Wireshark/USBPcap import. The exported
+  AI bug report includes a **Positioning & timing** section listing the
+  feed-timing, LPERIOD, EXPOSURE, and pixel-clock milestones for the run.
 
 Regenerate the standalone markdown catalog (`docs/register-reference.md`)
 with `python -m tools.register_reference` after editing the catalog.
