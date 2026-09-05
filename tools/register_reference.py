@@ -433,22 +433,33 @@ REGISTERS: tuple[RegisterEntry, ...] = (
     ),
     RegisterEntry(
         addr="0x28-0x2A",
-        name="REG_LPERIOD — V2 7200dpi discrepancy (unresolved)",
+        name="REG_LPERIOD — V2 7200dpi discrepancy (resolved 2026-09-06)",
         asic=AsicFamily.GL128,
         scope=(SCOPE_8100_V2,),
         meaning=(
-            "Two independent V2 captures show LPERIOD=15914 and LPERIOD=15999 "
-            "at 7200 dpi — disagreeing with each other by 85, and both "
-            "disagreeing with the shipped constant of 16035 (see the "
-            "CONFIRMED entry above). The discrepancy itself is confirmed; "
-            "which value (if any of the three) is authoritative for all V2 "
-            "units is not resolved."
+            "Previously SUSPECTED: two independent V2 captures showed "
+            "LPERIOD=15914 and LPERIOD=15999 at 7200 dpi, disagreeing with "
+            "each other by 85 and both disagreeing with the shipped "
+            "constant of 16035 (see the CONFIRMED entry above). Resolved "
+            "by a third, independent capture set (2026-09-05, 7 sessions, "
+            "vendor SilverFast driver): LPERIOD=16035 reproduced identically "
+            "at three separate occurrences — a standalone full-frame 7200dpi "
+            "scan, and both brackets of a multi-exposure 7200dpi scan — each "
+            "independently cross-checked against the raw USB register write "
+            "by hand. The disputing 15914/15999 readings do not reproduce "
+            "under this fresh, disinterested capture set. Kept as SUSPECTED "
+            "history rather than deleted, per this catalog's convention of "
+            "keeping both sides of a resolved contradiction."
         ),
-        confidence=Confidence.SUSPECTED,
+        confidence=Confidence.CONFIRMED,
         citations=_c(
-            "Independent capture analysis, register-program-by-dpi extraction "
-            "(register snapshot at the start of each capture's main 7200dpi "
-            "image pass, two separate capture files)"
+            "Prior dispute: independent capture analysis, register-program-"
+            "by-dpi extraction (two separate capture files, LPERIOD=15914 "
+            "and 15999)",
+            "Resolution: TobbyTravel/pyopticfilm_captures branch "
+            "add-8100-v2-captures, 04_color_7200.pcapng frames 1673/3219 and "
+            "07_multi_exposure.pcapng frames 17745/36509, register 0x28-0x2A "
+            "= 0x003EA3 = 16035 at every occurrence",
         ),
     ),
     RegisterEntry(
@@ -489,20 +500,34 @@ REGISTERS: tuple[RegisterEntry, ...] = (
     ),
     RegisterEntry(
         addr="0x33/0xAF",
-        name="REG_DEPTH_A/REG_DEPTH_B — V2 real-driver pair mismatch",
+        name="REG_DEPTH_A/REG_DEPTH_B — V2 real-driver pairing (corrected 2026-09-06)",
         asic=AsicFamily.GL128,
         scope=(SCOPE_8100_V2,),
         meaning=(
-            "Independent capture analysis: the real vendor driver's V2 "
-            "image pass writes DEPTH_A=0x04/DEPTH_B=0xFF — a pairing that "
-            "matches neither of pyopticfilm's own programmed pairs "
-            "(DEPTH16_A/DEPTH16_B=0x04/0x46, or DEPTH8_A/DEPTH8_B=0x1F/0xFF). "
-            "The register-value observation is solid; whether this causes "
-            "any real image-quality difference is an open, ranked "
-            "hypothesis, not a confirmed causal link."
+            "Previously SUSPECTED as a mismatch: an earlier capture analysis "
+            "claimed the real vendor driver's V2 image pass writes "
+            "DEPTH_A=0x04/DEPTH_B=0xFF, a pairing matching neither of "
+            "pyopticfilm's own programmed pairs. A fresh, independent "
+            "capture set (2026-09-05) contradicts that claim: the real "
+            "driver's V2 image pass writes DEPTH_A=0x1F/DEPTH_B=0xFF — "
+            "exactly pyopticfilm's own DEPTH8_A/DEPTH8_B pair, not a "
+            "mismatch. The shading pass separately writes DEPTH_A=0x04/"
+            "DEPTH_B=0x46 — exactly pyopticfilm's own DEPTH16_A/DEPTH16_B "
+            "pair. Both pairings match cleanly; there is no pairing "
+            "mismatch on V2. (pyopticfilm intentionally scans 16-bit "
+            "regardless of what the vendor driver chooses for its own "
+            "image pass — that design choice is unaffected by this.)"
         ),
-        confidence=Confidence.SUSPECTED,
-        citations=_c("Independent capture analysis, trace-vs-capture register comparison"),
+        confidence=Confidence.CONFIRMED,
+        citations=_c(
+            "Prior claim (contradicted): independent capture analysis, "
+            "trace-vs-capture register comparison",
+            "Resolution: TobbyTravel/pyopticfilm_captures branch "
+            "add-8100-v2-captures, 04_color_7200.pcapng frames 2755/3015 "
+            "(image pass, DEPTH_A=0x1F/DEPTH_B=0xFF) and shading-pass "
+            "snapshot (DEPTH_A=0x04/DEPTH_B=0x46), each cross-checked "
+            "against the raw USB register write by hand",
+        ),
     ),
     RegisterEntry(
         addr="0x37",
@@ -660,6 +685,34 @@ BEHAVIORAL_NOTES: tuple[BehavioralNote, ...] = (
         confidence=Confidence.UNKNOWN,
         citations=_c("gl128.py:1695-1719 (home()/park())"),
         safety_note="A standalone home-seek recipe previously caused grinding when invented. Do not add one without new capture evidence.",
+    ),
+    BehavioralNote(
+        topic="Cancel-during-preview park recipe (V2, matches SE shape)",
+        asic=AsicFamily.GL128,
+        scope=(SCOPE_ALL_GL128,),
+        meaning=(
+            "A third parking scenario, distinct from both entries above "
+            "(AGOHOME-on-image-pass, and the unproven standalone FEEDL=0 "
+            "seek): pressing Cancel partway through a preview/prescan "
+            "operation (not an image pass) triggers a lamp-strobe sequence "
+            "on 0x03 (0x30→0x20→0x10→0x00→0x20→0x30→0x20→0x30), "
+            "then 0x01=0x22 (clear SCAN), then register 0x101 walks "
+            "motor-active→idle/home (0xa5→0xad→0xec). Independently "
+            "confirmed on the 8100 V2 (2026-09-05 capture set) reproducing "
+            "the exact same 8-value strobe sequence, same three register "
+            "addresses (0x01, 0x03, 0x101), and same terminal status walk "
+            "already documented for the 8200i SE. Only difference observed: "
+            "the SCAN-clear write lands mid-strobe on V2 rather than after "
+            "it — cosmetic ordering, not a structural or address difference."
+        ),
+        confidence=Confidence.CONFIRMED,
+        citations=_c(
+            "8200i SE: pyopticfilm_captures 8200i-se/08_midtravel_home session",
+            "8100 V2: TobbyTravel/pyopticfilm_captures branch "
+            "add-8100-v2-captures, 05_midtravel_home.pcapng frames "
+            "4549-4789, each write cross-checked against the raw USB "
+            "register write by hand",
+        ),
     ),
     BehavioralNote(
         topic="feed_steps_for_mm()",
