@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Frozen 8200i SE slope-table feed order — do not retarget to match new code."""
+"""Frozen 8200i SE slope-table feed order — do not retarget without fresh capture evidence."""
 
 from __future__ import annotations
 
-from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.select import create_asic
 from pyopticfilm.device.tables_8200i_se import SLOPE_TABLE_FAST, SLOPE_TABLE_SLOW
@@ -33,14 +32,8 @@ def _pack(words: tuple[int, ...]) -> bytes:
     return bytes(out)
 
 
-def test_se_slow_final_feed_flag_is_false():
-    """SE must keep slow-then-fast positioning (V2 is the inverse)."""
-    assert MODEL_8200I_SE.use_slow_final_positioning_feed is False
-    assert MODEL_8100_V2.use_slow_final_positioning_feed is True
-
-
 def test_position_for_full_frame_scan_uses_slow_then_fast_on_se(monkeypatch):
-    """SE SilverFast: first feed SLOW, second FAST (inverse of V2)."""
+    """SE SilverFast: first feed SLOW, second FAST (same order as V2)."""
     usb = MockScannerTransport()
     protocol = GenesysUsbProtocol(usb)
     asic = create_asic(protocol, MODEL_8200I_SE)

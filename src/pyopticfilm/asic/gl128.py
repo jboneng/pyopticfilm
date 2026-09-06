@@ -1412,15 +1412,19 @@ class Gl128:
     def _upload_fast_slopes(self, *, use_slow: bool = False) -> None:
         """Upload the motor ramp to both AHB slope windows.
 
-        Positioning feed pairs are capture-faithful and opposite on the two
-        GL128 models. The 8100 V2 vendor driver uploads ``SLOPE_TABLE_FAST``
-        for the first (reference) feed and ``SLOPE_TABLE_SLOW`` for the
-        second (final positioning) feed; using fast for both caused a real
-        mechanical fault on V2 hardware. SilverFast on the 8200i SE is the
-        inverse: slow then fast (39/39 positioning pairs).
-        :meth:`position_for_full_frame_scan` selects the pair from
-        ``model.use_slow_final_positioning_feed`` (required GL128 knob: True on
-        V2, False on SE). ``feed()`` still uploads the fast ramp.
+        Positioning feed pairs are capture-faithful and identical on both
+        GL128 models: SilverFast uploads ``SLOPE_TABLE_SLOW`` for the first
+        (reference) feed and ``SLOPE_TABLE_FAST`` for the second (final
+        positioning) feed — confirmed byte-exact, independently, on both the
+        8200i SE (39/39 positioning pairs) and the 8100 V2 (two independent
+        2026-09 capture sessions, cross-checked against REG_FEEDL; see
+        jboneng/pyopticfilm#56). An earlier V2 fix shipped the opposite pair
+        (fast-then-slow) based on since-superseded capture analysis; using
+        fast for both — the original, pre-fix bug — caused a real mechanical
+        fault on V2 hardware, which is why this is not something to
+        change without fresh capture evidence.
+        :meth:`position_for_full_frame_scan` always uploads slow-then-fast.
+        ``feed()`` still uploads the fast ramp.
         """
         slope = _u16_table_bytes(SLOPE_TABLE_SLOW if use_slow else SLOPE_TABLE_FAST)
         r = self.registers
@@ -1628,13 +1632,14 @@ class Gl128:
             first,
             second,
         )
-        # Required GL128 knob: V2 True (fast then slow); SE False (slow then fast).
-        use_slow_second = bool(self.model.use_slow_final_positioning_feed)
+        # Vendor-verified on both models: SLOPE_TABLE_SLOW on the first
+        # (reference) feed, SLOPE_TABLE_FAST on the second (final
+        # positioning) feed — see _upload_fast_slopes docstring.
         self._feed_capture(
-            first, timeout_s=timeout_s / 2, require_motion=True, use_slow_slope=not use_slow_second
+            first, timeout_s=timeout_s / 2, require_motion=True, use_slow_slope=True
         )
         self._feed_capture(
-            second, timeout_s=timeout_s / 2, require_motion=True, use_slow_slope=use_slow_second
+            second, timeout_s=timeout_s / 2, require_motion=True, use_slow_slope=False
         )
         end = self.read_status_reliable()
         logger.info("GL128 positioned for scan (status 0x%02x)", end.raw)

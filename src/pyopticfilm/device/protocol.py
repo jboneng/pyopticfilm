@@ -143,7 +143,6 @@ class Gl128Model(FilmModel, Protocol):
     max_image_lincnt_by_feed2: Mapping[int, int]
     ladder_feed2_steps: int
     ladder_lincnt_by_dpi: Mapping[int, int]
-    use_slow_final_positioning_feed: bool
 
     def asic_dpi_for(self, resolution: int) -> int: ...
 

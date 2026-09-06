@@ -545,7 +545,15 @@ REGISTERS: tuple[RegisterEntry, ...] = (
         scope=(SCOPE_ALL_GL128,),
         meaning="24-bit BE feed distance for move-only operations. FEEDL=1 is the acquisition convention (no physical feed); any other value is a positioning feed.",
         confidence=Confidence.CONFIRMED,
-        citations=_c("registers.py Gl128Registers", "gl128.py module docstring"),
+        citations=_c(
+            "registers.py Gl128Registers",
+            "gl128.py module docstring",
+            "Correction: jboneng/pyopticfilm#56, TobbyTravel/pyopticfilm_captures "
+            "branch add-8100-v2-captures 04_color_7200.pcapng frames 2849/2857/"
+            "3023/3031 and 06_ppi_ladder.pcapng frames 3103/3111/3277/3285, "
+            "re-verified byte-exact against REG_FEEDL snapshots with independently"
+            " written extraction code",
+        ),
         safety_note=(
             "HARDWARE INCIDENT (already fixed upstream): applying several "
             "capture-derived register 'corrections' as simultaneous new "
@@ -563,7 +571,25 @@ REGISTERS: tuple[RegisterEntry, ...] = (
             "Lesson: never apply multiple untested register corrections as "
             "simultaneous new defaults on real hardware; isolate one change "
             "at a time and expect the true cause to be somewhere other than "
-            "the changes under test."
+            "the changes under test.\n\n"
+            "CORRECTION (2026-09-06, jboneng/pyopticfilm#56): the FAST-"
+            "first/SLOW-second pairing above is itself wrong. A third, "
+            "independent 2026-09-05 capture set showed the opposite byte "
+            "assignment; re-derived from scratch with fresh extraction code "
+            "(not the tool that produced the original finding) and "
+            "cross-checked against REG_FEEDL in both cited captures: FEEDL="
+            "28292 (first/reference feed) uploads SLOPE_TABLE_SLOW, FEEDL="
+            "13128 (second/final-positioning feed) uploads SLOPE_TABLE_FAST "
+            "— i.e. slow-then-fast, matching the 8200i SE exactly. Both "
+            "prior findings agreed with each other but were both wrong; "
+            "treat repeated agreement between analyses of the same limited "
+            "evidence as weaker corroboration than it feels like. Fix: "
+            "position_for_full_frame_scan() now always uploads slow-then-"
+            "fast and the per-model use_slow_final_positioning_feed flag "
+            "was removed (both models are identical). Not yet confirmed on "
+            "real 8100 V2 hardware — do this one change in isolation and "
+            "verify before combining with anything else, per the lesson "
+            "above."
         ),
     ),
     RegisterEntry(

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """GL128 motor slope-table selection per feed.
 
-8100 V2 vendor captures: first (reference) feed ``SLOPE_TABLE_FAST``, second
-(final positioning) feed ``SLOPE_TABLE_SLOW``. 8200i SE SilverFast captures
-are the inverse (slow then fast; 39/39 positioning pairs). ``feed()`` still
-uploads the fast ramp on both models.
+Both models' vendor captures agree: first (reference) feed
+``SLOPE_TABLE_SLOW``, second (final positioning) feed ``SLOPE_TABLE_FAST``.
+8200i SE SilverFast: 39/39 positioning pairs. 8100 V2: byte-exact and
+REG_FEEDL-cross-checked across two independent 2026-09 capture sessions (see
+jboneng/pyopticfilm#56). ``feed()`` still uploads the fast ramp on both
+models.
 """
 
 from __future__ import annotations
@@ -82,8 +84,8 @@ def test_feed_capture_threads_use_slow_slope_through(monkeypatch):
     asic._upload_fast_slopes.assert_called_once_with(use_slow=False)
 
 
-def test_position_for_full_frame_scan_uses_fast_then_slow_on_v2(monkeypatch):
-    """End-to-end via mock hardware, 8100 V2: first feed FAST, second SLOW."""
+def test_position_for_full_frame_scan_uses_slow_then_fast_on_v2(monkeypatch):
+    """End-to-end via mock hardware, 8100 V2: first feed SLOW, second FAST."""
     usb = MockScannerTransport()
     protocol = GenesysUsbProtocol(usb)
     asic = create_asic(protocol, MODEL_8100_V2)
@@ -95,7 +97,7 @@ def test_position_for_full_frame_scan_uses_fast_then_slow_on_v2(monkeypatch):
     fast = _pack(SLOPE_TABLE_FAST)
     slow = _pack(SLOPE_TABLE_SLOW)
     assert len(ahb_writes) == 4  # 2 windows x 2 feeds
-    assert ahb_writes[0] == fast
-    assert ahb_writes[1] == fast
-    assert ahb_writes[2] == slow
-    assert ahb_writes[3] == slow
+    assert ahb_writes[0] == slow
+    assert ahb_writes[1] == slow
+    assert ahb_writes[2] == fast
+    assert ahb_writes[3] == fast

@@ -17,7 +17,6 @@ def test_v2_identity_and_scan_flags():
     assert MODEL_8100_V2.default_gl128_prime is False
     assert MODEL_8100_V2.strpixel_native_units is True
     assert MODEL_8100_V2.optical_end_inactive_native == 96
-    assert MODEL_8100_V2.use_slow_final_positioning_feed is True
     assert MODEL_8100_V2.feed_to_scan_steps == 13128
     assert MODEL_8100_V2.ladder_feed2_steps == 13128
     assert MODEL_8100_V2.lperiod_by_dpi[7200] == 16035

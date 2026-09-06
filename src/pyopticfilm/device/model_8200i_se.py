@@ -77,9 +77,5 @@ class Model8200iSE(Gl128Common):
     #: Session 13 PPI-ladder second feed (crop origin; PPI-independent).
     ladder_feed2_steps: int = 13560
 
-    #: SilverFast on the SE: slow reference feed, fast final positioning feed.
-    #: Required GL128 knob (V2 is the inverse). Do not omit this field.
-    use_slow_final_positioning_feed: bool = False
-
 
 MODEL_8200I_SE = Model8200iSE()

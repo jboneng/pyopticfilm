@@ -17,7 +17,6 @@ def test_se_identity_and_scan_flags():
     assert MODEL_8200I_SE.default_gl128_prime is False
     assert MODEL_8200I_SE.strpixel_native_units is True
     assert MODEL_8200I_SE.optical_end_inactive_native == 96
-    assert MODEL_8200I_SE.use_slow_final_positioning_feed is False
 
 
 def test_se_ta_window_and_preview_feed2():

@@ -260,7 +260,6 @@ GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
         "lperiod_by_dpi",
         "max_image_lincnt_by_feed2",
         "ladder_feed2_steps",
-        "use_slow_final_positioning_feed",
     }
 )
 
@@ -464,7 +463,6 @@ class Gl128Common:
         lperiod_by_dpi: Mapping[int, int]
         max_image_lincnt_by_feed2: Mapping[int, int]
         ladder_feed2_steps: int
-        use_slow_final_positioning_feed: bool
 
     @property
     def max_area_mm(self) -> tuple[float, float]:

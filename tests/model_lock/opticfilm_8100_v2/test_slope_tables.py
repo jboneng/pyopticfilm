@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Frozen 8100 V2 slope-table feed order — do not retarget to match new code."""
+"""Frozen 8100 V2 slope-table feed order — do not retarget without fresh capture evidence."""
 
 from __future__ import annotations
 
@@ -32,8 +32,13 @@ def _pack(words: tuple[int, ...]) -> bytes:
     return bytes(out)
 
 
-def test_position_for_full_frame_scan_uses_fast_then_slow_on_v2():
-    """V2 vendor driver: first feed FAST, second SLOW (inverse of SE)."""
+def test_position_for_full_frame_scan_uses_slow_then_fast_on_v2():
+    """V2 vendor driver (jboneng/pyopticfilm#56): first feed SLOW, second FAST.
+
+    Byte-exact and REG_FEEDL-cross-checked against two independent 2026-09
+    capture sessions (04_color_7200, 06_ppi_ladder) — same order as the SE.
+    Supersedes the earlier fast-then-slow finding this test previously froze.
+    """
     usb = MockScannerTransport()
     protocol = GenesysUsbProtocol(usb)
     asic = create_asic(protocol, MODEL_8100_V2)
@@ -45,7 +50,7 @@ def test_position_for_full_frame_scan_uses_fast_then_slow_on_v2():
     fast = _pack(SLOPE_TABLE_FAST)
     slow = _pack(SLOPE_TABLE_SLOW)
     assert len(ahb_writes) == 4
-    assert ahb_writes[0] == fast
-    assert ahb_writes[1] == fast
-    assert ahb_writes[2] == slow
-    assert ahb_writes[3] == slow
+    assert ahb_writes[0] == slow
+    assert ahb_writes[1] == slow
+    assert ahb_writes[2] == fast
+    assert ahb_writes[3] == fast

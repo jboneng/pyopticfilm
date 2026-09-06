@@ -101,11 +101,6 @@ class Model8100V2(Gl128Common):
     # V2 uses feed2=13128 for all scan types (top of TA window), not SE's 13560.
     ladder_feed2_steps: int = 13128
 
-    # V2-only: second (final positioning) feed uses SLOPE_TABLE_SLOW.
-    # Two independent V2 captures (plus recovered 04_color_7200.pcapng).
-    # 8200i SE is the inverse (slow reference feed, fast final feed).
-    use_slow_final_positioning_feed: bool = True
-
     def shading_strip_clocks(self, resolution: int, *, dvdset: bool) -> tuple[int, int, int]:
         """Return ``(dummy, clk_a, clk_b)`` for a shading strip.
 
