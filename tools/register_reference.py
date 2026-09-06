@@ -586,9 +586,11 @@ REGISTERS: tuple[RegisterEntry, ...] = (
             "evidence as weaker corroboration than it feels like. Fix: "
             "position_for_full_frame_scan() now always uploads slow-then-"
             "fast and the per-model use_slow_final_positioning_feed flag "
-            "was removed (both models are identical). Not yet confirmed on "
-            "real 8100 V2 hardware — do this one change in isolation and "
-            "verify before combining with anything else, per the lesson "
+            "was removed (both models are identical). CONFIRMED on real "
+            "8100 V2 hardware 2026-09-06 (Scan Lab: park, full-frame "
+            "1200/1800/7200dpi, a crop, ME — no motor fault; NegPy "
+            "end-to-end review clean) — this change was isolated and "
+            "verified before anything else was touched, per the lesson "
             "above."
         ),
     ),
