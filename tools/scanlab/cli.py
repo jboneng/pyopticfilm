@@ -125,19 +125,36 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(json.dumps({"outcome": "error", "notes": str(exc), "run_dir": str(out_dir)}, indent=2))
         return 1
 
+    crop_norm = None
+    if args.crop:
+        parts = [float(v) for v in args.crop.split(",")]
+        if len(parts) != 4:
+            raise SystemExit("--crop expects 'x0,y0,x1,y1'")
+        crop_norm = tuple(parts)
+
+    if args.multi_exposure and args.kind != "scan":
+        raise SystemExit("--multi-exposure requires --kind scan")
+
     try:
         dpi = args.dpi or prescan_resolution(target.model)
-        kw = lab_scan_kwargs(target.model, dpi=dpi, kind=args.kind, crop_norm=None)
+        kw = lab_scan_kwargs(target.model, dpi=dpi, kind=args.kind, crop_norm=crop_norm)
         run.mark_phase(f"CLI: {args.kind} started", {"dpi": dpi, "mock": target.mock, "model": target.model.model})
         image = scanner.scan(
             mode="color",
             apply_calib=args.apply_calib,
             gl128_prime=args.gl128_prime,
+            multi_exposure=args.multi_exposure,
             **kw,
         )
         image_info = {"shape": list(image.rgb.shape), "dpi": image.dpi}
         run.mark_phase(f"CLI: {args.kind} received", image_info)
         outcome = "success"
+        if args.save_tiff_dir:
+            out = Path(args.save_tiff_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            tiff_path = out / f"{args.name}.tiff"
+            image.save_tiff(tiff_path)
+            image_info["tiff_path"] = str(tiff_path)
     except Exception as exc:  # noqa: BLE001
         notes = f"{type(exc).__name__}: {exc}"
         if args.traceback:
@@ -273,6 +290,21 @@ def main(argv: list[str]) -> int:
     )
     p_scan.add_argument("--ai-report", action="store_true", help="also write ai_report.md into the run directory")
     p_scan.add_argument("--traceback", action="store_true", help="include a Python traceback in notes on failure")
+    p_scan.add_argument(
+        "--crop",
+        default=None,
+        help="normalized crop 'x0,y0,x1,y1' (0..1), scan kind only",
+    )
+    p_scan.add_argument(
+        "--multi-exposure",
+        action="store_true",
+        help="2-bracket multi-exposure color scan (scan kind only)",
+    )
+    p_scan.add_argument(
+        "--save-tiff-dir",
+        default=None,
+        help="write the resulting image as a 16-bit TIFF into this directory (human review only, not stored in the run dir)",
+    )
     p_scan.set_defaults(func=cmd_scan)
 
     sub.add_parser("list-runs", help="list recorded runs (RUNS_ROOT) as JSON").set_defaults(func=cmd_list_runs)
