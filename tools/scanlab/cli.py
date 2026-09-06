@@ -19,12 +19,21 @@ checkouts/branches sharing a runs directory, e.g. via a directory
 junction, to compare a PR's behavior against main) can be diffed without
 opening the GUI at all.
 
+``scan``'s ``--crop``/``--multi-exposure`` (``--kind scan`` only) and
+``--save-tiff-dir`` cover the rest of CONTRIBUTING.md's hardware sign-off
+checklist (a crop, ME) and let a human visually confirm output without
+opening the GUI.
+
 Usage:
     python -m tools.scanlab.cli scan --model "OpticFilm 8100 (V2)" --mock \
         --kind prescan --dpi 1200 --name ci-smoke
 
     python -m tools.scanlab.cli scan --model "OpticFilm 8100 (V2)" --real \
         --kind scan --dpi 1800 --ai-report
+
+    python -m tools.scanlab.cli scan --model "OpticFilm 8100 (V2)" --real \
+        --kind scan --dpi 7200 --crop 0.25,0.25,0.75,0.75 --multi-exposure \
+        --save-tiff-dir ./review
 
     python -m tools.scanlab.cli list-models
     python -m tools.scanlab.cli list-runs
@@ -127,6 +136,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     crop_norm = None
     if args.crop:
+        if args.kind != "scan":
+            raise SystemExit("--crop requires --kind scan")
         parts = [float(v) for v in args.crop.split(",")]
         if len(parts) != 4:
             raise SystemExit("--crop expects 'x0,y0,x1,y1'")
