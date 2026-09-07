@@ -20,6 +20,8 @@ import threading
 import time
 from collections.abc import Callable
 
+import numpy as np
+
 from pyopticfilm.asic.gl128 import DEFAULT_IMAGE_USB_PACE_S
 from pyopticfilm.asic.registers import Gl128Registers
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
@@ -27,7 +29,7 @@ from pyopticfilm.device.protocol import AsicDriver, FilmModel
 from pyopticfilm.exceptions import AsicError, ScanCancelled, ScanError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
-from pyopticfilm.scan.exposure_override import validate_manual_exposure
+from pyopticfilm.scan.exposure_override import validate_manual_exposure, validate_n_passes
 from pyopticfilm.scan.geometry import ScanGeometry
 from pyopticfilm.scan.session import DATA_TIMEOUT_S, ScanSession
 from pyopticfilm.usb.device import BULK_MAX_SIZE
@@ -118,6 +120,8 @@ class Gl128ScanSession(ScanSession):
         self._pass_manual: bool = False
         #: Lab-only ME bracket / IVW stats (not on :class:`~pyopticfilm.image.ScanImage`).
         self.last_me_debug = None
+        #: Lab-only Multi-Pass per-slot stacking stats, set when ``n_passes > 1``.
+        self.last_multi_pass_debug = None
         #: IR→short alignment shift from the last multi-pass scan (ME or IR-only).
         self.last_align_shift_ir: tuple[float, float] | None = None
 
@@ -131,6 +135,7 @@ class Gl128ScanSession(ScanSession):
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        n_passes: int = 1,
         **kwargs,
     ):  # type: ignore[no-untyped-def]
         """Refuse unless the ASIC explicitly arms motor moves."""
@@ -140,7 +145,8 @@ class Gl128ScanSession(ScanSession):
         validate_manual_exposure(single_pass_exposure, label="single_pass_exposure")
         validate_manual_exposure(me_short_exposure, label="me_short_exposure")
         validate_manual_exposure(me_long_exposure, label="me_long_exposure")
-        if multi_exposure or (infrared and kwargs.get("mode", "color") == "color"):
+        validate_n_passes(n_passes)
+        if multi_exposure or n_passes > 1 or (infrared and kwargs.get("mode", "color") == "color"):
             if infrared and not getattr(self.model, "supports_infrared", False):
                 raise ScanError(
                     f"{self.model.model} has no infrared channel: IR scans are "
@@ -153,8 +159,10 @@ class Gl128ScanSession(ScanSession):
                 infrared=infrared,
                 align_passes=align_passes,
                 me_exposure_mode=me_exposure_mode,
+                single_pass_exposure=single_pass_exposure,
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
+                n_passes=n_passes,
                 **kwargs,
             )
         if single_pass_exposure is None:
@@ -351,29 +359,46 @@ class Gl128ScanSession(ScanSession):
         infrared: bool = False,
         align_passes: bool = True,
         me_exposure_mode: str = "adaptive",
+        single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        n_passes: int = 1,
     ):
         from pyopticfilm.image import ScanImage
-        from pyopticfilm.pass_align import align_pass_to_reference, estimate_pass_shift, warn_if_align_unavailable
-        from pyopticfilm.scan.exposure_merge import merge_exposures_result
+        from pyopticfilm.pass_align import (
+            align_pass_to_reference,
+            align_pass_to_reference_banded,
+            estimate_pass_shift,
+            warn_if_align_unavailable,
+        )
+        from pyopticfilm.scan.exposure_merge import merge_exposures_result, merge_n_passes
         from pyopticfilm.scan.geometry import compute_geometry
-        from pyopticfilm.scan.me_debug import MeScanDebug
+        from pyopticfilm.scan.me_debug import MeScanDebug, MultiPassDebug, SlotStackDebug
         from pyopticfilm.scan.me_exposure import fixed_long_exposure, select_long_exposure
 
         if mode == "infrared":
             raise ValueError("Use mode='color' with infrared=True for colour+IR scans")
+        if infrared and n_passes > 1:
+            raise ScanError(
+                "n_passes > 1 is not supported together with infrared=True yet "
+                "(each repeat is its own motor cycle and IR stacking is unvalidated) "
+                "— scan infrared separately, or use n_passes=1."
+            )
 
         model = self.model
-        # Manual short override replaces the model default for every early
-        # pass (color_short and, when combined, IR) — same variable those
-        # passes already shared before this feature existed.
-        short_manual = me_short_exposure is not None
-        exp_short = (
-            int(me_short_exposure)
-            if short_manual
-            else int(getattr(model, "exposure_short", model.exposure_lperiod))
-        )
+        # me_short_exposure (ME's own override key) always wins. single_pass_exposure
+        # is a fallback consulted only when n_passes>1 — n_passes==1 never looks at
+        # it here, so every pre-Multi-Pass call shape (ME, IR-combo, or plain) is
+        # byte-identical to before this parameter existed.
+        if me_short_exposure is not None:
+            short_manual = True
+            exp_short = int(me_short_exposure)
+        elif n_passes > 1 and single_pass_exposure is not None:
+            short_manual = True
+            exp_short = int(single_pass_exposure)
+        else:
+            short_manual = False
+            exp_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
         exp_long = int(getattr(model, "exposure_long", exp_short * 3))
         mode_norm = str(me_exposure_mode or "adaptive").strip().lower()
         if mode_norm not in ("adaptive", "fixed"):
@@ -385,47 +410,48 @@ class Gl128ScanSession(ScanSession):
             self.asic.init()
 
         self.last_me_debug = None
+        self.last_multi_pass_debug = None
         self.last_align_shift_ir = None
 
         if geometry is None:
             geometry = compute_geometry(resolution, model=model, area=area)
 
-        # Short (+ optional IR) first; long exposure is chosen after short RGB.
-        early: list[tuple[str, str, int, bool, bool, bool]] = [
-            ("color_short", "transparency", exp_short, False, False, short_manual),
-        ]
-        if infrared:
-            early.append(("ir", "infrared", exp_short, False, False, short_manual))
-        n_pass = len(early) + (1 if multi_exposure else 0)
+        # Total physical motor passes: n_passes repeats of the short/single
+        # slot, one IR pass (only ever paired with n_passes==1, guarded
+        # above), and n_passes repeats of the long slot when doing ME.
+        n_pass = n_passes + (1 if infrared else 0) + (n_passes if multi_exposure else 0)
 
         logger.info(
-            "GL128 multi-pass %ddpi passes=%d me=%s ir=%s me_exposure_mode=%s",
+            "GL128 multi-pass %ddpi passes=%d n_passes=%d me=%s ir=%s me_exposure_mode=%s",
             geometry.resolution,
             n_pass,
+            n_passes,
             multi_exposure,
             infrared,
             mode_norm,
         )
 
-        rgb_short = None
-        rgb_long = None
         ir_plane = None
         exposure_decision = None
-        # Content-aware ENDPIXEL drop from the short plane; reuse for long/IR
-        # so merge/align see matching widths (edge DN differs across exposures).
+        # Content-aware ENDPIXEL drop, discovered on the very first capture of
+        # the whole scan and reused by every later capture — including
+        # Multi-Pass repeats of the same slot — so merge/align see matching
+        # widths (edge DN differs across exposures).
         locked_usb_end_drop: int | None = None
+        pass_idx = 0
 
         def _acquire_pass(
             *,
-            idx: int,
             key: str,
             method: str,
             exposure: int,
             remeasure: bool,
             long_pass: bool,
             manual: bool = False,
-        ):
-            nonlocal rgb_short, rgb_long, ir_plane, locked_usb_end_drop
+        ) -> np.ndarray:
+            nonlocal locked_usb_end_drop, pass_idx
+            idx = pass_idx
+            pass_idx += 1
 
             def _prog(p: float, _i: int = idx) -> None:
                 if progress is not None:
@@ -490,8 +516,7 @@ class Gl128ScanSession(ScanSession):
             planar = getattr(self.asic, "usb_planar_rgb", None)
             if planar is None:
                 planar = bool(getattr(self.model, "usb_planar_rgb", False))
-            # Short discovers the dummy trim; later planes reuse that drop.
-            drop_override = None if key == "color_short" else locked_usb_end_drop
+            drop_override = None if locked_usb_end_drop is None else locked_usb_end_drop
             rgb = self.pipeline.assemble(
                 raw,
                 geometry,
@@ -503,28 +528,85 @@ class Gl128ScanSession(ScanSession):
                 expose_base=False,
                 usb_end_drop=drop_override,
             )
-            if key == "color_short":
+            if locked_usb_end_drop is None:
                 locked_usb_end_drop = int(self.pipeline.last_usb_end_drop)
-                rgb_short = rgb
-            elif key == "color_long":
-                rgb_long = rgb
-            elif key == "ir":
-                ir_plane = self._infrared_plane(rgb)
+            return rgb
 
-        for idx, (key, method, exposure, remeasure, long_pass, manual) in enumerate(early):
-            _acquire_pass(
-                idx=idx,
+        def _capture_stacked_slot(
+            *,
+            key: str,
+            method: str,
+            exposure: int,
+            long_pass: bool,
+            manual: bool,
+            remeasure_first: bool,
+        ) -> tuple[np.ndarray, list[tuple[float, float]], object | None]:
+            """Capture ``key`` ``n_passes`` times, align repeats 2..N to
+            repeat 1 (when ``align_passes``), and stack via
+            :func:`merge_n_passes`. Reduces to a single ``_acquire_pass``
+            call with no stacking at ``n_passes == 1`` — byte-identical to
+            the pre-Multi-Pass single-capture-per-slot behavior. Only the
+            first repeat of a slot honors ``remeasure_first`` (a shading
+            remeasure is about switching exposure levels, not about the
+            repeat count); every later repeat reuses the cached shading."""
+            shifts: list[tuple[float, float]] = []
+            first = _acquire_pass(
                 key=key,
                 method=method,
                 exposure=exposure,
-                remeasure=remeasure,
+                remeasure=remeasure_first,
                 long_pass=long_pass,
                 manual=manual,
             )
+            if n_passes == 1:
+                return first, shifts, None
+            frames = [first]
+            for _ in range(n_passes - 1):
+                frame = _acquire_pass(
+                    key=key,
+                    method=method,
+                    exposure=exposure,
+                    remeasure=False,
+                    long_pass=long_pass,
+                    manual=manual,
+                )
+                if align_passes:
+                    warn_if_align_unavailable(f"Multi-Pass {key} repeat")
+                    aligned, shift = align_pass_to_reference_banded(frames[0], frame)
+                    frames.append(aligned)
+                    shifts.append(shift)
+                else:
+                    frames.append(frame)
+            stacked = merge_n_passes(frames)
+            return stacked.rgb, shifts, stacked.fusion_stats
+
+        # Short (+ optional IR) first; long exposure is chosen after short RGB.
+        rgb_short, short_align_shifts, short_stack_stats = _capture_stacked_slot(
+            key="color_short",
+            method="transparency",
+            exposure=exp_short,
+            long_pass=False,
+            manual=short_manual,
+            remeasure_first=False,
+        )
+
+        if infrared:
+            ir_raw = _acquire_pass(
+                key="ir",
+                method="infrared",
+                exposure=exp_short,
+                remeasure=False,
+                long_pass=False,
+                manual=short_manual,
+            )
+            ir_plane = self._infrared_plane(ir_raw)
 
         assert rgb_short is not None
 
         long_manual = me_long_exposure is not None
+        rgb_long = None
+        long_align_shifts: list[tuple[float, float]] = []
+        long_stack_stats = None
         if multi_exposure:
             if long_manual:
                 # Explicit override: use the caller's value verbatim and skip
@@ -596,14 +678,31 @@ class Gl128ScanSession(ScanSession):
                     exp_long,
                     exposure_decision.reason,
                 )
-            _acquire_pass(
-                idx=len(early),
+            rgb_long, long_align_shifts, long_stack_stats = _capture_stacked_slot(
                 key="color_long",
                 method="transparency",
                 exposure=exp_long,
-                remeasure=True,
                 long_pass=True,
                 manual=long_manual,
+                remeasure_first=True,
+            )
+
+        if n_passes > 1:
+            self.last_multi_pass_debug = MultiPassDebug(
+                short=SlotStackDebug(
+                    n_passes=n_passes,
+                    align_shifts=short_align_shifts,
+                    stack_stats=short_stack_stats,
+                ),
+                long=(
+                    SlotStackDebug(
+                        n_passes=n_passes,
+                        align_shifts=long_align_shifts,
+                        stack_stats=long_stack_stats,
+                    )
+                    if multi_exposure
+                    else None
+                ),
             )
 
         align_shift_long: tuple[float, float] | None = None

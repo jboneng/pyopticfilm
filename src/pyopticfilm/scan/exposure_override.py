@@ -15,6 +15,19 @@ from __future__ import annotations
 #: Largest value representable in the 24-bit REG_EXPOSURE register.
 MAX_EXPOSURE_REGISTER = 0xFFFFFF
 
+#: Largest Multi-Pass repeat count — parity with PR #52's tested N-bracket
+#: ceiling (2-9), even though Multi-Pass is a different mechanism.
+MAX_N_PASSES = 9
+
+
+def validate_n_passes(value: int) -> int:
+    """Return ``value`` unchanged if it is a valid ``n_passes``, else raise."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"n_passes must be an int, got {type(value).__name__}")
+    if not (1 <= value <= MAX_N_PASSES):
+        raise ValueError(f"n_passes must be between 1 and {MAX_N_PASSES}, got {value}")
+    return value
+
 
 def validate_manual_exposure(value: int | None, *, label: str) -> int | None:
     """Return ``value`` unchanged if it is a valid manual exposure, else raise.
