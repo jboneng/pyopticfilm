@@ -163,3 +163,19 @@ def test_single_pass_exposure_ignored_for_n_passes_one_me_combo():
         single_pass_exposure=30000,
     )
     assert session.last_me_debug.exposure_short == MODEL_8200I_SE.exposure_short
+
+
+def test_single_pass_exposure_ignored_for_adaptive_multi_pass_combo():
+    """single_pass_exposure must also stay ignored when n_passes>1 AND
+    multi_exposure=True (Adaptive Multi-Pass) — it's a fallback for the
+    plain Multi-Pass mode only, not a substitute for me_short_exposure."""
+    session, _usb = _mock_gl128_session_armed()
+    session.run(
+        resolution=1800,
+        area=_TINY,
+        apply_calib=False,
+        multi_exposure=True,
+        n_passes=3,
+        single_pass_exposure=30000,
+    )
+    assert session.last_me_debug.exposure_short == MODEL_8200I_SE.exposure_short

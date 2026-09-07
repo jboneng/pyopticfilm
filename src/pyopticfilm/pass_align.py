@@ -335,9 +335,11 @@ def _band_shift_profile(
     Returns ``(dx, dy_per_row)`` — a single representative dx (this
     hardware's drift is near-pure Y-axis; see the module docstring) and a
     length-``h`` array of the fitted dy for every row — or ``None`` when the
-    frame is too short to band usefully, or too few bands produced a
-    trustworthy peak to fit a line at all. Callers should fall back to
-    :func:`estimate_pass_shift` in that case.
+    frame is too short to band usefully, too few bands produced a
+    trustworthy peak to fit a line at all, the fitted profile's span exceeds
+    half the frame height, or the fitted magnitude fails the same
+    :func:`_shift_is_pathological` ceiling the whole-frame path applies.
+    Callers should fall back to :func:`estimate_pass_shift` in that case.
     """
     if not opencv_align_available():
         return None
@@ -366,12 +368,16 @@ def _band_shift_profile(
         return None
     c = np.asarray(centers, dtype=np.float64)
     d = np.asarray(dys, dtype=np.float64)
+    dx_arr = np.asarray(dxs, dtype=np.float64)
     slope, intercept = np.polyfit(c, d, 1)
     resid = np.abs(d - (slope * c + intercept))
     if len(c) > 3 and resid.max() > _ALIGN_BAND_OUTLIER_PX:
         keep = resid < resid.max()
         if keep.sum() >= 3:
             slope, intercept = np.polyfit(c[keep], d[keep], 1)
+            # The dropped band's dx came from the same phase-correlate call
+            # as its untrusted dy — equally suspect, so exclude it too.
+            dx_arr = dx_arr[keep]
     dy_per_row = slope * np.arange(h, dtype=np.float64) + intercept
     # Sanity floor: a fitted drift spanning more than half the frame's own
     # height across the pass isn't a physically plausible feed drift — more
@@ -379,7 +385,10 @@ def _band_shift_profile(
     # than apply it.
     if float(np.max(dy_per_row) - np.min(dy_per_row)) > 0.5 * h:
         return None
-    return float(np.median(dxs)), dy_per_row
+    dx_med = float(np.median(dx_arr))
+    if _shift_is_pathological(dx_med, float(np.max(np.abs(dy_per_row))), w, h):
+        return None
+    return dx_med, dy_per_row
 
 
 def _fill_row_shift_border(out: np.ndarray, dx: float, dy_per_row: np.ndarray) -> np.ndarray:

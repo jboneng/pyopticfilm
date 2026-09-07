@@ -387,19 +387,22 @@ class Gl128ScanSession(ScanSession):
 
         model = self.model
         # me_short_exposure (ME's own override key) always wins. single_pass_exposure
-        # is a fallback consulted only when n_passes>1 — n_passes==1 never looks at
-        # it here, so every pre-Multi-Pass call shape (ME, IR-combo, or plain) is
-        # byte-identical to before this parameter existed.
+        # is a fallback consulted only when n_passes>1 and multi_exposure is off —
+        # ME calls (n_passes==1 or multi_exposure=True) never look at it here, so
+        # every pre-Multi-Pass call shape (ME, IR-combo, or plain) is byte-identical
+        # to before this parameter existed.
         if me_short_exposure is not None:
             short_manual = True
             exp_short = int(me_short_exposure)
-        elif n_passes > 1 and single_pass_exposure is not None:
+        elif n_passes > 1 and not multi_exposure and single_pass_exposure is not None:
             short_manual = True
             exp_short = int(single_pass_exposure)
         else:
             short_manual = False
             exp_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
         exp_long = int(getattr(model, "exposure_long", exp_short * 3))
+        noise_alpha = float(getattr(model, "me_noise_alpha", 1.0))
+        noise_beta = float(getattr(model, "me_noise_beta", 4096.0))
         mode_norm = str(me_exposure_mode or "adaptive").strip().lower()
         if mode_norm not in ("adaptive", "fixed"):
             raise ValueError(
@@ -577,7 +580,7 @@ class Gl128ScanSession(ScanSession):
                     shifts.append(shift)
                 else:
                     frames.append(frame)
-            stacked = merge_n_passes(frames)
+            stacked = merge_n_passes(frames, alpha=noise_alpha, beta=noise_beta)
             return stacked.rgb, shifts, stacked.fusion_stats
 
         # Short (+ optional IR) first; long exposure is chosen after short RGB.
@@ -730,16 +733,14 @@ class Gl128ScanSession(ScanSession):
         fusion_stats = None
         if multi_exposure and rgb_long is not None:
             shift = align_shift_long if align_passes else (0.0, 0.0)
-            alpha = float(getattr(model, "me_noise_alpha", 1.0))
-            beta = float(getattr(model, "me_noise_beta", 4096.0))
             merged = merge_exposures_result(
                 rgb_short,
                 rgb_long,
                 exposure_short=exp_short,
                 exposure_long=exp_long,
                 align_shift=shift,
-                alpha=alpha,
-                beta=beta,
+                alpha=noise_alpha,
+                beta=noise_beta,
             )
             primary = merged.rgb
             fusion_stats = merged.fusion_stats
@@ -762,9 +763,13 @@ class Gl128ScanSession(ScanSession):
             )
 
         # Single film-base makeup on the deliverable only (not on bracket planes).
-        # Headroom cap keeps IVW highlight recovery from being crushed to white.
+        # Headroom cap keeps IVW highlight recovery from being crushed to white —
+        # only relevant when an actual IVW merge happened; plain Multi-Pass
+        # stacking (no ME) should stretch highlights exactly like Single-Pass.
         primary = self.pipeline.expose_film_base(
-            primary, source="me deliverable", preserve_headroom=True
+            primary,
+            source="me deliverable",
+            preserve_headroom=(multi_exposure and rgb_long is not None),
         )
         primary = self.pipeline.clamp_border_highlights(primary)
 

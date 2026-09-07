@@ -413,7 +413,10 @@ def merge_n_passes(
     empirically-checked finding that luma alone (not ANDed/ORed with
     cross-channel spread) is the correct signal for real pass-to-pass drift
     on flat/neutral content, without false-triggering on well-aligned
-    saturated color.
+    saturated color. This guard needs at least 3 frames to be effective: with
+    exactly 2, the median is their mean, so both frames sit equidistant from
+    it and either both get flagged (falling back to a plain mean — the same
+    result as no guard) or neither does.
 
     Frames must already be pairwise-aligned to a common reference (e.g. via
     :func:`pyopticfilm.pass_align.align_pass_to_reference_banded`) — this

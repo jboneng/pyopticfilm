@@ -39,7 +39,9 @@ class SlotStackDebug:
     """Multi-Pass stacking diagnostics for one exposure slot (short or long)."""
 
     n_passes: int
-    #: Repeat i → repeat 0 alignment shift, for repeats 2..N (len == n_passes - 1).
+    #: Repeat i → repeat 0 alignment shift, for repeats 2..N. len == n_passes - 1
+    #: when align_passes=True; empty (unaligned repeats were stacked as-is) when
+    #: align_passes=False.
     align_shifts: list[tuple[float, float]]
     stack_stats: PassMergeStats | None = None
 
