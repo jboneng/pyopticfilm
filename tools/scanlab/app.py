@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -26,7 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from pyopticfilm.image import ScanImage
-from pyopticfilm.scan.exposure_override import MAX_EXPOSURE_REGISTER
+from pyopticfilm.scan.exposure_override import MAX_EXPOSURE_REGISTER, MAX_N_PASSES
 from tools.scanlab.backend import (
     LabTarget,
     device_banner,
@@ -158,6 +159,21 @@ class ScanLabWindow(QMainWindow):
         )
         self.me_fixed_long.setEnabled(False)
         form.addWidget(self.me_fixed_long)
+
+        n_passes_row = QHBoxLayout()
+        n_passes_row.addWidget(QLabel("Multi-Pass N"))
+        self.n_passes = QSpinBox()
+        self.n_passes.setRange(1, MAX_N_PASSES)
+        self.n_passes.setValue(1)
+        self.n_passes.setToolTip(
+            "Repeat the short pass (or, with ME on, both short and long "
+            "passes) this many times and stack them for an SNR gain — no "
+            "new exposure value is ever introduced, only repeats of "
+            "already-validated ones. 1 = off (today's behavior). With ME "
+            "on: Adaptive Multi-Pass. With ME off: Multi-Pass."
+        )
+        n_passes_row.addWidget(self.n_passes)
+        form.addLayout(n_passes_row)
 
         # Manual exposure overrides (GL128 debug/testing only): empty means
         # normal driver behavior; a value bypasses the driver's soft
@@ -375,6 +391,9 @@ class ScanLabWindow(QMainWindow):
         self.me_fixed_long.setEnabled(is_gl128 and self.me_pass.isChecked())
         if not self.me_fixed_long.isEnabled():
             self.me_fixed_long.setChecked(False)
+        self.n_passes.setEnabled(is_gl128)
+        if not self.n_passes.isEnabled():
+            self.n_passes.setValue(1)
         self._sync_manual_exposure_enabled()
         self._update_me_tabs_visible()
         self._refresh_banner()
@@ -968,6 +987,7 @@ class ScanLabWindow(QMainWindow):
                 "crop": list(crop) if crop is not None else None,
                 "ir_pass": self.ir_pass.isChecked(),
                 "me_pass": self.me_pass.isChecked(),
+                "n_passes": self.n_passes.value(),
                 "apply_calib": self.apply_calib.isChecked(),
                 "override_hw_gate": self.override_hw_gate.isChecked(),
             },
@@ -984,6 +1004,7 @@ class ScanLabWindow(QMainWindow):
                 single_pass_exposure=single_pass_exposure,
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
+                n_passes=self.n_passes.value(),
                 crop_norm=crop,
                 scan_kw=scan_kw,
             )
@@ -1196,6 +1217,7 @@ class ScanLabWindow(QMainWindow):
         self.me_fixed_long.setEnabled(
             not busy and is_gl128 and self.me_pass.isChecked()
         )
+        self.n_passes.setEnabled(not busy and is_gl128)
         self._sync_manual_exposure_enabled()
         self.run_mock.setEnabled(not busy)
         self.override_hw_gate.setEnabled(not busy)
