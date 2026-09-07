@@ -183,6 +183,20 @@ if debug is not None:
     print(debug.short.stack_stats.mean_confidence, debug.short.align_shifts)
 ```
 
+**Common scan-mode combinations.** `multi_exposure` and `n_passes` are independent axes; a
+simplified consumer UI typically only needs these four combinations, named as follows:
+
+| Name                       | `multi_exposure` | `me_exposure_mode` | `n_passes` |
+|-----------------------------|:---:|:---:|:---:|
+| Single-Pass                 | `False` | — | `1` |
+| Multi-Pass                  | `False` | — | `2`–`9` |
+| Adaptive Multi-Exposure      | `True`  | `"adaptive"` | `1` |
+| Adaptive Multi-Pass          | `True`  | `"adaptive"` | `2`–`9` |
+
+`me_exposure_mode="fixed"` and the three manual exposure overrides above are lab/debug-only —
+Scan Lab (`tools/scanlab/`) is the reference implementation exposing the full, unrestricted
+parameter set; NegPy is the reference implementation of the simplified 4-combination surface.
+
 Colour + IR in one call (8200i SE; IR after the colour / ME passes):
 
 ```python

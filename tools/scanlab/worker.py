@@ -60,6 +60,7 @@ class ScanRequest:
     me_short_exposure: int | None = None
     me_long_exposure: int | None = None
     n_passes: int = 1
+    align_passes: bool = True
     crop_norm: tuple[float, float, float, float] | None = None
     scan_kw: dict[str, Any] | None = None
 
@@ -349,6 +350,7 @@ class ScanWorker(QObject):
             me_short_exposure=request.me_short_exposure,
             me_long_exposure=request.me_long_exposure,
             n_passes=request.n_passes,
+            align_passes=request.align_passes,
             scan_kw=request.scan_kw,
         )
 
@@ -367,6 +369,7 @@ class ScanWorker(QObject):
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
         n_passes: int = 1,
+        align_passes: bool = True,
         scan_kw: dict[str, Any] | None = None,
     ) -> None:
         self.busy_changed.emit(True)
@@ -416,6 +419,7 @@ class ScanWorker(QObject):
                     me_short_exposure=me_short_exposure,
                     me_long_exposure=me_long_exposure,
                     n_passes=n_passes,
+                    align_passes=align_passes,
                     **scan_kw,
                 )
                 self.me_debug_ready.emit(getattr(scanner, "last_me_debug", None))

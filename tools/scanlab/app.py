@@ -175,6 +175,15 @@ class ScanLabWindow(QMainWindow):
         n_passes_row.addWidget(self.n_passes)
         form.addLayout(n_passes_row)
 
+        self.align_passes = QCheckBox("Align passes")
+        self.align_passes.setChecked(True)
+        self.align_passes.setToolTip(
+            "Align and register each repeat before stacking to correct minor "
+            "mechanical drift between passes. Recommended; disable only to "
+            "inspect raw unaligned stack artifacts."
+        )
+        form.addWidget(self.align_passes)
+
         # Manual exposure overrides (GL128 debug/testing only): empty means
         # normal driver behavior; a value bypasses the driver's soft
         # adaptive/hardware-max clamps and is written to REG_EXPOSURE as-is
@@ -394,6 +403,7 @@ class ScanLabWindow(QMainWindow):
         self.n_passes.setEnabled(is_gl128)
         if not self.n_passes.isEnabled():
             self.n_passes.setValue(1)
+        self.align_passes.setEnabled(is_gl128)
         self._sync_manual_exposure_enabled()
         self._update_me_tabs_visible()
         self._refresh_banner()
@@ -988,6 +998,7 @@ class ScanLabWindow(QMainWindow):
                 "ir_pass": self.ir_pass.isChecked(),
                 "me_pass": self.me_pass.isChecked(),
                 "n_passes": self.n_passes.value(),
+                "align_passes": self.align_passes.isChecked(),
                 "apply_calib": self.apply_calib.isChecked(),
                 "override_hw_gate": self.override_hw_gate.isChecked(),
             },
@@ -1005,6 +1016,7 @@ class ScanLabWindow(QMainWindow):
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
                 n_passes=self.n_passes.value(),
+                align_passes=self.align_passes.isChecked(),
                 crop_norm=crop,
                 scan_kw=scan_kw,
             )
@@ -1218,6 +1230,7 @@ class ScanLabWindow(QMainWindow):
             not busy and is_gl128 and self.me_pass.isChecked()
         )
         self.n_passes.setEnabled(not busy and is_gl128)
+        self.align_passes.setEnabled(not busy and is_gl128)
         self._sync_manual_exposure_enabled()
         self.run_mock.setEnabled(not busy)
         self.override_hw_gate.setEnabled(not busy)
