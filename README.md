@@ -37,6 +37,7 @@ Other OpticFilm models **enumerate and open**: you can read status, turn the lam
 - Color and infrared transparency scans at 150–7200 dpi (ASIC programs at ≥600 dpi; lower PPI shares the 600 dpi register set and is downsampled on the host; infrared is available only on supported hardware)
 - Infrared as a dust plane on `ScanImage.ir` (`mode="infrared"`, or `infrared=True` with colour; 8200i SE only among the hardware-tested set)
 - Multi-exposure (ME) on GL128 hardware-tested models (8200i SE and 8100 V2): short + adaptive long colour passes with host SNR/IVW merge into `ScanImage.rgb` (`multi_exposure=True`); bracket planes via `Scanner.last_me_debug`
+- Multi-Pass on GL128: repeat an already-validated exposure `n_passes` times (1–9) and stack the aligned repeats for an SNR gain — no new exposure/speed value is ever introduced, only repeats of the short pass (`n_passes>1`) or, combined with `multi_exposure=True`, of both the short and long ME passes (Adaptive Multi-Pass); per-slot stacking stats via `Scanner.last_multi_pass_debug`
 - Manual exposure overrides on GL128 (`single_pass_exposure` / `me_short_exposure` / `me_long_exposure`) for testing/debugging: bypass the adaptive/hardware-max clamps and write an exact `REG_EXPOSURE` value (24-bit register range)
 - Optional crop via normalized `area` (`x1, y1, x2, y2` in 0–1)
 - Dark/white shading calibration with on-disk cache (`~/.cache/pyopticfilm/calib_v2.json`)
@@ -159,6 +160,27 @@ image = scanner.scan(
     me_short_exposure=14000,
     me_long_exposure=120000,  # above the normal 42k–85k envelope, on purpose
 )
+```
+
+Multi-Pass (GL128): repeat the short pass (or, with `multi_exposure=True`,
+both the short and long ME passes) `n_passes` times and stack the aligned
+repeats for an SNR gain, without introducing any new exposure or scan-speed
+value. `n_passes=1` (default) is unchanged behavior — the same Single-Pass or
+Adaptive Multi-Exposure scan as today. Per-slot stacking stats (align shifts,
+frames merged, outlier pixels) are on `Scanner.last_multi_pass_debug`:
+
+```python
+# Multi-Pass: 4 repeats of the single exposure, stacked.
+image = scanner.scan(resolution=1800, mode="color", n_passes=4)
+
+# Adaptive Multi-Pass: 4 repeats each of the short AND adaptive-long
+# ME passes, each slot stacked, then fused exactly as today's 2-bracket ME.
+image = scanner.scan(
+    resolution=1800, mode="color", multi_exposure=True, n_passes=4
+)
+debug = scanner.last_multi_pass_debug
+if debug is not None:
+    print(debug.short.stack_stats.mean_confidence, debug.short.align_shifts)
 ```
 
 Colour + IR in one call (8200i SE; IR after the colour / ME passes):
