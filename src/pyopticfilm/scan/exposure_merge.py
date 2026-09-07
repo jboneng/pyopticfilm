@@ -48,9 +48,28 @@ class FusionStats:
 
 
 @dataclass(frozen=True)
+class PassMergeStats:
+    """Diagnostics for :func:`merge_n_passes` (same-exposure frame stacking)."""
+
+    n_frames: int
+    total_pixels: int
+    mean_confidence: float
+    outlier_pixels: int
+    zero_weight_pixels: int
+
+    @property
+    def zero_weight_fraction(self) -> float:
+        return self.zero_weight_pixels / self.total_pixels if self.total_pixels else 0.0
+
+    @property
+    def outlier_fraction(self) -> float:
+        return self.outlier_pixels / self.total_pixels if self.total_pixels else 0.0
+
+
+@dataclass(frozen=True)
 class MergeResult:
     rgb: np.ndarray
-    fusion_stats: FusionStats | None = None
+    fusion_stats: FusionStats | PassMergeStats | None = None
 
 
 def estimate_pg_noise_params(
@@ -368,3 +387,129 @@ def _merge_snr(
         exposure_ratio_used=float(r),
     )
     return out, stats
+
+
+def merge_n_passes(
+    frames: list[np.ndarray],
+    *,
+    alpha: float = _SNR_ALPHA,
+    beta: float = _SNR_BETA,
+) -> MergeResult:
+    """Stack N same-exposure captures for an SNR gain (no exposure fusion).
+
+    Unlike :func:`merge_exposures_result`, every frame here is nominally the
+    *same* exposure/radiometric scale (repeated Multi-Pass captures), so
+    there is no exposure-ratio rescale and no residual-disagreement z-score
+    gate — that machinery exists specifically to fuse *different* exposure
+    levels. Any per-pixel disagreement between aligned repeats is either
+    capture noise or leftover misalignment, not an exposure-fusion problem.
+
+    Per-pixel Poisson-Gaussian inverse-variance weighting (the same noise
+    model and :func:`_smooth_confidence` clip/floor ramp as the pairwise
+    merge) reduces, for same-exposure frames, to a confidence-weighted mean.
+    A lightweight outlier guard additionally zeroes a frame's weight at any
+    pixel where its luma disagrees with the per-pixel median luma across all
+    frames by more than ``_LUMA_DISAGREE_TAU`` — luma-only, per PR #52's
+    empirically-checked finding that luma alone (not ANDed/ORed with
+    cross-channel spread) is the correct signal for real pass-to-pass drift
+    on flat/neutral content, without false-triggering on well-aligned
+    saturated color.
+
+    Frames must already be pairwise-aligned to a common reference (e.g. via
+    :func:`pyopticfilm.pass_align.align_pass_to_reference_banded`) — this
+    function does no alignment of its own.
+
+    Args:
+        frames: >=1 uint16 HxWx3 arrays of the same shape and nominal
+            exposure, already aligned.
+
+    Returns:
+        MergeResult with the stacked uint16 HxWx3 array and PassMergeStats.
+
+    Raises:
+        ValueError: no frames, or mismatched shapes.
+    """
+    if not frames:
+        raise ValueError("merge_n_passes needs >= 1 frame, got 0")
+    ref = np.asarray(frames[0], dtype=np.uint16)
+    if ref.ndim != 3 or ref.shape[2] != 3:
+        raise ValueError(f"expected HxWx3 arrays, got {ref.shape}")
+    for i, f in enumerate(frames[1:], 1):
+        fa = np.asarray(f, dtype=np.uint16)
+        if fa.shape != ref.shape:
+            raise ValueError(
+                f"frame {i} shape {fa.shape} does not match frame 0 shape {ref.shape}"
+            )
+
+    total_pixels = int(ref.shape[0] * ref.shape[1])
+    if len(frames) == 1:
+        return MergeResult(
+            rgb=ref.copy(),
+            fusion_stats=PassMergeStats(
+                n_frames=1,
+                total_pixels=total_pixels,
+                mean_confidence=1.0,
+                outlier_pixels=0,
+                zero_weight_pixels=0,
+            ),
+        )
+
+    h, w = ref.shape[:2]
+    out = np.empty((h, w, 3), dtype=np.uint16)
+    conf_sum = 0.0
+    n_conf = 0
+    zero_count = 0
+    outlier_count = 0
+
+    for y0 in range(0, h, _MERGE_CHUNK_ROWS):
+        y1 = min(h, y0 + _MERGE_CHUNK_ROWS)
+        xs = [np.asarray(f[y0:y1], dtype=np.float32) for f in frames]
+        cs = [
+            _smooth_confidence(x, floor=_SNR_FLOOR, clip_start=_SNR_CLIP_START, clip_end=_SNR_CLIP_END)
+            for x in xs
+        ]
+        lumas = [x.mean(axis=2) for x in xs]
+        luma_median = np.median(np.stack(lumas, axis=0), axis=0)
+
+        weights: list[np.ndarray] = []
+        outlier_any = np.zeros((y1 - y0, w), dtype=bool)
+        for x, c, lum in zip(xs, cs, lumas, strict=True):
+            variance = alpha * np.maximum(x, 0.0) + beta
+            w_i = c / np.maximum(variance, 1e-12)
+            is_outlier = np.abs(lum - luma_median) > _LUMA_DISAGREE_TAU
+            w_i = np.where(is_outlier[..., np.newaxis], 0.0, w_i)
+            outlier_any |= is_outlier
+            weights.append(w_i)
+
+        acc = weights[0] * xs[0]
+        w_sum = weights[0].copy()
+        all_zero_conf = cs[0] <= 1e-6
+        for x, c, w_i in zip(xs[1:], cs[1:], weights[1:], strict=True):
+            acc += w_i * x
+            w_sum += w_i
+            all_zero_conf &= c <= 1e-6
+        merged = acc / np.maximum(w_sum, 1e-12)
+        # Every frame's weight collapsed to zero at a pixel (e.g. all
+        # flagged outlier) — fall back to the plain mean rather than a
+        # near-zero denominator.
+        no_weight = w_sum <= 1e-9
+        if np.any(no_weight):
+            plain_mean = np.mean(np.stack(xs, axis=0), axis=0)
+            merged = np.where(no_weight, plain_mean, merged)
+        merged = np.where(all_zero_conf, 0.0, merged)
+
+        out[y0:y1] = np.clip(merged, 0, 65535).astype(np.uint16)
+        conf_mean_pixel = np.mean(np.stack(cs, axis=0), axis=0)
+        conf_sum += float(conf_mean_pixel.sum())
+        n_conf += int(conf_mean_pixel.size)
+        zero_count += int(np.count_nonzero(np.all(all_zero_conf, axis=-1)))
+        outlier_count += int(np.count_nonzero(outlier_any))
+
+    stats = PassMergeStats(
+        n_frames=len(frames),
+        total_pixels=total_pixels,
+        mean_confidence=conf_sum / max(n_conf, 1),
+        outlier_pixels=outlier_count,
+        zero_weight_pixels=zero_count,
+    )
+    return MergeResult(rgb=out, fusion_stats=stats)
