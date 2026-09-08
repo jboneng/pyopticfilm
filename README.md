@@ -120,8 +120,9 @@ with Scanner.open() as scanner:
 ```
 
 Multi-exposure (GL128 / hardware-tested models): short colour pass, then a
-**frame-adaptive** long pass (default; safety envelope 42k–85k, fallback 42000).
-Use ``me_exposure_mode="fixed"`` for the SilverFast-style fixed 3× long exposure.
+**frame-adaptive** long pass (safety envelope 14k–64k, uniform at every PPI —
+a margin under the AHB per-channel exposure table's 16-bit width; fallback
+42000).
 The SNR/IVW-merged deliverable with film-base makeup is in ``rgb``. Bracket
 planes and fusion stats are on :attr:`~pyopticfilm.scanner.Scanner.last_me_debug`
 (Scan Lab / audit tooling only — not part of the NegPy-facing ``ScanImage``).
@@ -142,15 +143,17 @@ with Scanner.open() as scanner:
 
         save_rgb16_tiff(debug.rgb_short, "short.tif", dpi=image.dpi)
         save_rgb16_tiff(debug.rgb_long, "long.tif", dpi=image.dpi)
-        print(debug.exposure_short, debug.exposure_long)  # e.g. 14000, 42000…85000
+        print(debug.exposure_short, debug.exposure_long)  # e.g. 14000, 42000…64000
         print(debug.exposure_proposed, debug.exposure_reason)
 ```
 
 Manual exposure overrides (GL128; debugging/testing only): send an exact
-``REG_EXPOSURE`` value that bypasses the adaptive selection, DPI clamp, and
-hardware-max clamp above — the value is written verbatim, limited only to the
-24-bit register range (1–``0xFFFFFF``). ``me_long_exposure`` takes precedence
-over ``me_exposure_mode``. All three default to ``None`` (unchanged behavior):
+``REG_EXPOSURE`` value that bypasses adaptive selection and the hardware-max
+clamp above — the value is written verbatim. Two limits still apply: the
+24-bit register range (1–``0xFFFFFF``), and — at oversample == 1 resolutions
+(e.g. 7200 dpi) — the AHB per-channel exposure table's 16-bit width
+(1–65535); either is rejected with a clear error rather than clamped or
+silently corrupted. All three default to ``None`` (unchanged behavior):
 
 ```python
 image = scanner.scan(
@@ -158,7 +161,7 @@ image = scanner.scan(
     mode="color",
     multi_exposure=True,
     me_short_exposure=14000,
-    me_long_exposure=120000,  # above the normal 42k–85k envelope, on purpose
+    me_long_exposure=120000,  # above the normal 14k-64k envelope, on purpose
 )
 ```
 
@@ -186,14 +189,14 @@ if debug is not None:
 **Common scan-mode combinations.** `multi_exposure` and `n_passes` are independent axes; a
 simplified consumer UI typically only needs these four combinations, named as follows:
 
-| Name                       | `multi_exposure` | `me_exposure_mode` | `n_passes` |
-|-----------------------------|:---:|:---:|:---:|
-| Single-Pass                 | `False` | — | `1` |
-| Multi-Pass                  | `False` | — | `2`–`9` |
-| Adaptive Multi-Exposure      | `True`  | `"adaptive"` | `1` |
-| Adaptive Multi-Pass          | `True`  | `"adaptive"` | `2`–`9` |
+| Name                       | `multi_exposure` | `n_passes` |
+|-----------------------------|:---:|:---:|
+| Single-Pass                 | `False` | `1` |
+| Multi-Pass                  | `False` | `2`–`9` |
+| Adaptive Multi-Exposure      | `True`  | `1` |
+| Adaptive Multi-Pass          | `True`  | `2`–`9` |
 
-`me_exposure_mode="fixed"` and the three manual exposure overrides above are lab/debug-only —
+The three manual exposure overrides above are lab/debug-only —
 Scan Lab (`tools/scanlab/`) is the reference implementation exposing the full, unrestricted
 parameter set; NegPy is the reference implementation of the simplified 4-combination surface.
 

@@ -72,7 +72,6 @@ class ScanSession:
         multi_exposure: bool = False,
         infrared: bool = False,
         align_passes: bool = True,
-        me_exposure_mode: str = "adaptive",  # GL128 ME only; ignored here
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,  # GL128 ME only; ignored here
         me_long_exposure: int | None = None,  # GL128 ME only; ignored here

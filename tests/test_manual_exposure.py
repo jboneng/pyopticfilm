@@ -162,8 +162,9 @@ def test_me_long_manual_below_normal_limits_not_raised_to_adaptive_floor():
     assert session.last_me_debug.exposure_long == 5000
 
 
-def test_me_long_manual_skips_dpi_and_hardware_clamp_and_reaches_register():
-    """7200 dpi normally caps ME long at 42000; hardware max is 85000 — go above both."""
+def test_me_long_manual_skips_adaptive_clamp_and_reaches_register():
+    """ME long is normally capped at 64000; manual override reaches the true
+    16-bit AHB exposure table ceiling (65535) verbatim."""
     session, usb = _mock_gl128_session_armed()
     captures: list[tuple[bool, bool, int]] = []
     original_configure = session._configure
@@ -179,29 +180,42 @@ def test_me_long_manual_skips_dpi_and_hardware_clamp_and_reaches_register():
         area=_TINY,
         apply_calib=False,
         multi_exposure=True,
-        me_long_exposure=150000,
+        me_long_exposure=65535,
     )
 
     long_captures = [c for c in captures if c[0]]
     assert long_captures, "expected a long pass to run"
     _long_pass, manual, reg_value = long_captures[-1]
     assert manual is True
-    assert reg_value == 150000
-    assert session.last_me_debug.exposure_long == 150000
+    assert reg_value == 65535
+    assert session.last_me_debug.exposure_long == 65535
     assert session.last_me_debug.exposure_reason == "manual-override"
     assert session.last_me_debug.exposure_proposed is None
 
 
-@pytest.mark.parametrize("me_exposure_mode", ["adaptive", "fixed"])
-def test_me_long_manual_overrides_exposure_mode(me_exposure_mode):
-    """``me_exposure_mode='adaptive'`` + ``me_long_exposure=120000`` -> 120000, not adaptive."""
+def test_me_long_manual_above_16bit_table_raises():
+    """A manual override at oversample=1 (7200 dpi) above the AHB per-channel
+    exposure table's 16-bit width fails loudly instead of silently uploading a
+    wrapped table value inconsistent with REG_EXPOSURE."""
+    session, _usb = _mock_gl128_session_armed()
+    with pytest.raises(ValueError, match="16-bit"):
+        session.run(
+            resolution=7200,
+            area=_TINY,
+            apply_calib=False,
+            multi_exposure=True,
+            me_long_exposure=150000,
+        )
+
+
+def test_me_long_manual_overrides_adaptive_selection():
+    """``me_long_exposure=120000`` -> 120000, not adaptive."""
     session, _usb = _mock_gl128_session_armed()
     session.run(
         resolution=1800,
         area=_TINY,
         apply_calib=False,
         multi_exposure=True,
-        me_exposure_mode=me_exposure_mode,
         me_long_exposure=120000,
     )
     assert session.last_me_debug.exposure_long == 120000
@@ -215,26 +229,11 @@ def test_me_long_default_none_uses_adaptive_selection():
         area=_TINY,
         apply_calib=False,
         multi_exposure=True,
-        me_exposure_mode="adaptive",
     )
     debug = session.last_me_debug
     assert debug.exposure_reason != "manual-override"
     assert debug.exposure_proposed is not None
     assert 14000 <= debug.exposure_long <= MODEL_8200I_SE.me_hardware_max_exposure
-
-
-def test_me_long_default_none_uses_fixed_selection():
-    session, _usb = _mock_gl128_session_armed()
-    session.run(
-        resolution=1800,
-        area=_TINY,
-        apply_calib=False,
-        multi_exposure=True,
-        me_exposure_mode="fixed",
-    )
-    debug = session.last_me_debug
-    assert debug.exposure_reason == "fixed"
-    assert debug.exposure_long == 42000
 
 
 def test_scanner_scan_rejects_invalid_manual_exposure_before_opening_asic():

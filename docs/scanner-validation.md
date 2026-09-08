@@ -58,14 +58,22 @@ Helpers:
 ## GL128 multi-exposure long exposure limits
 
 On OpticFilm 8200i SE and 8100 (V2), the ME colour-long `REG_EXPOSURE` is
-clamped by PPI before the long pass runs:
+clamped 14000–64000 before the long pass runs (`clamp_me_long()` in
+`session_gl128.py`), uniform at every PPI.
 
-- **7200 dpi:** 14000–42000 (42000 is the SilverFast known-good colour-long).
-- **Other PPI:** 14000–85000.
+64000 is a safety margin under 65536: the AHB per-channel exposure table
+(`tables_8200i_se.exposure_table`) is 16-bit, and at oversample == 1 (native
+optical resolution, e.g. 7200 dpi) `channel_exposure_for()` passes the
+exposure straight through into it unmasked — a value at or above 65536 would
+silently wrap there while `REG_EXPOSURE` (24-bit) does not, desyncing the two
+and jamming the motor on real hardware (observed; `exposure_table()` now
+raises instead of wrapping). The ceiling is kept flat across PPI rather than
+raised where oversampling would technically allow more headroom, and is not
+independently hardware-validated above the previously-used 42000.
 
 The short bin is unchanged. Single-pass (non-ME) scans are not affected.
 Raised longs (model override / dynamic ME) are capped; stock `exposure_long`
-of 42000 is already within both ranges.
+of 42000 is within range.
 
 ## Current golden: OpticFilm 8200i, 1800 dpi, RGB16
 

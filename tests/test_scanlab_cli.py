@@ -24,7 +24,6 @@ def test_defaults_match_scanner_scan_defaults():
     args = _parse(_BASE)
     assert args.n_passes == 1
     assert args.align_passes is True
-    assert args.me_exposure_mode == "adaptive"
     assert args.single_pass_exposure is None
     assert args.me_short_exposure is None
     assert args.me_long_exposure is None
@@ -55,11 +54,6 @@ def test_n_passes_and_manual_overrides_parse_as_ints():
     assert args.me_long_exposure == 42000
 
 
-def test_me_exposure_mode_rejects_unknown_value():
-    with pytest.raises(SystemExit):
-        _parse([*_BASE, "--me-exposure-mode", "dynamic"])
-
-
 class _FakeTarget:
     def __init__(self):
         self.model = SimpleNamespace(model="OpticFilm 8200i SE", asic="GL128")
@@ -85,14 +79,6 @@ def _patch_scan_pipeline(monkeypatch, fake_scanner):
     monkeypatch.setattr(cli, "ForensicRun", lambda *_a, **_k: fake_run)
 
 
-def test_me_exposure_mode_fixed_requires_multi_exposure(monkeypatch, capsys):
-    fake_scanner = _FakeScanner()
-    _patch_scan_pipeline(monkeypatch, fake_scanner)
-    with pytest.raises(SystemExit):
-        cli.main(["scanlab", *_BASE, "--me-exposure-mode", "fixed"])
-    fake_scanner.scan.assert_not_called()
-
-
 def test_n_passes_out_of_range_is_rejected(monkeypatch):
     fake_scanner = _FakeScanner()
     _patch_scan_pipeline(monkeypatch, fake_scanner)
@@ -109,8 +95,6 @@ def test_new_flags_reach_scanner_scan(monkeypatch):
             "scanlab",
             *_BASE,
             "--multi-exposure",
-            "--me-exposure-mode",
-            "fixed",
             "--n-passes",
             "5",
             "--no-align-passes",
@@ -126,7 +110,6 @@ def test_new_flags_reach_scanner_scan(monkeypatch):
     fake_scanner.scan.assert_called_once()
     kwargs = fake_scanner.scan.call_args.kwargs
     assert kwargs["multi_exposure"] is True
-    assert kwargs["me_exposure_mode"] == "fixed"
     assert kwargs["n_passes"] == 5
     assert kwargs["align_passes"] is False
     assert kwargs["single_pass_exposure"] == 30000

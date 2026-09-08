@@ -147,9 +147,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.multi_exposure and args.kind != "scan":
         raise SystemExit("--multi-exposure requires --kind scan")
 
-    if args.me_exposure_mode == "fixed" and not args.multi_exposure:
-        raise SystemExit("--me-exposure-mode fixed requires --multi-exposure")
-
     if not (1 <= args.n_passes <= MAX_N_PASSES):
         raise SystemExit(f"--n-passes must be between 1 and {MAX_N_PASSES}, got {args.n_passes}")
 
@@ -161,7 +158,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
             mode="color",
             apply_calib=args.apply_calib,
             multi_exposure=args.multi_exposure,
-            me_exposure_mode=args.me_exposure_mode,
             single_pass_exposure=args.single_pass_exposure,
             me_short_exposure=args.me_short_exposure,
             me_long_exposure=args.me_long_exposure,
@@ -309,12 +305,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--multi-exposure",
         action="store_true",
         help="2-bracket multi-exposure color scan (scan kind only)",
-    )
-    p_scan.add_argument(
-        "--me-exposure-mode",
-        choices=["adaptive", "fixed"],
-        default="adaptive",
-        help="long-exposure selection when --multi-exposure is set (default: adaptive)",
     )
     p_scan.add_argument(
         "--n-passes",

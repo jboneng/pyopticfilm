@@ -152,14 +152,6 @@ class ScanLabWindow(QMainWindow):
         self.me_pass = QCheckBox("Multi-exposure (ME)")
         form.addWidget(self.me_pass)
 
-        self.me_fixed_long = QCheckBox("Fixed 42k long (A/B)")
-        self.me_fixed_long.setToolTip(
-            "When ME is on, force SilverFast-style long exposure 42000 "
-            "instead of frame-adaptive selection (42k–85k)."
-        )
-        self.me_fixed_long.setEnabled(False)
-        form.addWidget(self.me_fixed_long)
-
         n_passes_row = QHBoxLayout()
         n_passes_row.addWidget(QLabel("Multi-Pass N"))
         self.n_passes = QSpinBox()
@@ -217,10 +209,11 @@ class ScanLabWindow(QMainWindow):
         self.me_long_exposure.setPlaceholderText("auto (ME long)")
         self.me_long_exposure.setValidator(self._exposure_validator)
         self.me_long_exposure.setToolTip(
-            "REG_EXPOSURE for the ME long pass. Empty = normal Adaptive/Fixed "
-            "selection (see Fixed 42k long above). A value here overrides "
-            "Adaptive/Fixed entirely, skips the DPI/adaptive/hardware-max "
-            "clamps, and is written verbatim."
+            "REG_EXPOSURE for the ME long pass. Empty = normal adaptive "
+            "selection. A value here overrides adaptive selection entirely, "
+            "skips the hardware-max clamp, and is written verbatim — still "
+            "limited to the AHB per-channel exposure table's 16-bit width "
+            "(1-65535) at oversample == 1 resolutions (e.g. 7200 dpi)."
         )
         self.me_long_exposure.setEnabled(False)
         form.addWidget(self.me_long_exposure)
@@ -397,9 +390,6 @@ class ScanLabWindow(QMainWindow):
             self._on_forensic_connect()
         if not is_gl128:
             self.me_pass.setChecked(False)
-        self.me_fixed_long.setEnabled(is_gl128 and self.me_pass.isChecked())
-        if not self.me_fixed_long.isEnabled():
-            self.me_fixed_long.setChecked(False)
         self.n_passes.setEnabled(is_gl128)
         if not self.n_passes.isEnabled():
             self.n_passes.setValue(1)
@@ -501,9 +491,6 @@ class ScanLabWindow(QMainWindow):
 
     def _on_me_pass_toggled(self, checked: bool) -> None:
         checked = bool(checked)
-        self.me_fixed_long.setEnabled(checked and self.me_pass.isEnabled())
-        if not checked:
-            self.me_fixed_long.setChecked(False)
         self._sync_manual_exposure_enabled()
         # ME on/off changes which override applies — drop the one that no
         # longer makes sense rather than leaving a hidden value to surprise
@@ -1011,7 +998,6 @@ class ScanLabWindow(QMainWindow):
                 ir_pass=self.ir_pass.isChecked(),
                 me_pass=self.me_pass.isChecked(),
                 apply_calib=self.apply_calib.isChecked(),
-                me_exposure_mode="fixed" if self.me_fixed_long.isChecked() else "adaptive",
                 single_pass_exposure=single_pass_exposure,
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
@@ -1226,9 +1212,6 @@ class ScanLabWindow(QMainWindow):
             and getattr(self._current_target().model, "asic", "") == "GL128"
         )
         self.me_pass.setEnabled(not busy and is_gl128)
-        self.me_fixed_long.setEnabled(
-            not busy and is_gl128 and self.me_pass.isChecked()
-        )
         self.n_passes.setEnabled(not busy and is_gl128)
         self.align_passes.setEnabled(not busy and is_gl128)
         self._sync_manual_exposure_enabled()
