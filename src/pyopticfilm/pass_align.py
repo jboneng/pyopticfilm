@@ -371,13 +371,19 @@ def _band_shift_profile(
     dx_arr = np.asarray(dxs, dtype=np.float64)
     slope, intercept = np.polyfit(c, d, 1)
     resid = np.abs(d - (slope * c + intercept))
-    if len(c) > 3 and resid.max() > _ALIGN_BAND_OUTLIER_PX:
+    # Repeatedly drop the single worst-residual band and refit, so more than
+    # one bad band can't survive — stop once the fit clears the threshold or
+    # dropping further would leave fewer than 3 bands to fit a line through.
+    while len(c) > 3 and resid.max() > _ALIGN_BAND_OUTLIER_PX:
         keep = resid < resid.max()
-        if keep.sum() >= 3:
-            slope, intercept = np.polyfit(c[keep], d[keep], 1)
-            # The dropped band's dx came from the same phase-correlate call
-            # as its untrusted dy — equally suspect, so exclude it too.
-            dx_arr = dx_arr[keep]
+        if keep.sum() < 3:
+            break
+        c, d = c[keep], d[keep]
+        # The dropped band's dx came from the same phase-correlate call
+        # as its untrusted dy — equally suspect, so exclude it too.
+        dx_arr = dx_arr[keep]
+        slope, intercept = np.polyfit(c, d, 1)
+        resid = np.abs(d - (slope * c + intercept))
     dy_per_row = slope * np.arange(h, dtype=np.float64) + intercept
     # Sanity floor: a fitted drift spanning more than half the frame's own
     # height across the pass isn't a physically plausible feed drift — more

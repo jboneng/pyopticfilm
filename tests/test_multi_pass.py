@@ -75,6 +75,24 @@ def test_merge_n_passes_validates_matching_shapes():
         merge_n_passes([a, b])
 
 
+def test_merge_n_passes_zero_weight_pixels_counts_all_outlier_fallback():
+    """A pixel where every frame gets luma-outlier-flagged against the others
+    (no single frame anchors the median) falls back to the plain mean via
+    ``no_weight`` even though no frame's confidence is anywhere near zero —
+    ``zero_weight_pixels`` must count that fallback, not just near-zero-
+    confidence pixels (``all_zero_conf``), or it silently undercounts."""
+    a = np.full((4, 4, 3), 5000, dtype=np.uint16)
+    b = np.full((4, 4, 3), 5000, dtype=np.uint16)
+    c = np.full((4, 4, 3), 25000, dtype=np.uint16)
+    d = np.full((4, 4, 3), 25000, dtype=np.uint16)
+    result = merge_n_passes([a, b, c, d])
+    assert result.fusion_stats is not None
+    assert result.fusion_stats.zero_weight_pixels == 4 * 4
+    # Sanity: none of these mid-range, unclipped values collapse confidence
+    # to ~0, so the old (wrong) all_zero_conf-based count would have been 0.
+    assert result.fusion_stats.mean_confidence > 0.5
+
+
 def test_merge_n_passes_all_frames_black_stays_black():
     frames = [np.zeros((4, 4, 3), dtype=np.uint16) for _ in range(3)]
     result = merge_n_passes(frames)

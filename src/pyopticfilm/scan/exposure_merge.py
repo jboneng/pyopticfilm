@@ -505,7 +505,7 @@ def merge_n_passes(
         conf_mean_pixel = np.mean(np.stack(cs, axis=0), axis=0)
         conf_sum += float(conf_mean_pixel.sum())
         n_conf += int(conf_mean_pixel.size)
-        zero_count += int(np.count_nonzero(np.all(all_zero_conf, axis=-1)))
+        zero_count += int(np.count_nonzero(np.all(no_weight, axis=-1)))
         outlier_count += int(np.count_nonzero(outlier_any))
 
     stats = PassMergeStats(

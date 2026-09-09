@@ -90,6 +90,69 @@ def test_adaptive_multi_pass_stacks_both_slots_then_fuses():
     assert session.last_me_debug.fusion_stats is not None
 
 
+def test_ir_combo_keeps_headroom_cap_byte_identical_to_main():
+    """n_passes=1 is documented as structurally byte-identical to main for
+    every existing call shape (plain, ME, IR-combo) — that must include the
+    expose_film_base headroom cap, which main always set True on the
+    _run_multi_pass path (color+IR combo routes there even at n_passes=1).
+    Only the new n_passes>1-without-ME stacking mode is allowed to relax it."""
+    session, _usb = _mock_gl128_session_armed()
+    seen: list[bool] = []
+    orig = session.pipeline.expose_film_base
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("preserve_headroom"))
+        return orig(*args, **kwargs)
+
+    session.pipeline.expose_film_base = spy
+    session.run(resolution=1800, area=_TINY, apply_calib=False, infrared=True, n_passes=1)
+    assert seen == [True]
+
+
+def test_multi_pass_without_me_relaxes_headroom_cap():
+    """Genuine plain Multi-Pass stacking (n_passes>1, no ME) is the one case
+    intended to stretch highlights like Single-Pass rather than cap them."""
+    session, _usb = _mock_gl128_session_armed()
+    seen: list[bool] = []
+    orig = session.pipeline.expose_film_base
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("preserve_headroom"))
+        return orig(*args, **kwargs)
+
+    session.pipeline.expose_film_base = spy
+    session.run(resolution=1800, area=_TINY, apply_calib=False, n_passes=3)
+    assert seen == [False]
+
+
+def test_invalid_manual_long_exposure_raises_before_carriage_moves():
+    """A manual me_long_exposure that overflows the 16-bit AHB exposure table
+    (bypassing the soft hardware-max clamp, same as issue #66's real jam)
+    must raise before position_for_full_frame_scan moves the carriage — not
+    after, which would strand it mid-window."""
+    session, _usb = _mock_gl128_session_armed()
+    moved: list[bool] = []
+    orig = session.asic.position_for_full_frame_scan
+
+    def spy(*args, **kwargs):
+        moved.append(True)
+        return orig(*args, **kwargs)
+
+    session.asic.position_for_full_frame_scan = spy
+    with pytest.raises(ValueError):
+        session.run(
+            resolution=7200,
+            area=_TINY,
+            apply_calib=False,
+            multi_exposure=True,
+            me_long_exposure=90000,  # > 0xFFFF, manual override bypasses me_hardware_max_exposure
+        )
+    # The short pass (valid exposure) legitimately moves once; the long
+    # pass's own invalid exposure must raise before ITS motor move, so the
+    # carriage must not move a second time for the pass that's about to fail.
+    assert moved == [True]
+
+
 def test_infrared_with_n_passes_greater_than_one_rejected():
     session, _usb = _mock_gl128_session_armed()
     with pytest.raises(ScanError):

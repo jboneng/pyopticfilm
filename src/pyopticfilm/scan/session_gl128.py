@@ -26,6 +26,7 @@ from pyopticfilm.asic.gl128 import DEFAULT_IMAGE_USB_PACE_S
 from pyopticfilm.asic.registers import Gl128Registers
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.protocol import AsicDriver, FilmModel
+from pyopticfilm.device.tables_8200i_se import exposure_table
 from pyopticfilm.exceptions import AsicError, ScanCancelled, ScanError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
@@ -279,6 +280,21 @@ class Gl128ScanSession(ScanSession):
 
         self._await_agohome_park = not shading and bool(motor & r.AGOHOME)
 
+        ch_exp_fn = getattr(model, "channel_exposure_for", None)
+        if callable(ch_exp_fn):
+            try:
+                channel_exp = int(ch_exp_fn(dpi, exposure=exposure_reg))
+            except TypeError:
+                channel_exp = int(ch_exp_fn(dpi))
+        else:
+            channel_exp = None
+        # Validate before any motor move below: an out-of-range channel_exp
+        # (e.g. a manual-override exposure above the 16-bit AHB table) must
+        # raise here rather than after position_for_full_frame_scan already
+        # moved the carriage, which would strand it mid-window.
+        if channel_exp is not None:
+            exposure_table(channel_exp)
+
         # Capture-constant feeds from home — never geometry.starty (that was the
         # grinding bug). Calibration passes stay put (no motor). Positioning is
         # skipped while motor moves are gated so configure unit tests stay safe.
@@ -300,14 +316,6 @@ class Gl128ScanSession(ScanSession):
                 )
             self.asic.position_for_full_frame_scan(scan_steps=scan_steps)
 
-        ch_exp_fn = getattr(model, "channel_exposure_for", None)
-        if callable(ch_exp_fn):
-            try:
-                channel_exp = int(ch_exp_fn(dpi, exposure=exposure_reg))
-            except TypeError:
-                channel_exp = int(ch_exp_fn(dpi))
-        else:
-            channel_exp = None
         self.asic.upload_tables(
             resolution=dpi, shading=shading, channel_exposure=channel_exp
         )
@@ -746,10 +754,14 @@ class Gl128ScanSession(ScanSession):
         # Headroom cap keeps IVW highlight recovery from being crushed to white —
         # only relevant when an actual IVW merge happened; plain Multi-Pass
         # stacking (no ME) should stretch highlights exactly like Single-Pass.
+        # n_passes==1 must stay byte-identical to main for every existing call
+        # shape (Single-Pass, ME, IR-combo), so the relaxed gate only applies
+        # to the new n_passes>1-without-ME stacking mode.
+        preserve_headroom = (multi_exposure and rgb_long is not None) or n_passes == 1
         primary = self.pipeline.expose_film_base(
             primary,
             source="me deliverable",
-            preserve_headroom=(multi_exposure and rgb_long is not None),
+            preserve_headroom=preserve_headroom,
         )
         primary = self.pipeline.clamp_border_highlights(primary)
 

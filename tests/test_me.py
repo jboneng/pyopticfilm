@@ -412,3 +412,42 @@ def test_align_pass_to_reference_banded_recovers_progressive_drift():
     # banded still tracks the true per-row drift and clearly outperforms.)
     assert top_banded < 0.75 * top_whole, (top_whole, top_banded)
     assert bottom_banded < 0.75 * bottom_whole, (bottom_whole, bottom_banded)
+
+
+def test_band_shift_profile_refit_excludes_two_outlier_bands(monkeypatch):
+    """Two bad bands (not just one) must both be excluded from the fitted
+    per-row drift line — dropping only the single worst residual and
+    refitting once can leave a second bad band's ~100px error still
+    dominating the fit, well past the outlier threshold."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        return
+    import pyopticfilm.pass_align as pass_align
+
+    h, w = 2048, 64
+    n_bands = pass_align._ALIGN_BAND_COUNT
+    band_h = h // n_bands
+    # True drift is 0 everywhere; bands 3 and 6 are corrupted +100px readings
+    # (e.g. locked onto low-texture/aliased content) — both must be dropped.
+    per_band_dy = [0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 100.0, 0.0]
+    assert len(per_band_dy) == n_bands
+
+    call_index = {"i": -1}
+
+    def fake_phase_correlate_shift(ref, mov, *, scale):
+        call_index["i"] += 1
+        i = call_index["i"] % n_bands
+        return (0.0, per_band_dy[i], 1.0)  # response=1.0, always trusted
+
+    monkeypatch.setattr(pass_align, "_phase_correlate_shift", fake_phase_correlate_shift)
+
+    reference = np.zeros((h, w, 3), dtype=np.uint16)
+    moving = np.zeros((h, w, 3), dtype=np.uint16)
+    result = pass_align._band_shift_profile(reference, moving, n_bands=n_bands)
+    assert result is not None
+    _, dy_per_row = result
+    # A single-drop refit leaves one +100px band in the fit, skewing the
+    # line's range across the frame well past the 8px outlier threshold;
+    # excluding both should collapse the fit back to ~0 everywhere.
+    assert float(np.max(dy_per_row) - np.min(dy_per_row)) < 8.0
