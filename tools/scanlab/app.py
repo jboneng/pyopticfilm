@@ -38,6 +38,7 @@ from tools.scanlab.backend import (
     lab_scan_needs_motor_warning,
     list_lab_targets,
     nonse_safe_y_fraction,
+    resolve_ir_pass_and_n_passes,
     usb_log_section_key,
     with_hw_override,
     with_mock_mode,
@@ -147,6 +148,7 @@ class ScanLabWindow(QMainWindow):
         form.addWidget(self.ppi)
 
         self.ir_pass = QCheckBox("IR pass (second scan)")
+        self.ir_pass.toggled.connect(self._on_ir_pass_toggled)
         form.addWidget(self.ir_pass)
 
         self.me_pass = QCheckBox("Multi-exposure (ME)")
@@ -164,6 +166,7 @@ class ScanLabWindow(QMainWindow):
             "already-validated ones. 1 = off (today's behavior). With ME "
             "on: Adaptive Multi-Pass. With ME off: Multi-Pass."
         )
+        self.n_passes.valueChanged.connect(self._on_n_passes_changed)
         n_passes_row.addWidget(self.n_passes)
         form.addLayout(n_passes_row)
 
@@ -390,7 +393,7 @@ class ScanLabWindow(QMainWindow):
             self._on_forensic_connect()
         if not is_gl128:
             self.me_pass.setChecked(False)
-        self.n_passes.setEnabled(is_gl128)
+        self.n_passes.setEnabled(is_gl128 and not self.ir_pass.isChecked())
         if not self.n_passes.isEnabled():
             self.n_passes.setValue(1)
         self.align_passes.setEnabled(is_gl128)
@@ -400,6 +403,24 @@ class ScanLabWindow(QMainWindow):
         self.prescan_view.clear_crop()
         if self._capture is not None:
             self._decode_loaded_capture()
+
+    def _on_ir_pass_toggled(self, checked: bool) -> None:
+        ir_pass, n_passes = resolve_ir_pass_and_n_passes(
+            ir_pass_checked=checked, n_passes=self.n_passes.value(), changed="ir_pass"
+        )
+        self.n_passes.blockSignals(True)
+        self.n_passes.setValue(n_passes)
+        self.n_passes.blockSignals(False)
+        self.n_passes.setEnabled(self.n_passes.isEnabled() and not ir_pass)
+
+    def _on_n_passes_changed(self, value: int) -> None:
+        ir_pass, _ = resolve_ir_pass_and_n_passes(
+            ir_pass_checked=self.ir_pass.isChecked(), n_passes=value, changed="n_passes"
+        )
+        if ir_pass != self.ir_pass.isChecked():
+            self.ir_pass.blockSignals(True)
+            self.ir_pass.setChecked(ir_pass)
+            self.ir_pass.blockSignals(False)
 
     def _on_ppi_changed(self, _index: int) -> None:
         if self._capture is not None:
@@ -1212,7 +1233,7 @@ class ScanLabWindow(QMainWindow):
             and getattr(self._current_target().model, "asic", "") == "GL128"
         )
         self.me_pass.setEnabled(not busy and is_gl128)
-        self.n_passes.setEnabled(not busy and is_gl128)
+        self.n_passes.setEnabled(not busy and is_gl128 and not self.ir_pass.isChecked())
         self.align_passes.setEnabled(not busy and is_gl128)
         self._sync_manual_exposure_enabled()
         self.run_mock.setEnabled(not busy)
