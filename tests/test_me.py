@@ -423,11 +423,10 @@ def test_band_shift_profile_refit_excludes_two_outlier_bands(monkeypatch):
         import cv2  # noqa: F401
     except ImportError:
         return
-    import pyopticfilm.pass_align as pass_align
+    from pyopticfilm import pass_align
 
     h, w = 2048, 64
     n_bands = pass_align._ALIGN_BAND_COUNT
-    band_h = h // n_bands
     # True drift is 0 everywhere; bands 3 and 6 are corrupted +100px readings
     # (e.g. locked onto low-texture/aliased content) — both must be dropped.
     per_band_dy = [0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 100.0, 0.0]
