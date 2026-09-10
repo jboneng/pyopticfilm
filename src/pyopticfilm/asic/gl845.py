@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import replace
 
 from pyopticfilm.asic.registers import Gl845Registers
 from pyopticfilm.asic.status import ScannerStatus
@@ -32,6 +33,10 @@ HOME_POLL_S = 0.1
 FE_BUSY_TIMEOUT_S = 5.0
 # Large feed length used while seeking home (genesys reverse-home uses ~40000).
 HOME_FEED_STEPS = 40000
+#: GL845 FE gain/offset registers (0x02-0x07) are single-byte; a wider
+#: AfeSearchConfig (e.g. GL128's default 0x1FF) would converge on a code that
+#: silently truncates on write (apply_afe_frontend masks & 0xFF).
+FE_REGISTER_MAX = 0xFF
 
 
 class Gl845:
@@ -257,6 +262,12 @@ class Gl845:
             return seed
 
         cfg = config or AfeSearchConfig()
+        if cfg.gain_max > FE_REGISTER_MAX or cfg.offset_max > FE_REGISTER_MAX:
+            cfg = replace(
+                cfg,
+                gain_max=min(cfg.gain_max, FE_REGISTER_MAX),
+                offset_max=min(cfg.offset_max, FE_REGISTER_MAX),
+            )
 
         def _measure(fe: AfeFrontend) -> tuple[float, float, float]:
             self.apply_afe_frontend(fe, method=method, resolution=resolution)
