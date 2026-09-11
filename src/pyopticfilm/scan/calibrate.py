@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import os
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -168,7 +169,9 @@ class CalibCache:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise CalibrationError(f"Failed to read calib cache: {exc}") from exc
+            logger.warning("Ignoring unreadable calib cache at %s: %s", self.path, exc)
+            self.entries = []
+            return False
         if raw.get("ident") != CACHE_IDENT or int(raw.get("version", 0)) != CACHE_VERSION:
             logger.warning("Ignoring incompatible calib cache at %s", self.path)
             self.entries = []
@@ -184,7 +187,9 @@ class CalibCache:
             "version": CACHE_VERSION,
             "entries": [e.to_dict() for e in self.entries],
         }
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
+        tmp_path = self.path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp_path, self.path)
         logger.info("Wrote calib cache %s (%d entries)", self.path, len(self.entries))
 
     def find(
