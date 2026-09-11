@@ -530,6 +530,222 @@ REGISTERS: tuple[RegisterEntry, ...] = (
         ),
     ),
     RegisterEntry(
+        addr="0x1D",
+        name="Unnamed, constant in SCAN_REGS (0x80) except during shading at 3600/7200dpi and the image pass at 7200dpi",
+        asic=AsicFamily.GL128,
+        scope=(SCOPE_ALL_GL128,),
+        meaning=(
+            "Not in Gl128Registers or any per-DPI table; pyopticfilm always "
+            "writes 0x80 (SCAN_REGS) regardless of DPI.\n\n"
+            "CORRECTED 2026-09-11: this entry previously claimed the flip "
+            "happens 'only for the 7200dpi image pass ... never during "
+            "shading'. An independent re-decode (tools/capture_ledger.py, "
+            "which preserves per-write pass identity via the DEPTH_A/DEPTH_B "
+            "registers alongside 0x1D, rather than a bare per-DPI value diff) "
+            "contradicts that: the real driver's actual pattern is the "
+            "opposite emphasis — it flips MORE during shading than during "
+            "the image pass. At DPI <=2400 (DPISET <=400) 0x1D stays 0x80 "
+            "throughout, confirmed unchanged. At 3600dpi (DPISET=600) it "
+            "reads 0x81 during BOTH the dark and white shading passes "
+            "(DEPTH_A=0x04) and reverts to 0x80 for the image pass "
+            "(DEPTH_A=0x1F). At 7200dpi (DPISET=1200) it reads 0x82 during "
+            "both shading passes and 0x81 during the image pass only — "
+            "independently reproduced on the 8100 V2 (04_color_7200) and "
+            "the 8200i SE (13_7200ppi_color, across both back-to-back scans "
+            "in that single file). Every session's write traffic for every "
+            "GL128 address (all 37 pyopticfilm_captures sessions across both "
+            "models, including the ME/IR/crop sessions this catalog "
+            "previously flagged as unchecked) was re-swept for this pass; "
+            "0x1D's DPI/pass dependence above is the only variation found "
+            "for this address. Meaning still unknown. A real-hardware test that "
+            "set this bit at 7200dpi (an experimental_reg1d_7200 opt-in flag, "
+            "since removed) was run on the 8100 V2: the baseline (bit clear, "
+            "today's shipped behavior) completed a full-frame 7200dpi scan "
+            "cleanly; the immediately following scan with the bit set failed "
+            "with a USB pipe error partway through the image transfer, and "
+            "the operator reported a motor jam and cut power to the scanner. "
+            "Whether the bit itself caused the jam, versus some other factor "
+            "in that specific run, was not further isolated before hardware "
+            "was powered off — but this is now the working assumption and "
+            "this register must be treated accordingly.\n\n"
+            "Same-ASIC-family corroboration (mainline SANE genesys, GL124 — "
+            "the family GL128 is itself described as descending from): "
+            "``backend/genesys/gl124_registers.h`` defines this exact address "
+            "as REG_0x1D with CK4LOW=0x80, CK3LOW=0x40, CK1LOW=0x20, and a "
+            "5-bit LINESEL field at bits 0-4 (0x1f). Our corrected "
+            "observation reads cleanly as CK4LOW-held with LINESEL=0 "
+            "(<=2400dpi), LINESEL=1 (3600dpi shading, 7200dpi image pass), "
+            "or LINESEL=2 (7200dpi shading) — a monotonic count that scales "
+            "with how far above 2400dpi the pass runs, larger during "
+            "shading than during the image pass at the same DPI. As a sanity "
+            "check that this really is the same register map (not another "
+            "coincidental-address false lead — see the 98003/parallel-port "
+            "plustek-pp_p12.c dead end this repo deliberately did NOT cite "
+            "here): GL124's REG_0x01 bit layout (SCAN/SHDAREA/STAGGER/DVDSET) "
+            "is an exact match to every bit this repo has independently "
+            "confirmed for GL128's own 0x01 from real captures — real "
+            "corroboration, not a guess. In ``gl124.cpp`` "
+            "(gl124_init_motor_regs_scan), LINESEL is a motor line-"
+            "accumulation count: when the requested output DPI is below the "
+            "motor's mechanical minimum speed, the motor runs faster than "
+            "the output needs and LINESEL tells the ASIC how many native "
+            "lines to accumulate per output line, set inside the *motor* "
+            "register block — consistent with 0x1D being motor/line-timing "
+            "related, not cosmetic. It does NOT map cleanly onto our "
+            "observation, though: that mainline driver only raises LINESEL "
+            "for low DPI (motor too slow), while ours changes only at the "
+            "top two DPI rungs (3600/7200, near-native resolution) — the "
+            "opposite end of the range. Plustek's GL128 firmware and this film scanner's motor/"
+            "gear train differ enough from a Canon flatbed CIS that the "
+            "field may be reused for an analogous but distinct purpose (e.g. "
+            "an internal data-path line-accumulation mode specific to native "
+            "resolution) — this is inference from a related but non-identical "
+            "product, not a confirmed match for our firmware."
+        ),
+        confidence=Confidence.SUSPECTED,
+        citations=_c(
+            "device/gl128_common.py:91 (SCAN_REGS)",
+            "Superseded: earlier independent capture register-diff across "
+            "pyopticfilm_captures 8100-v2/06_ppi_ladder + 04_color_7200 and "
+            "8200i-se/13_ppi_ladder claimed image-pass-only, never-during-"
+            "shading — corrected below",
+            "Correction (2026-09-11, Claude Code session, tools/"
+            "capture_ledger.py re-decode joined against DEPTH_A/DEPTH_B for "
+            "pass identity): 8100-v2/06_ppi_ladder packet index 84946/85608 "
+            "(3600dpi shading, 0x81) and 86252 (3600dpi image, 0x80); "
+            "8100-v2/04_color_7200 packet index 1668/2264 (7200dpi shading, "
+            "0x82) and 2836 (7200dpi image, 0x81); 8200i-se/13_7200ppi_color "
+            "packet index 2182/2854 and 32208/32868 (7200dpi shading, 0x82, "
+            "both scans in file) and 3502/33504 (7200dpi image, 0x81, both "
+            "scans); every reg_write address across all 37 "
+            "pyopticfilm_captures sessions (both models) re-swept and found "
+            "to introduce no other previously-uncatalogued address",
+            "2026-09-10 real-hardware A/B test on the 8100 V2 (Claude Code "
+            "session): baseline 7200dpi scan succeeded; experimental-bit "
+            "7200dpi scan immediately following failed mid-transfer (USB "
+            "pipe error / device disconnect) with an operator-reported motor "
+            "jam, requiring a hard power-off",
+            "Mainline SANE genesys backend (GL124 family), "
+            "github.com/enthdegree/sane-backends (mirrors upstream "
+            "backend/genesys structure): gl124_registers.h REG_0x1D / "
+            "REG_0x1D_LINESEL / REG_0x1D_CK4LOW etc.; gl124.cpp "
+            "gl124_init_motor_regs_scan() LINESEL usage",
+        ),
+        safety_note=(
+            "HARDWARE INCIDENT (2026-09-10, unresolved): setting bit 0 of "
+            "0x1D for a 7200dpi image pass on real 8100 V2 hardware was "
+            "immediately followed by a motor jam requiring a hard power-off "
+            "mid-scan. The experimental_reg1d_7200 flag and its CLI/session "
+            "plumbing that made this reachable have been removed entirely — "
+            "there is intentionally no way to set this bit from pyopticfilm "
+            "today. Do not reintroduce any path to setting this bit (or "
+            "otherwise touching 0x1D from its SCAN_REGS default) without new "
+            "capture or bench evidence establishing it's safe, isolating "
+            "this one change from everything else per the 0x3D-0x3F FEEDL "
+            "incident's own lesson."
+        ),
+    ),
+    RegisterEntry(
+        addr=(
+            "0x04-0x0C/0x11-0x1C/0x1E-0x20/0x22-0x24/0x30-0x32/0x34-0x36/"
+            "0x38-0x3C/0x4F/0x52-0x57/0x5A-0x5C/0x5F-0x61/0x63/0x67-0x69/"
+            "0x70-0x7C/0x80-0x81/0x8A-0x95/0x9D/0xA0/0xA2-0xAE/0xB8-0xBA/"
+            "0xBD-0xBF/0x114-0x115"
+        ),
+        name="Opaque boot/scan register blast — no per-address meaning known",
+        asic=AsicFamily.GL128,
+        scope=(SCOPE_ALL_GL128,),
+        meaning=(
+            "Every address in this span is written by INIT_REGS (cold-boot "
+            "blast) and/or SCAN_REGS (constant overrides applied before every "
+            "acquisition) and/or GPO_REGS in device/gl128_common.py, replayed "
+            "byte-for-byte from capture with no bit-level interpretation. "
+            "This entry exists so the gap is visible in one place rather "
+            "than silently absent from the catalog, not because anything "
+            "here is suspected of doing anything in particular.\n\n"
+            "RE-CHECKED 2026-09-11 against ME/IR/crop variation (previously "
+            "only checked across the PPI ladder): a full reg_write sweep of "
+            "every pyopticfilm_captures session for both models (37 files, "
+            "every GL128 address the real driver ever writes, not just this "
+            "span) found nothing outside this catalog's existing address "
+            "coverage — no new addresses to add anywhere. Two addresses "
+            "inside this span, 0xA5 and 0xAB (paired, always written "
+            "together), turned out NOT to be constant during a scan the way "
+            "the rest of the span is: both progress boot-value 0x20 -> 0x01 "
+            "-> 0x02 through a single scan's shading/image passes on every "
+            "model and DPI checked, and in one multi-exposure SE capture "
+            "(1800ppi_Scan_No_IR_ME) the second-in-file scan's final value "
+            "differs from the first (ends 0x01 instead of the usual 0x02) — "
+            "a real, reproducible difference, but the trigger (bracket "
+            "position within an ME sequence? something else?) isn't "
+            "isolated enough to state a meaning. IR-on-vs-off and crop-top-"
+            "vs-bottom produced no observed difference anywhere in this "
+            "span, on either model.\n\n"
+            "Addresses where the SCAN_REGS value differs from the INIT_REGS "
+            "boot value (the more likely candidates to matter, since a "
+            "register the driver bothers to *change* before scanning is more "
+            "likely load-bearing than one left at its boot default) — "
+            "boot → scan: "
+            "0x04: 0x02→0x42, 0x05: 0x48→0x40, 0x06: 0x18→0xF0, "
+            "0x0B: 0x6C→0x4C, 0x1C: 0x00→0x20, 0x1E: 0x10→0x20, "
+            "0x3B: 0xFF→0x01, 0x52: 0x07→0x0B, 0x53: 0x09→0x0D, "
+            "0x54: 0x0B→0x0F, 0x56: 0x03→0x05, 0x57: 0x05→0x07, "
+            "0x5A: 0x12→0x31, 0x5B: 0x00→0x79, 0x70: 0x01→0x0A, "
+            "0x71: 0x02→0x0B, 0x72: 0x03→0x0C, 0x73: 0x04→0x0D, "
+            "0x81: 0x22→0x40. "
+            "SCAN_REGS-only (no INIT_REGS entry, i.e. left at hardware "
+            "power-on default until the first scan): 0x8A-0x92 (all 0x00), "
+            "0x114-0x115 (both 0x80). GPO_REGS-only (not in INIT_REGS or "
+            "SCAN_REGS): 0xA2-0xA3 (0x00), 0xAC (0x00), 0xAD (0x01), 0xAE "
+            "(0x00). Everything else in this span is held at the same "
+            "constant value across INIT_REGS and SCAN_REGS — except 0xA5/"
+            "0xAB, dynamic during a scan as described above and not "
+            "meaningfully summarized by an INIT_REGS/SCAN_REGS pair.\n\n"
+            "Not covered here: the FRONTEND_REGS table (AFE sub-indices "
+            "0x00-0x07 reached indirectly through REG_FE_INDEX/0x51, a "
+            "different address space entirely, not raw ASIC register "
+            "addresses) — its docstring already documents indices 0x02-0x04 "
+            "as per-channel offsets and 0x05-0x07 as per-channel gains, so "
+            "it isn't blind the way this span is."
+        ),
+        confidence=Confidence.UNKNOWN,
+        citations=_c(
+            "device/gl128_common.py INIT_REGS, SCAN_REGS, GPO_REGS",
+            "Re-check (2026-09-11, Claude Code session): tools/"
+            "capture_ledger.py reg_write sweep of all 37 pyopticfilm_captures "
+            "sessions (both models) against tools/register_reference's own "
+            "_addr_matches — 0xA5/0xAB dynamism found via "
+            "8200i-se/04_color_1800 vs 05_ir_1800 (IR, no difference), "
+            "09a_crop_top_1800 vs 09b_crop_bottom_1800 (crop, no "
+            "difference), and 1800ppi_Scan_No_IR_No_ME vs "
+            "1800ppi_Scan_No_IR_ME (ME, 0xA5/0xAB differ)",
+        ),
+    ),
+    RegisterEntry(
+        addr="0xD0-0xD2/0xE0-0xF8",
+        name="Memory layout block — no per-field meaning known",
+        asic=AsicFamily.GL128,
+        scope=(SCOPE_ALL_GL128,),
+        meaning=(
+            "MEMORY_LAYOUT_REGS in device/gl128_common.py: 28 bytes, written "
+            "before every stationary calib acquire (Gl128._apply_stationary_"
+            "scan_regs) and byte-identical at every resolution captured "
+            "(sessions 03/04/06 per that table's own comment) — consistent "
+            "with fixed ASIC RAM/DMA buffer-layout constants (start/end "
+            "addresses or sizes for the shading, motor-slope, and per-"
+            "channel-exposure AHB windows) rather than anything scan-"
+            "parameter-dependent, but that's inference from the byte-"
+            "identical-across-DPI pattern, not a confirmed field breakdown. "
+            "No individual field within the block has been decoded."
+        ),
+        confidence=Confidence.UNKNOWN,
+        citations=_c(
+            "device/gl128_common.py MEMORY_LAYOUT_REGS",
+            "device/model_8200i_se.py module docstring (byte-identical "
+            "across resolutions, sessions 03/04/06)",
+        ),
+    ),
+    RegisterEntry(
         addr="0x37",
         name="REG_IR",
         asic=AsicFamily.GL128,
@@ -801,6 +1017,17 @@ def entries_for(
     return result
 
 
+def _cell(text: str) -> str:
+    """Sanitize a value for use inside a single markdown table row.
+
+    GFM table rows must be one physical line each; any field containing
+    literal newlines (e.g. a multi-paragraph ``meaning``) would otherwise
+    split the row and corrupt the table. Blank lines become a visible
+    paragraph break, other newlines a soft line break.
+    """
+    return text.replace("|", "\\|").replace("\n\n", "<br><br>").replace("\n", "<br>")
+
+
 def render_markdown() -> str:
     """Render the full catalog as markdown, grouped by ASIC family then
     register address. Pure function of the module-level data — call this
@@ -829,17 +1056,17 @@ def render_markdown() -> str:
         lines.append("| Address | Name | Scope | Confidence | Meaning | Safety | Citations |")
         lines.append("|---|---|---|---|---|---|---|")
         for e in family_entries:
-            safety = e.safety_note or ""
-            citations = "; ".join(c.text for c in e.citations)
+            safety = _cell(e.safety_note or "")
+            citations = _cell("; ".join(c.text for c in e.citations))
             scope = ", ".join(e.scope)
             lines.append(
-                f"| {e.addr} | {e.name} | {scope} | {e.confidence.value} | "
-                f"{e.meaning} | {safety} | {citations} |"
+                f"| {_cell(e.addr)} | {_cell(e.name)} | {scope} | {e.confidence.value} | "
+                f"{_cell(e.meaning)} | {safety} | {citations} |"
             )
             for b in e.bits:
                 lines.append(
-                    f"| &nbsp;&nbsp;{b.mask} | {b.name} | | {b.confidence.value} | "
-                    f"{b.meaning} | | {'; '.join(c.text for c in b.citations)} |"
+                    f"| &nbsp;&nbsp;{b.mask} | {_cell(b.name)} | | {b.confidence.value} | "
+                    f"{_cell(b.meaning)} | | {_cell('; '.join(c.text for c in b.citations))} |"
                 )
         lines.append("")
 
@@ -848,12 +1075,12 @@ def render_markdown() -> str:
     lines.append("| Topic | Asic | Scope | Confidence | Meaning | Safety | Citations |")
     lines.append("|---|---|---|---|---|---|---|")
     for n in BEHAVIORAL_NOTES:
-        safety = n.safety_note or ""
-        citations = "; ".join(c.text for c in n.citations)
+        safety = _cell(n.safety_note or "")
+        citations = _cell("; ".join(c.text for c in n.citations))
         scope = ", ".join(n.scope)
         lines.append(
-            f"| {n.topic} | {n.asic.value} | {scope} | {n.confidence.value} | "
-            f"{n.meaning} | {safety} | {citations} |"
+            f"| {_cell(n.topic)} | {n.asic.value} | {scope} | {n.confidence.value} | "
+            f"{_cell(n.meaning)} | {safety} | {citations} |"
         )
     lines.append("")
     return "\n".join(lines)
