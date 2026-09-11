@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -47,6 +48,31 @@ def colour_shading_failure_message(reason: str) -> str:
 
 def default_cache_path() -> Path:
     return Path.home() / ".cache" / "pyopticfilm" / "calib_v2.json"
+
+
+def call_search_afe(
+    search: Callable[..., object],
+    *,
+    method: str,
+    resolution: int,
+    measure: Callable[[object], tuple[float, float, float]] | None,
+) -> object:
+    """Call an ASIC's ``search_afe`` with whichever kwargs its signature takes.
+
+    GL845's ``search_afe`` takes ``method``/``resolution``/``measure``; GL128's
+    is self-contained (``config``/``method`` only) and does its own capture.
+    Dispatch on the signature rather than calling the GL845 shape and catching
+    ``TypeError`` — a bare except there would also swallow a genuine
+    ``TypeError`` raised from inside ``measure()`` or the dichotomy internals
+    and misattribute it to the GL128 signature mismatch.
+    """
+    params = inspect.signature(search).parameters
+    if "measure" not in params:
+        return search(method=method)
+    kwargs: dict[str, object] = {"method": method, "measure": measure}
+    if "resolution" in params:
+        kwargs["resolution"] = resolution
+    return search(**kwargs)
 
 
 @dataclass
@@ -654,10 +680,7 @@ class Calibrator:
                         float(avg[:, 2].mean()),
                     )
 
-            try:
-                search(method=method, resolution=resolution, measure=measure)
-            except TypeError:
-                search(method=method)
+            call_search_afe(search, method=method, resolution=resolution, measure=measure)
 
         def _safe_home() -> None:
             """GL845 repark; SE has no reverse-home — noop only when already home."""
