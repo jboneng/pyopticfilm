@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from pyopticfilm.scan.exposure_merge import FusionStats
+    from pyopticfilm.scan.exposure_merge import FusionStats, PassMergeStats
 
 
 @dataclass(frozen=True)
@@ -32,3 +32,29 @@ class MeScanDebug:
     exposure_proposed: int | None = None
     #: Why ``exposure_long`` was chosen (adaptive / clamped / fixed / fallback).
     exposure_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class SlotStackDebug:
+    """Multi-Pass stacking diagnostics for one exposure slot (short or long)."""
+
+    n_passes: int
+    #: Repeat i → repeat 0 alignment shift, for repeats 2..N. len == n_passes - 1
+    #: when align_passes=True; empty (unaligned repeats were stacked as-is) when
+    #: align_passes=False.
+    align_shifts: list[tuple[float, float]]
+    stack_stats: PassMergeStats | None = None
+
+
+@dataclass(frozen=True)
+class MultiPassDebug:
+    """Per-slot Multi-Pass stacking diagnostics from a GL128 scan.
+
+    Exposed via :attr:`~pyopticfilm.scanner.Scanner.last_multi_pass_debug`,
+    populated whenever ``n_passes > 1``. ``long`` is ``None`` unless
+    ``multi_exposure`` was also on (Adaptive Multi-Pass). Integrators should
+    use :class:`~pyopticfilm.image.ScanImage` ``rgb`` only.
+    """
+
+    short: SlotStackDebug
+    long: SlotStackDebug | None = None

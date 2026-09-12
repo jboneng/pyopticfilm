@@ -154,6 +154,23 @@ def lab_scan_needs_motor_warning(
     return (area[3] - area[1]) > nonse_safe_y_fraction(model) + 1e-9
 
 
+def resolve_ir_pass_and_n_passes(
+    *, ir_pass_checked: bool, n_passes: int, changed: str
+) -> tuple[bool, int]:
+    """Keep IR pass and Multi-Pass N mutually exclusive on GL128.
+
+    `changed` names the control the user just touched ("ir_pass" or
+    "n_passes"). session_gl128.Gl128ScanSession.run raises ScanError for
+    infrared=True with n_passes>1, so the GUI must not let the two combine —
+    mirrors the old me_fixed_long auto-untick pattern.
+    """
+    if changed == "ir_pass" and ir_pass_checked:
+        return True, 1
+    if changed == "n_passes" and n_passes > 1:
+        return False, n_passes
+    return ir_pass_checked, n_passes
+
+
 def prescan_resolution(model: FilmModel) -> int:
     if is_gl128_opticfilm(model):
         return PRESCAN_DPI

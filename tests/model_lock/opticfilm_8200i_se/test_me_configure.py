@@ -11,22 +11,22 @@ from pyopticfilm.scan.bringup import crop_scan_geometry
 from pyopticfilm.scan.geometry import compute_geometry
 from pyopticfilm.scan.session_gl128 import (
     Gl128ScanSession,
-    clamp_me_long_for_dpi,
+    clamp_me_long,
     image_feed2_steps,
 )
 from pyopticfilm.usb.fake import MockScannerTransport
 from pyopticfilm.usb.protocol import GenesysUsbProtocol
 
 
-def test_clamp_me_long_for_dpi_bounds():
-    assert clamp_me_long_for_dpi(7200, 85000) == 42000
-    assert clamp_me_long_for_dpi(7200, 42000) == 42000
-    assert clamp_me_long_for_dpi(7200, 14000) == 14000
-    assert clamp_me_long_for_dpi(7200, 10000) == 14000
-    assert clamp_me_long_for_dpi(3600, 85000) == 85000
-    assert clamp_me_long_for_dpi(3600, 90000) == 85000
-    assert clamp_me_long_for_dpi(1800, 10000) == 14000
-    assert clamp_me_long_for_dpi(1200, 42000) == 42000
+def test_clamp_me_long_bounds():
+    """14000-64000 uniformly at every PPI — a safety margin under the AHB
+    per-channel exposure table's 16-bit (65536) wrap point, kept flat across
+    PPI rather than raised where oversampling would technically allow more."""
+    assert clamp_me_long(85000) == 64000
+    assert clamp_me_long(64000) == 64000
+    assert clamp_me_long(42000) == 42000
+    assert clamp_me_long(14000) == 14000
+    assert clamp_me_long(10000) == 14000
 
 
 def test_image_feed2_uses_area_y1_when_area_missing():

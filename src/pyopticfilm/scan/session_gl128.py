@@ -20,14 +20,17 @@ import threading
 import time
 from collections.abc import Callable
 
+import numpy as np
+
 from pyopticfilm.asic.gl128 import DEFAULT_IMAGE_USB_PACE_S
 from pyopticfilm.asic.registers import Gl128Registers
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.protocol import AsicDriver, FilmModel
+from pyopticfilm.device.tables_8200i_se import exposure_table
 from pyopticfilm.exceptions import AsicError, ScanCancelled, ScanError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
-from pyopticfilm.scan.exposure_override import validate_manual_exposure
+from pyopticfilm.scan.exposure_override import validate_manual_exposure, validate_n_passes
 from pyopticfilm.scan.geometry import ScanGeometry
 from pyopticfilm.scan.session import DATA_TIMEOUT_S, ScanSession
 from pyopticfilm.usb.device import BULK_MAX_SIZE
@@ -52,22 +55,24 @@ _QUIET_DRAIN_LAG = 1.05
 
 #: ME colour-long ``REG_EXPOSURE`` floor (short bin / SilverFast ME short).
 _ME_LONG_MIN = 14_000
-#: ME colour-long ceiling at non-7200 PPI (dynamic / raised longs).
-_ME_LONG_MAX = 85_000
-#: ME colour-long ceiling at 7200 dpi (SilverFast known-good colour-long).
-_ME_LONG_MAX_AT_7200 = 42_000
+#: ME colour-long ceiling, uniform at every PPI. The AHB per-channel exposure
+#: table (``tables_8200i_se.exposure_table``) is 16-bit, and at oversample == 1
+#: (native optical resolution, e.g. 7200 dpi) ``channel_exposure_for`` passes
+#: the exposure straight through into it unmasked — a value at or above 65536
+#: would silently wrap there while ``REG_EXPOSURE`` itself (24-bit) does not,
+#: desyncing the sensor's per-line timing table from the master exposure
+#: register and jamming the motor on real hardware. 64000 is a safety margin
+#: under that 65536 wrap point, kept uniform across every PPI rather than
+#: raised where oversampling would technically allow more headroom, since a
+#: single validated ceiling is simpler to reason about than a per-PPI one; it
+#: is not itself hardware-validated above the previously-used 42000, only
+#: mathematically safe from the overflow.
+_ME_LONG_MAX = 64_000
 
 
-def clamp_me_long_for_dpi(resolution: int, exp_long: int) -> int:
-    """Clamp ME colour-long exposure for the requested PPI.
-
-    At 7200 dpi the long bin is capped at 42000 (SilverFast parity / HW-safe).
-    At other PPI the allowed range is 14000–85000.
-    """
-    value = int(exp_long)
-    if int(resolution) == 7200:
-        return min(max(value, _ME_LONG_MIN), _ME_LONG_MAX_AT_7200)
-    return min(max(value, _ME_LONG_MIN), _ME_LONG_MAX)
+def clamp_me_long(exp_long: int) -> int:
+    """Clamp ME colour-long exposure into the validated 14000-64000 range."""
+    return min(max(int(exp_long), _ME_LONG_MIN), _ME_LONG_MAX)
 
 
 try:
@@ -118,6 +123,8 @@ class Gl128ScanSession(ScanSession):
         self._pass_manual: bool = False
         #: Lab-only ME bracket / IVW stats (not on :class:`~pyopticfilm.image.ScanImage`).
         self.last_me_debug = None
+        #: Lab-only Multi-Pass per-slot stacking stats, set when ``n_passes > 1``.
+        self.last_multi_pass_debug = None
         #: IR→short alignment shift from the last multi-pass scan (ME or IR-only).
         self.last_align_shift_ir: tuple[float, float] | None = None
 
@@ -127,10 +134,10 @@ class Gl128ScanSession(ScanSession):
         multi_exposure: bool = False,
         infrared: bool = False,
         align_passes: bool = True,
-        me_exposure_mode: str = "adaptive",
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        n_passes: int = 1,
         **kwargs,
     ):  # type: ignore[no-untyped-def]
         """Refuse unless the ASIC explicitly arms motor moves."""
@@ -140,7 +147,8 @@ class Gl128ScanSession(ScanSession):
         validate_manual_exposure(single_pass_exposure, label="single_pass_exposure")
         validate_manual_exposure(me_short_exposure, label="me_short_exposure")
         validate_manual_exposure(me_long_exposure, label="me_long_exposure")
-        if multi_exposure or (infrared and kwargs.get("mode", "color") == "color"):
+        validate_n_passes(n_passes)
+        if multi_exposure or n_passes > 1 or (infrared and kwargs.get("mode", "color") == "color"):
             if infrared and not getattr(self.model, "supports_infrared", False):
                 raise ScanError(
                     f"{self.model.model} has no infrared channel: IR scans are "
@@ -152,9 +160,10 @@ class Gl128ScanSession(ScanSession):
                 multi_exposure=multi_exposure,
                 infrared=infrared,
                 align_passes=align_passes,
-                me_exposure_mode=me_exposure_mode,
+                single_pass_exposure=single_pass_exposure,
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
+                n_passes=n_passes,
                 **kwargs,
             )
         if single_pass_exposure is None:
@@ -271,6 +280,21 @@ class Gl128ScanSession(ScanSession):
 
         self._await_agohome_park = not shading and bool(motor & r.AGOHOME)
 
+        ch_exp_fn = getattr(model, "channel_exposure_for", None)
+        if callable(ch_exp_fn):
+            try:
+                channel_exp = int(ch_exp_fn(dpi, exposure=exposure_reg))
+            except TypeError:
+                channel_exp = int(ch_exp_fn(dpi))
+        else:
+            channel_exp = None
+        # Validate before any motor move below: an out-of-range channel_exp
+        # (e.g. a manual-override exposure above the 16-bit AHB table) must
+        # raise here rather than after position_for_full_frame_scan already
+        # moved the carriage, which would strand it mid-window.
+        if channel_exp is not None:
+            exposure_table(channel_exp)
+
         # Capture-constant feeds from home — never geometry.starty (that was the
         # grinding bug). Calibration passes stay put (no motor). Positioning is
         # skipped while motor moves are gated so configure unit tests stay safe.
@@ -292,14 +316,6 @@ class Gl128ScanSession(ScanSession):
                 )
             self.asic.position_for_full_frame_scan(scan_steps=scan_steps)
 
-        ch_exp_fn = getattr(model, "channel_exposure_for", None)
-        if callable(ch_exp_fn):
-            try:
-                channel_exp = int(ch_exp_fn(dpi, exposure=exposure_reg))
-            except TypeError:
-                channel_exp = int(ch_exp_fn(dpi))
-        else:
-            channel_exp = None
         self.asic.upload_tables(
             resolution=dpi, shading=shading, channel_exposure=channel_exp
         )
@@ -350,82 +366,96 @@ class Gl128ScanSession(ScanSession):
         multi_exposure: bool = False,
         infrared: bool = False,
         align_passes: bool = True,
-        me_exposure_mode: str = "adaptive",
+        single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        n_passes: int = 1,
     ):
         from pyopticfilm.image import ScanImage
-        from pyopticfilm.pass_align import align_pass_to_reference, estimate_pass_shift, warn_if_align_unavailable
-        from pyopticfilm.scan.exposure_merge import merge_exposures_result
+        from pyopticfilm.pass_align import (
+            align_pass_to_reference,
+            align_pass_to_reference_banded,
+            estimate_pass_shift,
+            warn_if_align_unavailable,
+        )
+        from pyopticfilm.scan.exposure_merge import merge_exposures_result, merge_n_passes
         from pyopticfilm.scan.geometry import compute_geometry
-        from pyopticfilm.scan.me_debug import MeScanDebug
-        from pyopticfilm.scan.me_exposure import fixed_long_exposure, select_long_exposure
+        from pyopticfilm.scan.me_debug import MeScanDebug, MultiPassDebug, SlotStackDebug
+        from pyopticfilm.scan.me_exposure import select_long_exposure
 
         if mode == "infrared":
             raise ValueError("Use mode='color' with infrared=True for colour+IR scans")
+        if infrared and n_passes > 1:
+            raise ScanError(
+                "n_passes > 1 is not supported together with infrared=True yet "
+                "(each repeat is its own motor cycle and IR stacking is unvalidated) "
+                "— scan infrared separately, or use n_passes=1."
+            )
 
         model = self.model
-        # Manual short override replaces the model default for every early
-        # pass (color_short and, when combined, IR) — same variable those
-        # passes already shared before this feature existed.
-        short_manual = me_short_exposure is not None
-        exp_short = (
-            int(me_short_exposure)
-            if short_manual
-            else int(getattr(model, "exposure_short", model.exposure_lperiod))
-        )
+        # me_short_exposure (ME's own override key) always wins. single_pass_exposure
+        # is a fallback consulted only when n_passes>1 and multi_exposure is off —
+        # ME calls (n_passes==1 or multi_exposure=True) never look at it here, so
+        # every pre-Multi-Pass call shape (ME, IR-combo, or plain) is byte-identical
+        # to before this parameter existed.
+        if me_short_exposure is not None:
+            short_manual = True
+            exp_short = int(me_short_exposure)
+        elif n_passes > 1 and not multi_exposure and single_pass_exposure is not None:
+            short_manual = True
+            exp_short = int(single_pass_exposure)
+        else:
+            short_manual = False
+            exp_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
         exp_long = int(getattr(model, "exposure_long", exp_short * 3))
-        mode_norm = str(me_exposure_mode or "adaptive").strip().lower()
-        if mode_norm not in ("adaptive", "fixed"):
-            raise ValueError(
-                f"me_exposure_mode must be 'adaptive' or 'fixed', got {me_exposure_mode!r}"
-            )
+        noise_alpha = float(getattr(model, "me_noise_alpha", 1.0))
+        noise_beta = float(getattr(model, "me_noise_beta", 4096.0))
 
         if not self.asic._initialized:
             self.asic.init()
 
         self.last_me_debug = None
+        self.last_multi_pass_debug = None
         self.last_align_shift_ir = None
 
         if geometry is None:
             geometry = compute_geometry(resolution, model=model, area=area)
 
-        # Short (+ optional IR) first; long exposure is chosen after short RGB.
-        early: list[tuple[str, str, int, bool, bool, bool]] = [
-            ("color_short", "transparency", exp_short, False, False, short_manual),
-        ]
-        if infrared:
-            early.append(("ir", "infrared", exp_short, False, False, short_manual))
-        n_pass = len(early) + (1 if multi_exposure else 0)
+        # Total physical motor passes: n_passes repeats of the short/single
+        # slot, one IR pass (only ever paired with n_passes==1, guarded
+        # above), and n_passes repeats of the long slot when doing ME.
+        n_pass = n_passes + (1 if infrared else 0) + (n_passes if multi_exposure else 0)
 
         logger.info(
-            "GL128 multi-pass %ddpi passes=%d me=%s ir=%s me_exposure_mode=%s",
+            "GL128 multi-pass %ddpi passes=%d n_passes=%d me=%s ir=%s",
             geometry.resolution,
             n_pass,
+            n_passes,
             multi_exposure,
             infrared,
-            mode_norm,
         )
 
-        rgb_short = None
-        rgb_long = None
         ir_plane = None
         exposure_decision = None
-        # Content-aware ENDPIXEL drop from the short plane; reuse for long/IR
-        # so merge/align see matching widths (edge DN differs across exposures).
+        # Content-aware ENDPIXEL drop, discovered on the very first capture of
+        # the whole scan and reused by every later capture — including
+        # Multi-Pass repeats of the same slot — so merge/align see matching
+        # widths (edge DN differs across exposures).
         locked_usb_end_drop: int | None = None
+        pass_idx = 0
 
         def _acquire_pass(
             *,
-            idx: int,
             key: str,
             method: str,
             exposure: int,
             remeasure: bool,
             long_pass: bool,
             manual: bool = False,
-        ):
-            nonlocal rgb_short, rgb_long, ir_plane, locked_usb_end_drop
+        ) -> np.ndarray:
+            nonlocal locked_usb_end_drop, pass_idx
+            idx = pass_idx
+            pass_idx += 1
 
             def _prog(p: float, _i: int = idx) -> None:
                 if progress is not None:
@@ -490,8 +520,7 @@ class Gl128ScanSession(ScanSession):
             planar = getattr(self.asic, "usb_planar_rgb", None)
             if planar is None:
                 planar = bool(getattr(self.model, "usb_planar_rgb", False))
-            # Short discovers the dummy trim; later planes reuse that drop.
-            drop_override = None if key == "color_short" else locked_usb_end_drop
+            drop_override = None if locked_usb_end_drop is None else locked_usb_end_drop
             rgb = self.pipeline.assemble(
                 raw,
                 geometry,
@@ -503,73 +532,117 @@ class Gl128ScanSession(ScanSession):
                 expose_base=False,
                 usb_end_drop=drop_override,
             )
-            if key == "color_short":
+            if locked_usb_end_drop is None:
                 locked_usb_end_drop = int(self.pipeline.last_usb_end_drop)
-                rgb_short = rgb
-            elif key == "color_long":
-                rgb_long = rgb
-            elif key == "ir":
-                ir_plane = self._infrared_plane(rgb)
+            return rgb
 
-        for idx, (key, method, exposure, remeasure, long_pass, manual) in enumerate(early):
-            _acquire_pass(
-                idx=idx,
+        def _capture_stacked_slot(
+            *,
+            key: str,
+            method: str,
+            exposure: int,
+            long_pass: bool,
+            manual: bool,
+            remeasure_first: bool,
+        ) -> tuple[np.ndarray, list[tuple[float, float]], object | None]:
+            """Capture ``key`` ``n_passes`` times, align repeats 2..N to
+            repeat 1 (when ``align_passes``), and stack via
+            :func:`merge_n_passes`. Reduces to a single ``_acquire_pass``
+            call with no stacking at ``n_passes == 1`` — byte-identical to
+            the pre-Multi-Pass single-capture-per-slot behavior. Only the
+            first repeat of a slot honors ``remeasure_first`` (a shading
+            remeasure is about switching exposure levels, not about the
+            repeat count); every later repeat reuses the cached shading."""
+            shifts: list[tuple[float, float]] = []
+            first = _acquire_pass(
                 key=key,
                 method=method,
                 exposure=exposure,
-                remeasure=remeasure,
+                remeasure=remeasure_first,
                 long_pass=long_pass,
                 manual=manual,
             )
+            if n_passes == 1:
+                return first, shifts, None
+            frames = [first]
+            for _ in range(n_passes - 1):
+                frame = _acquire_pass(
+                    key=key,
+                    method=method,
+                    exposure=exposure,
+                    remeasure=False,
+                    long_pass=long_pass,
+                    manual=manual,
+                )
+                if align_passes:
+                    warn_if_align_unavailable(f"Multi-Pass {key} repeat")
+                    aligned, shift = align_pass_to_reference_banded(frames[0], frame)
+                    frames.append(aligned)
+                    shifts.append(shift)
+                else:
+                    frames.append(frame)
+            stacked = merge_n_passes(frames, alpha=noise_alpha, beta=noise_beta)
+            return stacked.rgb, shifts, stacked.fusion_stats
+
+        # Short (+ optional IR) first; long exposure is chosen after short RGB.
+        rgb_short, short_align_shifts, short_stack_stats = _capture_stacked_slot(
+            key="color_short",
+            method="transparency",
+            exposure=exp_short,
+            long_pass=False,
+            manual=short_manual,
+            remeasure_first=False,
+        )
+
+        if infrared:
+            ir_raw = _acquire_pass(
+                key="ir",
+                method="infrared",
+                exposure=exp_short,
+                remeasure=False,
+                long_pass=False,
+                manual=short_manual,
+            )
+            ir_plane = self._infrared_plane(ir_raw)
 
         assert rgb_short is not None
 
         long_manual = me_long_exposure is not None
+        rgb_long = None
+        long_align_shifts: list[tuple[float, float]] = []
+        long_stack_stats = None
         if multi_exposure:
             if long_manual:
                 # Explicit override: use the caller's value verbatim and skip
-                # adaptive/fixed selection, the DPI clamp, and the hardware-max
-                # clamp entirely — me_exposure_mode does not apply here.
+                # adaptive selection and the hardware-max clamp entirely.
                 exp_long = int(me_long_exposure)
                 logger.info(
-                    "ME long exposure: manual-override selected=%d (me_exposure_mode=%s ignored)",
+                    "ME long exposure: manual-override selected=%d",
                     exp_long,
-                    mode_norm,
                 )
             else:
-                # DPI-aware ME long ceiling (7200 → 42k; other PPI → 85k).
-                dpi_adaptive_max = clamp_me_long_for_dpi(
-                    geometry.resolution,
-                    int(getattr(model, "me_adaptive_max_exposure", exp_long)),
+                adaptive_max = clamp_me_long(
+                    int(getattr(model, "me_adaptive_max_exposure", exp_long))
                 )
-                dpi_hardware_max = clamp_me_long_for_dpi(
-                    geometry.resolution,
-                    int(getattr(model, "me_hardware_max_exposure", exp_long)),
+                hardware_max = clamp_me_long(
+                    int(getattr(model, "me_hardware_max_exposure", exp_long))
                 )
-                if mode_norm == "fixed":
-                    exposure_decision = fixed_long_exposure(
-                        clamp_me_long_for_dpi(geometry.resolution, exp_long),
-                        short_rgb=rgb_short,
-                        short_exposure=exp_short,
-                        black_level=float(getattr(model, "me_black_level", 0.0)),
-                    )
-                else:
-                    exposure_decision = select_long_exposure(
-                        rgb_short,
-                        exp_short,
-                        black_level=float(getattr(model, "me_black_level", 0.0)),
-                        dense_percentile=float(getattr(model, "me_dense_percentile", 5.0)),
-                        target_dense_dn=float(getattr(model, "me_target_dense_dn", 10000.0)),
-                        adaptive_min=int(
-                            getattr(model, "me_adaptive_min_exposure", exp_long)
-                        ),
-                        adaptive_max=dpi_adaptive_max,
-                        hardware_max=dpi_hardware_max,
-                        max_ratio=float(getattr(model, "me_max_exposure_ratio", 5.0)),
-                        default_long=clamp_me_long_for_dpi(geometry.resolution, exp_long),
-                    )
+                exposure_decision = select_long_exposure(
+                    rgb_short,
+                    exp_short,
+                    black_level=float(getattr(model, "me_black_level", 0.0)),
+                    dense_percentile=float(getattr(model, "me_dense_percentile", 5.0)),
+                    target_dense_dn=float(getattr(model, "me_target_dense_dn", 10000.0)),
+                    adaptive_min=int(
+                        getattr(model, "me_adaptive_min_exposure", exp_long)
+                    ),
+                    adaptive_max=adaptive_max,
+                    hardware_max=hardware_max,
+                    max_ratio=float(getattr(model, "me_max_exposure_ratio", 5.0)),
+                    default_long=clamp_me_long(exp_long),
+                )
                 exp_long = int(exposure_decision.selected)
-                clamped = clamp_me_long_for_dpi(geometry.resolution, exp_long)
+                clamped = clamp_me_long(exp_long)
                 if clamped != exp_long:
                     logger.warning(
                         "ME colour-long exposure clamped at %d dpi: %d → %d",
@@ -592,18 +665,35 @@ class Gl128ScanSession(ScanSession):
                     clips[0] * 100.0,
                     clips[1] * 100.0,
                     clips[2] * 100.0,
-                    dpi_hardware_max,
+                    hardware_max,
                     exp_long,
                     exposure_decision.reason,
                 )
-            _acquire_pass(
-                idx=len(early),
+            rgb_long, long_align_shifts, long_stack_stats = _capture_stacked_slot(
                 key="color_long",
                 method="transparency",
                 exposure=exp_long,
-                remeasure=True,
                 long_pass=True,
                 manual=long_manual,
+                remeasure_first=True,
+            )
+
+        if n_passes > 1:
+            self.last_multi_pass_debug = MultiPassDebug(
+                short=SlotStackDebug(
+                    n_passes=n_passes,
+                    align_shifts=short_align_shifts,
+                    stack_stats=short_stack_stats,
+                ),
+                long=(
+                    SlotStackDebug(
+                        n_passes=n_passes,
+                        align_shifts=long_align_shifts,
+                        stack_stats=long_stack_stats,
+                    )
+                    if multi_exposure
+                    else None
+                ),
             )
 
         align_shift_long: tuple[float, float] | None = None
@@ -631,16 +721,14 @@ class Gl128ScanSession(ScanSession):
         fusion_stats = None
         if multi_exposure and rgb_long is not None:
             shift = align_shift_long if align_passes else (0.0, 0.0)
-            alpha = float(getattr(model, "me_noise_alpha", 1.0))
-            beta = float(getattr(model, "me_noise_beta", 4096.0))
             merged = merge_exposures_result(
                 rgb_short,
                 rgb_long,
                 exposure_short=exp_short,
                 exposure_long=exp_long,
                 align_shift=shift,
-                alpha=alpha,
-                beta=beta,
+                alpha=noise_alpha,
+                beta=noise_beta,
             )
             primary = merged.rgb
             fusion_stats = merged.fusion_stats
@@ -663,9 +751,17 @@ class Gl128ScanSession(ScanSession):
             )
 
         # Single film-base makeup on the deliverable only (not on bracket planes).
-        # Headroom cap keeps IVW highlight recovery from being crushed to white.
+        # Headroom cap keeps IVW highlight recovery from being crushed to white —
+        # only relevant when an actual IVW merge happened; plain Multi-Pass
+        # stacking (no ME) should stretch highlights exactly like Single-Pass.
+        # n_passes==1 must stay byte-identical to main for every existing call
+        # shape (Single-Pass, ME, IR-combo), so the relaxed gate only applies
+        # to the new n_passes>1-without-ME stacking mode.
+        preserve_headroom = (multi_exposure and rgb_long is not None) or n_passes == 1
         primary = self.pipeline.expose_film_base(
-            primary, source="me deliverable", preserve_headroom=True
+            primary,
+            source="me deliverable",
+            preserve_headroom=preserve_headroom,
         )
         primary = self.pipeline.clamp_border_highlights(primary)
 

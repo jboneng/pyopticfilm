@@ -10,7 +10,6 @@ from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.scan.me_exposure import (
     choose_long_exposure,
     clamp_long_exposure,
-    fixed_long_exposure,
     select_long_exposure,
 )
 
@@ -130,14 +129,6 @@ def test_select_empty_fallback():
     decision = select_long_exposure(short, 14000, default_long=42000)
     assert decision.selected == 42000
     assert decision.reason == "fallback"
-
-
-def test_fixed_long_exposure():
-    short = _rgb(2000.0)
-    decision = fixed_long_exposure(42000, short_rgb=short, short_exposure=14000)
-    assert decision.selected == 42000
-    assert decision.proposed == 42000
-    assert decision.reason == "fixed"
 
 
 def test_model_adaptive_envelope_defaults():

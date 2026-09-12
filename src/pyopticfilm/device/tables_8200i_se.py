@@ -108,7 +108,18 @@ def exposure_table(line_period: int) -> tuple[int, ...]:
 
     Mirrors the captured shape: a flat body at ``line_period`` with entry 0
     raised by :data:`EXPOSURE_FIRST_DELTA`.
+
+    ``line_period`` must fit the table's 16-bit words: a caller that lets it
+    silently wrap (``& 0xFFFF``) uploads a body wildly inconsistent with
+    whatever real ``REG_EXPOSURE`` (24-bit) was written for the same pass —
+    the sensor's per-line timing table and the master exposure register go
+    out of sync, which reads on real hardware as a motor jam.
     """
-    body = int(line_period) & 0xFFFF
+    body = int(line_period)
+    if not 0 <= body <= 0xFFFF:
+        raise ValueError(
+            f"channel exposure {body} does not fit the AHB per-channel exposure "
+            "table's 16-bit words (0-65535) — check the caller's oversample-aware clamp"
+        )
     first = (body + EXPOSURE_FIRST_DELTA) & 0xFFFF
     return (first,) + (body,) * (EXPOSURE_TABLE_LENGTH - 1)

@@ -217,32 +217,3 @@ def select_long_exposure(
         predicted_clip=clips,
     )
 
-
-def fixed_long_exposure(
-    exposure_long: int,
-    *,
-    short_rgb: np.ndarray | None = None,
-    short_exposure: int = 14000,
-    black_level: float = 0.0,
-) -> MeExposureDecision:
-    """Fixed SilverFast-style long exposure (no adaptive proposal)."""
-    selected = int(exposure_long)
-    p05 = (
-        dense_percentiles(short_rgb, black_level=black_level)
-        if short_rgb is not None
-        else (0.0, 0.0, 0.0)
-    )
-    clips = (
-        predicted_clip_fractions(
-            short_rgb, short_exposure, selected, black_level=black_level
-        )
-        if short_rgb is not None
-        else (0.0, 0.0, 0.0)
-    )
-    return MeExposureDecision(
-        proposed=selected,
-        selected=selected,
-        reason="fixed",
-        dense_p05=p05,
-        predicted_clip=clips,
-    )

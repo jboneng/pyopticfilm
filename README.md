@@ -37,6 +37,7 @@ Other OpticFilm models **enumerate and open**: you can read status, turn the lam
 - Color and infrared transparency scans at 150–7200 dpi (ASIC programs at ≥600 dpi; lower PPI shares the 600 dpi register set and is downsampled on the host; infrared is available only on supported hardware)
 - Infrared as a dust plane on `ScanImage.ir` (`mode="infrared"`, or `infrared=True` with colour; 8200i SE only among the hardware-tested set)
 - Multi-exposure (ME) on GL128 hardware-tested models (8200i SE and 8100 V2): short + adaptive long colour passes with host SNR/IVW merge into `ScanImage.rgb` (`multi_exposure=True`); bracket planes via `Scanner.last_me_debug`
+- Multi-Pass on GL128: repeat an already-validated exposure `n_passes` times (1–9) and stack the aligned repeats for an SNR gain — no new exposure/speed value is ever introduced, only repeats of the short pass (`n_passes>1`) or, combined with `multi_exposure=True`, of both the short and long ME passes (Adaptive Multi-Pass); per-slot stacking stats via `Scanner.last_multi_pass_debug`
 - Manual exposure overrides on GL128 (`single_pass_exposure` / `me_short_exposure` / `me_long_exposure`) for testing/debugging: bypass the adaptive/hardware-max clamps and write an exact `REG_EXPOSURE` value (24-bit register range)
 - Optional crop via normalized `area` (`x1, y1, x2, y2` in 0–1)
 - Dark/white shading calibration with on-disk cache (`~/.cache/pyopticfilm/calib_v2.json`)
@@ -119,8 +120,9 @@ with Scanner.open() as scanner:
 ```
 
 Multi-exposure (GL128 / hardware-tested models): short colour pass, then a
-**frame-adaptive** long pass (default; safety envelope 42k–85k, fallback 42000).
-Use ``me_exposure_mode="fixed"`` for the SilverFast-style fixed 3× long exposure.
+**frame-adaptive** long pass (safety envelope 14k–64k, uniform at every PPI —
+a margin under the AHB per-channel exposure table's 16-bit width; fallback
+42000).
 The SNR/IVW-merged deliverable with film-base makeup is in ``rgb``. Bracket
 planes and fusion stats are on :attr:`~pyopticfilm.scanner.Scanner.last_me_debug`
 (Scan Lab / audit tooling only — not part of the NegPy-facing ``ScanImage``).
@@ -141,15 +143,17 @@ with Scanner.open() as scanner:
 
         save_rgb16_tiff(debug.rgb_short, "short.tif", dpi=image.dpi)
         save_rgb16_tiff(debug.rgb_long, "long.tif", dpi=image.dpi)
-        print(debug.exposure_short, debug.exposure_long)  # e.g. 14000, 42000…85000
+        print(debug.exposure_short, debug.exposure_long)  # e.g. 14000, 42000…64000
         print(debug.exposure_proposed, debug.exposure_reason)
 ```
 
 Manual exposure overrides (GL128; debugging/testing only): send an exact
-``REG_EXPOSURE`` value that bypasses the adaptive selection, DPI clamp, and
-hardware-max clamp above — the value is written verbatim, limited only to the
-24-bit register range (1–``0xFFFFFF``). ``me_long_exposure`` takes precedence
-over ``me_exposure_mode``. All three default to ``None`` (unchanged behavior):
+``REG_EXPOSURE`` value that bypasses adaptive selection and the hardware-max
+clamp above — the value is written verbatim. Two limits still apply: the
+24-bit register range (1–``0xFFFFFF``), and — at oversample == 1 resolutions
+(e.g. 7200 dpi) — the AHB per-channel exposure table's 16-bit width
+(1–65535); either is rejected with a clear error rather than clamped or
+silently corrupted. All three default to ``None`` (unchanged behavior):
 
 ```python
 image = scanner.scan(
@@ -157,9 +161,44 @@ image = scanner.scan(
     mode="color",
     multi_exposure=True,
     me_short_exposure=14000,
-    me_long_exposure=120000,  # above the normal 42k–85k envelope, on purpose
+    me_long_exposure=120000,  # above the normal 14k-64k envelope, on purpose
 )
 ```
+
+Multi-Pass (GL128): repeat the short pass (or, with `multi_exposure=True`,
+both the short and long ME passes) `n_passes` times and stack the aligned
+repeats for an SNR gain, without introducing any new exposure or scan-speed
+value. `n_passes=1` (default) is unchanged behavior — the same Single-Pass or
+Adaptive Multi-Exposure scan as today. Per-slot stacking stats (align shifts,
+frames merged, outlier pixels) are on `Scanner.last_multi_pass_debug`:
+
+```python
+# Multi-Pass: 4 repeats of the single exposure, stacked.
+image = scanner.scan(resolution=1800, mode="color", n_passes=4)
+
+# Adaptive Multi-Pass: 4 repeats each of the short AND adaptive-long
+# ME passes, each slot stacked, then fused exactly as today's 2-bracket ME.
+image = scanner.scan(
+    resolution=1800, mode="color", multi_exposure=True, n_passes=4
+)
+debug = scanner.last_multi_pass_debug
+if debug is not None:
+    print(debug.short.stack_stats.mean_confidence, debug.short.align_shifts)
+```
+
+**Common scan-mode combinations.** `multi_exposure` and `n_passes` are independent axes; a
+simplified consumer UI typically only needs these four combinations, named as follows:
+
+| Name                       | `multi_exposure` | `n_passes` |
+|-----------------------------|:---:|:---:|
+| Single-Pass                 | `False` | `1` |
+| Multi-Pass                  | `False` | `2`–`9` |
+| Adaptive Multi-Exposure      | `True`  | `1` |
+| Adaptive Multi-Pass          | `True`  | `2`–`9` |
+
+The three manual exposure overrides above are lab/debug-only —
+Scan Lab (`tools/scanlab/`) is the reference implementation exposing the full, unrestricted
+parameter set; NegPy is the reference implementation of the simplified 4-combination surface.
 
 Colour + IR in one call (8200i SE; IR after the colour / ME passes):
 

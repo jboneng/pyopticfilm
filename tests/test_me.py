@@ -328,3 +328,125 @@ def test_align_pass_subpixel_shift_when_opencv_available():
     dx, dy = estimate_pass_shift(base, shifted)
     assert abs(dx - 3.0) < 0.6
     assert abs(dy - (-2.0)) < 0.6
+
+
+def test_align_pass_tall_crop_accepts_large_dy_within_height_guard():
+    """A tall/narrow crop window (e.g. a multi-frame strip scan) can have a
+    real, correctable dy that is small relative to frame height but large
+    relative to frame width — the guard must judge each axis against its
+    own dimension, not reject a real height-scale shift using a
+    width-derived threshold (regression for the 1096x6700 ghosting seen on
+    real 8100 V2 hardware, where a real dy=-195.81 was ~9x a width-only
+    guard but only ~3% of the frame's height)."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        return
+    from pyopticfilm.pass_align import align_pass_to_reference, estimate_pass_shift
+
+    rng = np.random.default_rng(2)
+    # Narrow, tall crop window, same aspect ratio ballpark as the repro
+    # (1096x6700). Height-derived guard = max(16, 0.02*1340) = 26.8;
+    # width-derived guard (the pre-fix behavior) = max(16, 0.02*220) = 16.
+    base = rng.integers(1000, 20000, (1340, 220, 3), dtype=np.uint16)
+    # dy=20 clears the height guard (26.8) but would be rejected by a
+    # width-only guard (16) — the bug this test guards against.
+    shifted, _ = align_pass_to_reference(base, base, shift=(0.0, 20.0))
+    _dx, dy = estimate_pass_shift(base, shifted)
+    assert abs(dy - 20.0) < 1.0, f"real height-scale dy was rejected: got dy={dy}"
+
+
+def test_align_pass_to_reference_banded_recovers_progressive_drift():
+    """A tall pass with drift that grows along the feed axis (not a constant
+    offset) — the real-hardware shape of the bug: mid-frame content near
+    wherever the whole-frame estimate anchored came out sharp, while
+    top/bottom (far from it) still ghosted even after applying that single
+    global shift. Row-banded alignment should track the profile and leave
+    a small residual at both ends, not just in the middle."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        return
+    from pyopticfilm.pass_align import align_pass_to_reference_banded
+
+    rng = np.random.default_rng(5)
+    h, w = 2400, 300
+    # Strong texture throughout so every band has a trustworthy peak.
+    base = rng.integers(1000, 40000, (h, w, 3), dtype=np.uint16).astype(np.float64)
+
+    # True per-row drift: linear from 0px (top) to 40px (bottom) — a
+    # progressive feed slip, not one rigid shift.
+    true_dy = np.linspace(0.0, 40.0, h)
+    row_idx = np.clip(np.arange(h) - np.round(true_dy).astype(int), 0, h - 1)
+    moving = base[row_idx].astype(np.uint16)
+    reference = base.astype(np.uint16)
+
+    warped, (dx, dy_center) = align_pass_to_reference_banded(reference, moving)
+    assert abs(dx) < 1.0
+    # Profile's midpoint should be ~half the total 40px drift (sign follows
+    # this module's existing shift convention, verified by the residual
+    # checks below rather than assumed here).
+    assert abs(abs(dy_center) - 20.0) < 3.0
+
+    # Compare against the whole-frame rigid alignment on the same pair — it
+    # can only fit one number for the entire frame, so it necessarily
+    # favors wherever that number happens to be closest to correct (the
+    # real-hardware bug: sharp near the anchor, still ghosted far from it).
+    whole_frame, _ = align_pass_to_reference(reference, moving)
+
+    def _residual(a, b, y0, y1):
+        return np.abs(
+            a[y0:y1].astype(np.float64) - b[y0:y1].astype(np.float64)
+        ).mean()
+
+    band = 200
+    top_whole = _residual(reference, whole_frame, 0, band)
+    bottom_whole = _residual(reference, whole_frame, h - band, h)
+    top_banded = _residual(reference, warped, 0, band)
+    bottom_banded = _residual(reference, warped, h - band, h)
+
+    # Row-banded must beat whole-frame rigid at BOTH extremes. (This
+    # particular profile is symmetric around the frame's midpoint, so a
+    # single global shift lands close to the average and is similarly
+    # wrong at both ends rather than trading one off against the other —
+    # banded still tracks the true per-row drift and clearly outperforms.)
+    assert top_banded < 0.75 * top_whole, (top_whole, top_banded)
+    assert bottom_banded < 0.75 * bottom_whole, (bottom_whole, bottom_banded)
+
+
+def test_band_shift_profile_refit_excludes_two_outlier_bands(monkeypatch):
+    """Two bad bands (not just one) must both be excluded from the fitted
+    per-row drift line — dropping only the single worst residual and
+    refitting once can leave a second bad band's ~100px error still
+    dominating the fit, well past the outlier threshold."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        return
+    from pyopticfilm import pass_align
+
+    h, w = 2048, 64
+    n_bands = pass_align._ALIGN_BAND_COUNT
+    # True drift is 0 everywhere; bands 3 and 6 are corrupted +100px readings
+    # (e.g. locked onto low-texture/aliased content) — both must be dropped.
+    per_band_dy = [0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 100.0, 0.0]
+    assert len(per_band_dy) == n_bands
+
+    call_index = {"i": -1}
+
+    def fake_phase_correlate_shift(ref, mov, *, scale):
+        call_index["i"] += 1
+        i = call_index["i"] % n_bands
+        return (0.0, per_band_dy[i], 1.0)  # response=1.0, always trusted
+
+    monkeypatch.setattr(pass_align, "_phase_correlate_shift", fake_phase_correlate_shift)
+
+    reference = np.zeros((h, w, 3), dtype=np.uint16)
+    moving = np.zeros((h, w, 3), dtype=np.uint16)
+    result = pass_align._band_shift_profile(reference, moving, n_bands=n_bands)
+    assert result is not None
+    _, dy_per_row = result
+    # A single-drop refit leaves one +100px band in the fit, skewing the
+    # line's range across the frame well past the 8px outlier threshold;
+    # excluding both should collapse the fit back to ~0 everywhere.
+    assert float(np.max(dy_per_row) - np.min(dy_per_row)) < 8.0

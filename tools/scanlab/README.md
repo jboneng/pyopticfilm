@@ -94,8 +94,7 @@ scan-ready GL128 **8100 (V2)** (`07b3:1824`).
 | **Refresh devices** | Re-enumerate USB and rebuild the device list. |
 | **PPI** | Resolutions from the selected model’s `resolutions_dpi` (Scan only; Prescan uses a fixed low dpi). |
 | **IR pass** | After colour Scan, run a second infrared pass (disabled if the model has no IR). |
-| **Multi-exposure (ME)** | GL128 / hardware-tested models: short + adaptive long colour passes (42k–85k safety envelope, capped at 42000 at 7200 dpi; fallback 42000); host SNR/IVW merge into ``rgb``. Bracket planes on ``Scanner.last_me_debug`` (not ``ScanImage``). |
-| **Fixed 42k long (A/B)** | When ME is on: force SilverFast-style long exposure 42000 instead of adaptive selection. |
+| **Multi-exposure (ME)** | GL128 / hardware-tested models: short + adaptive long colour passes (14k–64k safety envelope, uniform at every PPI — a margin under the AHB per-channel exposure table's 16-bit width; fallback 42000); host SNR/IVW merge into ``rgb``. Bracket planes on ``Scanner.last_me_debug`` (not ``ScanImage``). |
 | **Manual exposure overrides** | GL128 debug/testing only — see [Manual exposure overrides](#manual-exposure-overrides) below. |
 | **Prescan** | Low-res preview (GL128: 1200 dpi safe window; non-scan-ready: lowest dpi + short Y strip). |
 | **Scan** | Colour scan at the chosen PPI; optional IR and/or ME. Uses the prescan crop when one is set (clamped on non-scan-ready). |
@@ -114,14 +113,16 @@ debugging/testing, bypassing the driver's normal soft limits:
 |-------|----------|------------------|
 | **Single-pass exposure** | The retained Scan pass when ME is off. | Model-derived exposure, still clamped to the hardware max. |
 | **ME short exposure** | The ME short pass only. | Model-derived short exposure, still clamped to the hardware max. |
-| **ME long exposure** | The ME long pass only; overrides **Adaptive**/**Fixed 42k long** entirely. | Normal Adaptive/Fixed selection (42k–85k envelope, DPI clamp). |
+| **ME long exposure** | The ME long pass only; overrides adaptive selection entirely. | Normal adaptive selection (14k–64k envelope, uniform at every PPI). |
 
 Each field is grayed out when it does not apply to the current pass selection
 (e.g. the single-pass field while ME is on). A value is written to
-`REG_EXPOSURE` **verbatim** — it skips the adaptive selection, the DPI clamp,
-and the hardware-max clamp that apply to normal (automatic) exposure. The only
-limit enforced is the actual 24-bit register range (1–16777215 / `0xFFFFFF`);
-an out-of-range value is rejected with a clear error rather than clamped.
+`REG_EXPOSURE` **verbatim** — it skips adaptive selection and the hardware-max
+clamp that apply to normal (automatic) exposure. Two limits still apply
+regardless: the 24-bit register range (1–16777215 / `0xFFFFFF`), and — at
+oversample == 1 resolutions (e.g. 7200 dpi) — the AHB per-channel exposure
+table's 16-bit width (1–65535); an out-of-range value for either is rejected
+with a clear error rather than clamped or silently corrupted.
 
 These overrides exist for hardware/debugging experiments — an excessive value
 can produce severe overexposure/clipping, and the software intentionally does

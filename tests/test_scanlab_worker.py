@@ -50,3 +50,30 @@ def test_request_scan_is_single_object_signal():
                         assert len(item.value.args) == 1
                         return
     raise AssertionError("ScanWorker.request_scan not found")
+
+
+def _dataclass_field_defaults(name: str) -> dict[str, object]:
+    tree = ast.parse(_WORKER.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            defaults: dict[str, object] = {}
+            for item in node.body:
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                    value = item.value
+                    if isinstance(value, ast.Constant):
+                        defaults[item.target.id] = value.value
+                    else:
+                        defaults[item.target.id] = ...  # non-constant default, present but unchecked
+            return defaults
+    raise AssertionError(f"{name} not found")
+
+
+def test_scan_request_has_align_passes_defaulting_true():
+    defaults = _dataclass_field_defaults("ScanRequest")
+    assert defaults.get("align_passes") is True
+
+
+def test_run_keyword_only_args_include_align_passes():
+    _positional, keyword_only = _method_args("_run")
+    assert "align_passes" in keyword_only
+    assert "n_passes" in keyword_only

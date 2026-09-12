@@ -21,7 +21,7 @@ from pyopticfilm.exceptions import AsicError, PlustekError
 from pyopticfilm.image import ScanImage
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import CalibEntry, Calibrator, default_cache_path
-from pyopticfilm.scan.exposure_override import validate_manual_exposure
+from pyopticfilm.scan.exposure_override import validate_manual_exposure, validate_n_passes
 from pyopticfilm.usb.device import UsbDeviceHandle
 from pyopticfilm.usb.fake import FakeDeviceHandle, MockScannerTransport
 from pyopticfilm.usb.protocol import GenesysUsbProtocol, UsbTransport
@@ -59,6 +59,7 @@ class Scanner:
         )
         self._closed = False
         self._last_me_debug = None
+        self._last_multi_pass_debug = None
         self._last_align_shift_ir = None
         #: Lab / session may disarm GL128 briefly for stationary shading.
         self._bringup_motor_armed = bool(model_is_scan_ready(self._model))
@@ -234,6 +235,12 @@ class Scanner:
         return self._last_me_debug
 
     @property
+    def last_multi_pass_debug(self):
+        """Per-slot Multi-Pass stacking stats from the last scan with
+        ``n_passes > 1`` (GL128 only), or ``None``."""
+        return self._last_multi_pass_debug
+
+    @property
     def last_align_shift_ir(self) -> tuple[float, float] | None:
         """IR→colour-short alignment shift from the last multi-pass scan, or ``None``."""
         return self._last_align_shift_ir
@@ -252,15 +259,16 @@ class Scanner:
         multi_exposure: bool = False,
         infrared: bool = False,
         align_passes: bool = True,
-        me_exposure_mode: str = "adaptive",
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        n_passes: int = 1,
     ) -> ScanImage:
         # Fail fast on bad manual-exposure input before touching the ASIC.
         validate_manual_exposure(single_pass_exposure, label="single_pass_exposure")
         validate_manual_exposure(me_short_exposure, label="me_short_exposure")
         validate_manual_exposure(me_long_exposure, label="me_long_exposure")
+        validate_n_passes(n_passes)
         self._ensure_scan_ready()
         self._ensure_open()
         if not self._asic._initialized:
@@ -280,16 +288,17 @@ class Scanner:
             "multi_exposure": multi_exposure,
             "infrared": infrared,
             "align_passes": align_passes,
-            "me_exposure_mode": me_exposure_mode,
             "single_pass_exposure": single_pass_exposure,
             "me_short_exposure": me_short_exposure,
             "me_long_exposure": me_long_exposure,
+            "n_passes": n_passes,
         }
         if on_status is not None:
             on_status("scanning")
         session = create_session(self._asic, self._model, self._calibrator)
         image = session.run(**run_kwargs)  # type: ignore[arg-type]
         self._last_me_debug = getattr(session, "last_me_debug", None)
+        self._last_multi_pass_debug = getattr(session, "last_multi_pass_debug", None)
         self._last_align_shift_ir = getattr(session, "last_align_shift_ir", None)
         return image
 

@@ -349,8 +349,7 @@ The image pass stays `0x17` on both manual feeders.
 | Feed setup | 14000 | 14000 | unknown | inconclusive |
 | ME long default | 42000 | 42000 | unknown | inconclusive |
 | ME adaptive min / max | 42000 / 85000 | 42000 / 85000 | unknown | inconclusive |
-| ME long clamp @ 7200 | 42000 | 42000 | unknown | inconclusive |
-| ME long clamp @ other PPI | 85000 | 85000 | unknown | inconclusive |
+| ME long clamp (uniform, all PPI) | 64000 | 64000 | unknown | inconclusive |
 
 LPERIOD is the clear timing split: V2 is a few counts above SE at every
 measured PPI, and 135i 7200 is a third constant. DPISET at 7200 and image

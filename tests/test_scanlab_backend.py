@@ -28,6 +28,7 @@ from tools.scanlab.backend import (
     nonse_safe_area,
     nonse_safe_y_fraction,
     open_lab_scanner,
+    resolve_ir_pass_and_n_passes,
     usb_log_divider,
     usb_log_section_key,
     with_hw_override,
@@ -226,3 +227,27 @@ def test_usb_log_section_key_from_divider():
     assert usb_log_section_key(usb_log_divider("SCAN 1800 dpi")) == "SCAN"
     assert usb_log_section_key(usb_log_divider("IR 1800 dpi")) == "IR"
     assert usb_log_section_key("control_write type=0x40") is None
+
+
+def test_resolve_ir_pass_checked_forces_n_passes_to_one():
+    assert resolve_ir_pass_and_n_passes(
+        ir_pass_checked=True, n_passes=4, changed="ir_pass"
+    ) == (True, 1)
+
+
+def test_resolve_n_passes_above_one_unchecks_ir_pass():
+    assert resolve_ir_pass_and_n_passes(
+        ir_pass_checked=True, n_passes=3, changed="n_passes"
+    ) == (False, 3)
+
+
+def test_resolve_n_passes_at_one_leaves_ir_pass_untouched():
+    assert resolve_ir_pass_and_n_passes(
+        ir_pass_checked=True, n_passes=1, changed="n_passes"
+    ) == (True, 1)
+
+
+def test_resolve_ir_pass_unchecked_leaves_n_passes_untouched():
+    assert resolve_ir_pass_and_n_passes(
+        ir_pass_checked=False, n_passes=5, changed="ir_pass"
+    ) == (False, 5)

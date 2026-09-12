@@ -53,6 +53,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
+from pyopticfilm.scan.exposure_override import MAX_N_PASSES
 from pyopticfilm.usb.decode import decode_transaction
 from tools.scanlab.backend import (
     lab_scan_kwargs,
@@ -146,6 +147,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.multi_exposure and args.kind != "scan":
         raise SystemExit("--multi-exposure requires --kind scan")
 
+    if not (1 <= args.n_passes <= MAX_N_PASSES):
+        raise SystemExit(f"--n-passes must be between 1 and {MAX_N_PASSES}, got {args.n_passes}")
+
     try:
         dpi = args.dpi or prescan_resolution(target.model)
         kw = lab_scan_kwargs(target.model, dpi=dpi, kind=args.kind, crop_norm=crop_norm)
@@ -154,6 +158,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
             mode="color",
             apply_calib=args.apply_calib,
             multi_exposure=args.multi_exposure,
+            single_pass_exposure=args.single_pass_exposure,
+            me_short_exposure=args.me_short_exposure,
+            me_long_exposure=args.me_long_exposure,
+            n_passes=args.n_passes,
+            align_passes=args.align_passes,
             **kw,
         )
         image_info = {"shape": list(image.rgb.shape), "dpi": image.dpi}
@@ -269,7 +278,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str]) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -298,6 +307,32 @@ def main(argv: list[str]) -> int:
         help="2-bracket multi-exposure color scan (scan kind only)",
     )
     p_scan.add_argument(
+        "--n-passes",
+        type=int,
+        default=1,
+        help=f"repeat and stack the short (and, with ME, long) pass this many times, 1-{MAX_N_PASSES} (default: 1)",
+    )
+    p_scan.add_argument("--align-passes", action="store_true", default=True, help="align repeats before stacking (default)")
+    p_scan.add_argument("--no-align-passes", dest="align_passes", action="store_false")
+    p_scan.add_argument(
+        "--single-pass-exposure",
+        type=int,
+        default=None,
+        help="REG_EXPOSURE override for a single (non-ME) pass; debug only, bypasses clamps",
+    )
+    p_scan.add_argument(
+        "--me-short-exposure",
+        type=int,
+        default=None,
+        help="REG_EXPOSURE override for the ME short pass; debug only, bypasses clamps",
+    )
+    p_scan.add_argument(
+        "--me-long-exposure",
+        type=int,
+        default=None,
+        help="REG_EXPOSURE override for the ME long pass; debug only, bypasses clamps",
+    )
+    p_scan.add_argument(
         "--save-tiff-dir",
         default=None,
         help="write the resulting image as a 16-bit TIFF into this directory (human review only, not stored in the run dir)",
@@ -320,7 +355,11 @@ def main(argv: list[str]) -> int:
     p_compare.add_argument("--text", action="store_true", help="also print the human-readable divergence text")
     p_compare.set_defaults(func=cmd_compare)
 
-    args = parser.parse_args(argv[1:])
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv[1:])
     return args.func(args)
 
 
