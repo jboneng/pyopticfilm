@@ -261,6 +261,8 @@ GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
         "max_image_lincnt_by_feed2",
         "ladder_feed2_steps",
         "ladder_lincnt_by_dpi",
+        "me_long_clamp_min",
+        "me_long_clamp_max",
     }
 )
 

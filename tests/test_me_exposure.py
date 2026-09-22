@@ -6,12 +6,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.scan.me_exposure import (
     choose_long_exposure,
     clamp_long_exposure,
     select_long_exposure,
 )
+from pyopticfilm.scan.session_gl128 import clamp_me_long
 
 
 def _rgb(value: float, shape: tuple[int, int] = (32, 32)) -> np.ndarray:
@@ -136,5 +138,15 @@ def test_model_adaptive_envelope_defaults():
     assert MODEL_8200I_SE.me_adaptive_min_exposure == 42000
     assert MODEL_8200I_SE.me_adaptive_max_exposure == 85000
     assert MODEL_8200I_SE.me_hardware_max_exposure == 85000
+    assert MODEL_8200I_SE.me_long_clamp_min == 14000
+    assert MODEL_8200I_SE.me_long_clamp_max == 85000
     assert MODEL_8200I_SE.me_max_exposure_ratio == 7.0
     assert MODEL_8200I_SE.me_target_dense_dn == 10000.0
+
+
+def test_v2_me_long_clamp_stays_at_channel_ceiling():
+    """V2's model ceiling is 64000 at every PPI, including where SE may use 85000."""
+    assert MODEL_8100_V2.me_long_clamp_min == 14000
+    assert MODEL_8100_V2.me_long_clamp_max == 64000
+    assert clamp_me_long(MODEL_8100_V2, 1800, 85000) == 64000
+    assert clamp_me_long(MODEL_8100_V2, 7200, 85000) == 64000

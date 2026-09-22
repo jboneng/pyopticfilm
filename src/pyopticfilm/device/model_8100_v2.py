@@ -139,6 +139,12 @@ class Model8100V2(Gl128Common):
         default_factory=lambda: dict(_LADDER_LINCNT_BY_DPI_V2)
     )
 
+    #: Hard floor for adaptive ME colour-long ``REG_EXPOSURE``.
+    me_long_clamp_min: int = 14_000
+    #: V2 stays at the 64000 AHB-table margin at every PPI. The SE may use
+    #: 85000 where oversampling keeps the per-channel word inside 16 bits.
+    me_long_clamp_max: int = 64_000
+
     def shading_strip_clocks(self, resolution: int, *, dvdset: bool) -> tuple[int, int, int]:
         """Return ``(dummy, clk_a, clk_b)`` for a shading strip.
 

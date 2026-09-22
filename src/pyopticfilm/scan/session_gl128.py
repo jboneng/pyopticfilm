@@ -25,7 +25,7 @@ import numpy as np
 from pyopticfilm.asic.gl128 import DEFAULT_IMAGE_USB_PACE_S
 from pyopticfilm.asic.registers import Gl128Registers
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
-from pyopticfilm.device.protocol import AsicDriver, FilmModel
+from pyopticfilm.device.protocol import AsicDriver, FilmModel, Gl128Model
 from pyopticfilm.device.tables_8200i_se import exposure_table
 from pyopticfilm.exceptions import AsicError, ScanCancelled, ScanError
 from pyopticfilm.logging import get_logger
@@ -53,26 +53,28 @@ _LINE_PERIOD_TO_SECONDS = 1.0 / 4_500_000.0
 #: empty (start/stop creep). Applied only when quiet drain is on.
 _QUIET_DRAIN_LAG = 1.05
 
-#: ME colour-long ``REG_EXPOSURE`` floor (short bin / SilverFast ME short).
-_ME_LONG_MIN = 14_000
-#: ME colour-long ceiling, uniform at every PPI. The AHB per-channel exposure
-#: table (``tables_8200i_se.exposure_table``) is 16-bit, and at oversample == 1
-#: (native optical resolution, e.g. 7200 dpi) ``channel_exposure_for`` passes
-#: the exposure straight through into it unmasked — a value at or above 65536
-#: would silently wrap there while ``REG_EXPOSURE`` itself (24-bit) does not,
-#: desyncing the sensor's per-line timing table from the master exposure
-#: register and jamming the motor on real hardware. 64000 is a safety margin
-#: under that 65536 wrap point, kept uniform across every PPI rather than
-#: raised where oversampling would technically allow more headroom, since a
-#: single validated ceiling is simpler to reason about than a per-PPI one; it
-#: is not itself hardware-validated above the previously-used 42000, only
-#: mathematically safe from the overflow.
-_ME_LONG_MAX = 64_000
+#: AHB per-channel exposure words are 16-bit. At oversample == 1 (native
+#: optical resolution, 7200 dpi) ``channel_exposure_for`` copies
+#: ``REG_EXPOSURE`` into that table unmasked. A value at or above 65536 wraps
+#: there while the 24-bit exposure register does not, desyncing line timing
+#: and jamming the motor (issue #66). 64000 is a margin under that wrap.
+#: Where oversample is 2 or more the same margin is ``64000 * oversample``,
+#: so a model's higher ``me_long_clamp_max`` (SE: 85000) is left intact.
+_ME_CHANNEL_EXPOSURE_MAX = 64_000
 
 
-def clamp_me_long(exp_long: int) -> int:
-    """Clamp ME colour-long exposure into the validated 14000-64000 range."""
-    return min(max(int(exp_long), _ME_LONG_MIN), _ME_LONG_MAX)
+def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
+    """Clamp ME colour-long exposure to the model range and the AHB table.
+
+    ``me_long_clamp_min`` / ``me_long_clamp_max`` are per model. The ceiling
+    is also ``min(model max, 64000 * oversample(resolution))`` so a native
+    7200 dpi pass cannot overflow the 16-bit per-channel exposure table.
+    """
+    lo = int(model.me_long_clamp_min)
+    hi = int(model.me_long_clamp_max)
+    oversample = max(1, int(model.oversample_for(resolution)))
+    hi = min(hi, _ME_CHANNEL_EXPOSURE_MAX * oversample)
+    return min(max(int(exp_long), lo), hi)
 
 
 try:
@@ -622,10 +624,14 @@ class Gl128ScanSession(ScanSession):
                 )
             else:
                 adaptive_max = clamp_me_long(
-                    int(getattr(model, "me_adaptive_max_exposure", exp_long))
+                    model,
+                    geometry.resolution,
+                    int(getattr(model, "me_adaptive_max_exposure", exp_long)),
                 )
                 hardware_max = clamp_me_long(
-                    int(getattr(model, "me_hardware_max_exposure", exp_long))
+                    model,
+                    geometry.resolution,
+                    int(getattr(model, "me_hardware_max_exposure", exp_long)),
                 )
                 exposure_decision = select_long_exposure(
                     rgb_short,
@@ -639,10 +645,10 @@ class Gl128ScanSession(ScanSession):
                     adaptive_max=adaptive_max,
                     hardware_max=hardware_max,
                     max_ratio=float(getattr(model, "me_max_exposure_ratio", 5.0)),
-                    default_long=clamp_me_long(exp_long),
+                    default_long=clamp_me_long(model, geometry.resolution, exp_long),
                 )
                 exp_long = int(exposure_decision.selected)
-                clamped = clamp_me_long(exp_long)
+                clamped = clamp_me_long(model, geometry.resolution, exp_long)
                 if clamped != exp_long:
                     logger.warning(
                         "ME colour-long exposure clamped at %d dpi: %d → %d",

@@ -128,6 +128,8 @@ class Gl128Model(FilmModel, Protocol):
     me_adaptive_min_exposure: int
     me_adaptive_max_exposure: int
     me_hardware_max_exposure: int
+    me_long_clamp_min: int
+    me_long_clamp_max: int
     me_max_exposure_ratio: float
     me_target_dense_dn: float
     me_dense_percentile: float

@@ -94,7 +94,7 @@ scan-ready GL128 **8100 (V2)** (`07b3:1824`).
 | **Refresh devices** | Re-enumerate USB and rebuild the device list. |
 | **PPI** | Resolutions from the selected model’s `resolutions_dpi` (Scan only; Prescan uses a fixed low dpi). |
 | **IR pass** | After colour Scan, run a second infrared pass (disabled if the model has no IR). |
-| **Multi-exposure (ME)** | GL128 / hardware-tested models: short + adaptive long colour passes (14k–64k safety envelope, uniform at every PPI — a margin under the AHB per-channel exposure table's 16-bit width; fallback 42000); host SNR/IVW merge into ``rgb``. Bracket planes on ``Scanner.last_me_debug`` (not ``ScanImage``). |
+| **Multi-exposure (ME)** | GL128 / hardware-tested models: short + adaptive long colour passes. Long clamp is per model: 8200i SE 14k–85k, except 14k–64k at 7200 dpi (oversample 1, under the AHB table's 16-bit width); 8100 V2 14k–64k at every PPI. Fallback 42000. Host SNR/IVW merge into ``rgb``. Bracket planes on ``Scanner.last_me_debug`` (not ``ScanImage``). |
 | **Manual exposure overrides** | GL128 debug/testing only — see [Manual exposure overrides](#manual-exposure-overrides) below. |
 | **Prescan** | Low-res preview (GL128: 1200 dpi safe window; non-scan-ready: lowest dpi + short Y strip). |
 | **Scan** | Colour scan at the chosen PPI; optional IR and/or ME. Uses the prescan crop when one is set (clamped on non-scan-ready). |
@@ -113,7 +113,7 @@ debugging/testing, bypassing the driver's normal soft limits:
 |-------|----------|------------------|
 | **Single-pass exposure** | The retained Scan pass when ME is off. | Model-derived exposure, still clamped to the hardware max. |
 | **ME short exposure** | The ME short pass only. | Model-derived short exposure, still clamped to the hardware max. |
-| **ME long exposure** | The ME long pass only; overrides adaptive selection entirely. | Normal adaptive selection (14k–64k envelope, uniform at every PPI). |
+| **ME long exposure** | The ME long pass only; overrides adaptive selection entirely. | Normal adaptive selection (per-model long clamp: SE 14k–85k, 14k–64k at 7200 dpi; V2 14k–64k). |
 
 Each field is grayed out when it does not apply to the current pass selection
 (e.g. the single-pass field while ME is on). A value is written to

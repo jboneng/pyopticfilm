@@ -57,23 +57,31 @@ Helpers:
 
 ## GL128 multi-exposure long exposure limits
 
-On OpticFilm 8200i SE and 8100 (V2), the ME colour-long `REG_EXPOSURE` is
-clamped 14000–64000 before the long pass runs (`clamp_me_long()` in
-`session_gl128.py`), uniform at every PPI.
+Adaptive ME colour-long `REG_EXPOSURE` is clamped per model before the long
+pass runs (`clamp_me_long()` in `session_gl128.py`):
 
-64000 is a safety margin under 65536: the AHB per-channel exposure table
-(`tables_8200i_se.exposure_table`) is 16-bit, and at oversample == 1 (native
-optical resolution, e.g. 7200 dpi) `channel_exposure_for()` passes the
-exposure straight through into it unmasked — a value at or above 65536 would
-silently wrap there while `REG_EXPOSURE` (24-bit) does not, desyncing the two
-and jamming the motor on real hardware (observed; `exposure_table()` now
-raises instead of wrapping). The ceiling is kept flat across PPI rather than
-raised where oversampling would technically allow more headroom, and is not
-independently hardware-validated above the previously-used 42000.
+| Model | PPI | Long clamp |
+| --- | --- | --- |
+| 8200i SE | not 7200 | 14000–85000 |
+| 8200i SE | 7200 (oversample 1) | 14000–64000 |
+| 8100 (V2) | every PPI | 14000–64000 |
+
+The model fields are `me_long_clamp_min` / `me_long_clamp_max`. The 7200 dpi
+cap is not a second model constant: the ceiling is
+`min(model max, 64000 * oversample)`. Oversample is 1 only at native optical
+resolution, so 85000 on the SE is left intact at 3600 dpi and below.
+
+64000 is a safety margin under 65536. The AHB per-channel exposure table
+(`tables_8200i_se.exposure_table`) is 16-bit, and at oversample == 1
+`channel_exposure_for()` passes the exposure straight through into it
+unmasked — a value at or above 65536 would silently wrap there while
+`REG_EXPOSURE` (24-bit) does not, desyncing the two and jamming the motor on
+real hardware (observed; `exposure_table()` now raises instead of wrapping).
 
 The short bin is unchanged. Single-pass (non-ME) scans are not affected.
-Raised longs (model override / dynamic ME) are capped; stock `exposure_long`
-of 42000 is within range.
+The adaptive selection floor stays `me_adaptive_min_exposure` (42000), which
+is separate from the hard floor of 14000. Stock `exposure_long` of 42000 is
+within range. Manual `me_long_exposure` still bypasses this clamp.
 
 ## Current golden: OpticFilm 8200i, 1800 dpi, RGB16
 
