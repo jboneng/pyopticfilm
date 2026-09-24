@@ -81,10 +81,6 @@ def test_divergent_fields_match_capture_catalog():
         3600: 13732,
         7200: 27476,
     }
-    assert MODEL_8200I_SE.me_long_clamp_min == 14000
-    assert MODEL_8100_V2.me_long_clamp_min == 14000
-    assert MODEL_8200I_SE.me_long_clamp_max == 85000
-    assert MODEL_8100_V2.me_long_clamp_max == 64000
     assert dict(MODEL_8100_V2.ladder_lincnt_by_dpi) == {
         150: 2420,
         300: 2420,

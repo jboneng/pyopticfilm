@@ -349,7 +349,7 @@ The image pass stays `0x17` on both manual feeders.
 | Feed setup | 14000 | 14000 | unknown | inconclusive |
 | ME long default | 42000 | 42000 | unknown | inconclusive |
 | ME adaptive min / max | 42000 / 85000 | 42000 / 85000 | unknown | inconclusive |
-| ME long clamp (not 7200 dpi) | 14000–64000 | 14000–85000 | unknown | different |
+| ME long clamp (not 7200 dpi) | 14000–85000 | 14000–85000 | unknown | inconclusive |
 | ME long clamp (7200 dpi, oversample 1) | 14000–64000 | 14000–64000 | unknown | inconclusive |
 
 LPERIOD is the clear timing split: V2 is a few counts above SE at every

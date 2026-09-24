@@ -120,10 +120,9 @@ with Scanner.open() as scanner:
 ```
 
 Multi-exposure (GL128 / hardware-tested models): short colour pass, then a
-**frame-adaptive** long pass. The long clamp is per model: 8200i SE is
-14k–85k, except 14k–64k at 7200 dpi where oversample is 1 and the AHB
-per-channel exposure table is 16-bit; 8100 (V2) is 14k–64k at every PPI.
-Fallback 42000.
+**frame-adaptive** long pass. The long clamp is 14k–85k on both hardware-tested
+GL128 models, except 14k–64k at 7200 dpi where oversample is 1 and the AHB
+per-channel exposure table is 16-bit. Fallback 42000.
 The SNR/IVW-merged deliverable with film-base makeup is in ``rgb``. Bracket
 planes and fusion stats are on :attr:`~pyopticfilm.scanner.Scanner.last_me_debug`
 (Scan Lab / audit tooling only — not part of the NegPy-facing ``ScanImage``).

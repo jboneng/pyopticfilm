@@ -261,8 +261,6 @@ GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
         "max_image_lincnt_by_feed2",
         "ladder_feed2_steps",
         "ladder_lincnt_by_dpi",
-        "me_long_clamp_min",
-        "me_long_clamp_max",
     }
 )
 
@@ -320,6 +318,8 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "me_adaptive_min_exposure",
         "me_adaptive_max_exposure",
         "me_hardware_max_exposure",
+        "me_long_clamp_min",
+        "me_long_clamp_max",
         "me_max_exposure_ratio",
         "me_target_dense_dn",
         "me_dense_percentile",
@@ -429,6 +429,13 @@ class Gl128Common:
     me_adaptive_min_exposure: int = 42000
     me_adaptive_max_exposure: int = 85000
     me_hardware_max_exposure: int = 85000
+    #: Hard floor for adaptive ME colour-long ``REG_EXPOSURE``.
+    me_long_clamp_min: int = 14_000
+    #: Hard ceiling for adaptive ME colour-long ``REG_EXPOSURE``. At
+    #: oversample == 1 (7200 dpi) :func:`pyopticfilm.scan.session_gl128.clamp_me_long`
+    #: still caps the channel word at 64000, because the AHB exposure table is
+    #: 16-bit and would wrap a value at or above 65536.
+    me_long_clamp_max: int = 85_000
     me_max_exposure_ratio: float = 7.0
     me_target_dense_dn: float = 10000.0
     me_dense_percentile: float = 5.0

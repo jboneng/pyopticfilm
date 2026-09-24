@@ -144,9 +144,10 @@ def test_model_adaptive_envelope_defaults():
     assert MODEL_8200I_SE.me_target_dense_dn == 10000.0
 
 
-def test_v2_me_long_clamp_stays_at_channel_ceiling():
-    """V2's model ceiling is 64000 at every PPI, including where SE may use 85000."""
+def test_v2_me_long_clamp_matches_se():
+    """V2 uses the same 14000–85000 envelope, still cut to 64000 at 7200 dpi."""
     assert MODEL_8100_V2.me_long_clamp_min == 14000
-    assert MODEL_8100_V2.me_long_clamp_max == 64000
-    assert clamp_me_long(MODEL_8100_V2, 1800, 85000) == 64000
+    assert MODEL_8100_V2.me_long_clamp_max == 85000
+    assert clamp_me_long(MODEL_8100_V2, 1800, 85000) == 85000
+    assert clamp_me_long(MODEL_8100_V2, 1800, 90000) == 85000
     assert clamp_me_long(MODEL_8100_V2, 7200, 85000) == 64000

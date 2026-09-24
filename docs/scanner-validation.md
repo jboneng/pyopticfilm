@@ -57,19 +57,19 @@ Helpers:
 
 ## GL128 multi-exposure long exposure limits
 
-Adaptive ME colour-long `REG_EXPOSURE` is clamped per model before the long
-pass runs (`clamp_me_long()` in `session_gl128.py`):
+Adaptive ME colour-long `REG_EXPOSURE` is clamped before the long pass runs
+(`clamp_me_long()` in `session_gl128.py`). 8200i SE and 8100 (V2) share the
+same envelope:
 
-| Model | PPI | Long clamp |
-| --- | --- | --- |
-| 8200i SE | not 7200 | 14000–85000 |
-| 8200i SE | 7200 (oversample 1) | 14000–64000 |
-| 8100 (V2) | every PPI | 14000–64000 |
+| PPI | Long clamp |
+| --- | --- |
+| not 7200 | 14000–85000 |
+| 7200 (oversample 1) | 14000–64000 |
 
-The model fields are `me_long_clamp_min` / `me_long_clamp_max`. The 7200 dpi
+The shared fields are `me_long_clamp_min` / `me_long_clamp_max`. The 7200 dpi
 cap is not a second model constant: the ceiling is
 `min(model max, 64000 * oversample)`. Oversample is 1 only at native optical
-resolution, so 85000 on the SE is left intact at 3600 dpi and below.
+resolution, so 85000 is left intact at 3600 dpi and below.
 
 64000 is a safety margin under 65536. The AHB per-channel exposure table
 (`tables_8200i_se.exposure_table`) is 16-bit, and at oversample == 1

@@ -89,13 +89,5 @@ class Model8200iSE(Gl128Common):
         default_factory=lambda: dict(LADDER_LINCNT_BY_DPI)
     )
 
-    #: Hard floor for adaptive ME colour-long ``REG_EXPOSURE``.
-    me_long_clamp_min: int = 14_000
-    #: Hard ceiling for adaptive ME colour-long ``REG_EXPOSURE``. At
-    #: oversample == 1 (7200 dpi) :func:`pyopticfilm.scan.session_gl128.clamp_me_long`
-    #: still caps the channel word at 64000, because the AHB exposure table is
-    #: 16-bit and would wrap a value at or above 65536.
-    me_long_clamp_max: int = 85_000
-
 
 MODEL_8200I_SE = Model8200iSE()

@@ -59,16 +59,17 @@ _QUIET_DRAIN_LAG = 1.05
 #: there while the 24-bit exposure register does not, desyncing line timing
 #: and jamming the motor (issue #66). 64000 is a margin under that wrap.
 #: Where oversample is 2 or more the same margin is ``64000 * oversample``,
-#: so a model's higher ``me_long_clamp_max`` (SE: 85000) is left intact.
+#: so the shared ``me_long_clamp_max`` of 85000 is left intact.
 _ME_CHANNEL_EXPOSURE_MAX = 64_000
 
 
 def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
-    """Clamp ME colour-long exposure to the model range and the AHB table.
+    """Clamp ME colour-long exposure to the shared range and the AHB table.
 
-    ``me_long_clamp_min`` / ``me_long_clamp_max`` are per model. The ceiling
-    is also ``min(model max, 64000 * oversample(resolution))`` so a native
-    7200 dpi pass cannot overflow the 16-bit per-channel exposure table.
+    ``me_long_clamp_min`` / ``me_long_clamp_max`` are shared by both GL128
+    models (14000–85000). The ceiling is also
+    ``min(model max, 64000 * oversample(resolution))`` so a native 7200 dpi
+    pass cannot overflow the 16-bit per-channel exposure table.
     """
     lo = int(model.me_long_clamp_min)
     hi = int(model.me_long_clamp_max)
