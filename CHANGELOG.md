@@ -15,21 +15,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Scan Lab Forensic tab**: guided evidence recording, live anomaly detection, USB timeline (Event Inspector, motor/lamp state lanes, duration brackets), Known/Unknown values panel, and a Reference page backed by a confidence-tagged register/bit catalog (`tools/register_reference.py`) for GL128 SE/V2 and GL845. Timeline milestones cover slope-table identity (FAST/SLOW/CUSTOM), feed timing, and LPERIOD/EXPOSURE/pixel-clock.
 - **Scan Lab headless compare**: `list-runs` and `compare` on `python -m tools.scanlab.cli` wrap the same baseline-diff / AI bug-report path as the GUI Run browser (no Qt).
 - **GL128 three-model comparison**: capture-backed tables of registers, timings, FEEDL, and geometry for 8100 V2, 8200i SE, and 135i (`docs/gl128-model-comparison.md`), with a same/different/unknown verdict per row.
+- **GL128 Multi-Pass**: `Scanner.scan(n_passes=1..9)` repeats an already-validated exposure and stacks the aligned repeats. `n_passes=1` is unchanged. With `multi_exposure=True`, both the short and adaptive-long passes are stacked (Adaptive Multi-Pass). `infrared=True` with `n_passes>1` raises `ScanError`. Per-slot stats are on `Scanner.last_multi_pass_debug`. Scan Lab has a Multi-Pass N control (disabled when IR is on) and the headless CLI matches (`n_passes`, `align_passes`).
 
 ### Changed
 
-- **GL128 adaptive ME long clamp** is **14000–85000** on both 8200i SE and 8100 (V2), except **14000–64000** at 7200 dpi (oversample 1), where the 16-bit AHB exposure table would wrap a higher value. The adaptive selection floor remains 42000.
-- **8100 V2 model class** no longer subclasses the 8200i SE dataclass. Shared identical GL128 tables and helpers live in `device/gl128_common.py`; capture-proven divergences are declared on each leaf. Scan behaviour is unchanged.
-- **Register reference catalog**: V2 `REG_LPERIOD` at 7200 dpi and `REG_DEPTH_A`/`REG_DEPTH_B` image/shading pairs confirmed against a fresh 8100 V2 capture set; documents the V2 cancel/park recipe matching SE session 08.
+- **GL128 adaptive ME long clamp** is **14000–85000** on both 8200i SE and 8100 (V2), except **14000–64000** at 7200 dpi (oversample 1), where the 16-bit AHB exposure table would wrap a higher value. The adaptive selection floor remains 42000. Adaptive is the only automatic long-exposure mode.
+- **8100 V2 model class** no longer subclasses the 8200i SE dataclass. Shared identical GL128 tables and helpers live in `device/gl128_common.py`; capture-proven divergences are declared on each leaf.
+- **8100 V2 positioning slopes** are slow-then-fast, matching the 8200i SE. The `use_slow_final_positioning_feed` flag is gone. Confirmed on V2 hardware.
+- **Register reference catalog**: V2 `REG_LPERIOD` at 7200 dpi and `REG_DEPTH_A`/`REG_DEPTH_B` image/shading pairs confirmed against a fresh 8100 V2 capture set; documents the V2 cancel/park recipe matching SE session 08. `0x1D` is documented as a hazard whose real pattern is shading-vs-image (not "7200 dpi image pass only"). The opaque boot/scan blast was re-checked across ME/IR/crop captures.
+- **Scan Lab headless CLI** `scan` accepts `--crop`, `--multi-exposure`, and `--save-tiff-dir`.
 
 ### Fixed
 
-- **Scan Lab CLI priming**: headless `scan` no longer forces `--gl128-prime` on by default; omit both flags to use the model default (V2 off), or pass `--gl128-prime` / `--no-gl128-prime` explicitly.
+- **ME AHB exposure table**: `exposure_table()` raises `ValueError` for a channel word outside 0–65535 instead of silently wrapping it. A wrapped table desynced from 24-bit `REG_EXPOSURE` and jammed the motor at 7200 dpi ([#66](https://github.com/jboneng/pyopticfilm/issues/66)).
+- **8200i SE full-frame origin**: `feed_to_scan_steps` is **13128** (true scan-window top). The old 13704 overran the window at high DPI and aborted full-frame scans ([#67](https://github.com/jboneng/pyopticfilm/issues/67)).
+- **8100 V2 ladder crop height**: `ladder_lincnt_by_dpi` is V2's own table. The shared SE table was too short because the V2 ladder crop starts 432 feed steps earlier.
+- **Calibration cache**: a corrupt or truncated cache is treated as empty instead of raising out of `Calibrator` construction. Saves are atomic (write temp, then replace).
+- **AFE search errors**: a `TypeError` raised inside measurement is no longer swallowed and replaced with table-default calibration.
 - **Scan Lab worker threading**: connect `request_*` signals after `moveToThread` so queued slots (prescan, scan, Forensic poll) run on the worker thread.
+
+### Removed
+
+- **GL128 priming pass**: the discarded first-scan prime, `gl128_prime`, and the Scan Lab / CLI priming controls. Both models already defaulted it off, and it does not appear in vendor captures.
+- **Fixed ME long-exposure mode**: `me_exposure_mode`, `fixed_long_exposure()`, and Scan Lab's "Fixed 42k long" control. A static 42000 long exposure is the adaptive floor.
 
 ### Contributors
 
-- [@TobbyTravel](https://github.com/TobbyTravel) for the Scan Lab Forensic tab and register reference catalog, Forensic timing milestones/timeline UX, headless `compare`, CLI priming default fix, worker threading fix, and fresh 8100 V2 capture-backed register-reference confirmations.
+- [@TobbyTravel](https://github.com/TobbyTravel) for the Scan Lab Forensic tab and register reference catalog, Forensic timing milestones/timeline UX, headless `compare` and scan flags, worker threading fix, 8100 V2 slope-table order, ladder `LINCNT`, priming removal, 8200i SE scan-window top, and the `0x1D` register-catalog correction.
 
 ## [1.3.3] - 2026-08-30
 
