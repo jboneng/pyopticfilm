@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-09-25
+
 ### Added
 
 - **Cross-model GL128 safeguards**: required-field `Gl128Model` contract, sibling-diff catalog (`GL128_DIVERGENT_FIELDS`), and 8100 V2 model-lock oracles so a fix for one hardware-tested GL128 model cannot silently retarget the other. Contributor policy is in `CONTRIBUTING.md`.
