@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **GL128 adaptive ME long clamp** is **14000–85000** on both 8200i SE and 8100 (V2), except **14000–64000** at 7200 dpi (oversample 1), where the 16-bit AHB exposure table would wrap a higher value. The adaptive selection floor remains 42000.
 - **8100 V2 model class** no longer subclasses the 8200i SE dataclass. Shared identical GL128 tables and helpers live in `device/gl128_common.py`; capture-proven divergences are declared on each leaf. Scan behaviour is unchanged.
 - **Register reference catalog**: V2 `REG_LPERIOD` at 7200 dpi and `REG_DEPTH_A`/`REG_DEPTH_B` image/shading pairs confirmed against a fresh 8100 V2 capture set; documents the V2 cancel/park recipe matching SE session 08.
 
