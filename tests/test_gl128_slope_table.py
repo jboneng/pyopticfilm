@@ -101,3 +101,62 @@ def test_position_for_full_frame_scan_uses_slow_then_fast_on_v2(monkeypatch):
     assert ahb_writes[1] == slow
     assert ahb_writes[2] == fast
     assert ahb_writes[3] == fast
+
+
+def test_sticky_probe_does_not_finish_feed_while_motor_runs(monkeypatch):
+    """A leftover 0x21=0x04 must not end the feed while the motor is still on."""
+    import pyopticfilm.asic.gl128 as gl128_mod
+    from pyopticfilm.asic.status import ScannerStatus
+
+    clock = {"t": 0.0}
+
+    def monotonic():
+        return clock["t"]
+
+    def sleep(seconds, *_args, **_kwargs):
+        clock["t"] += float(seconds)
+
+    monkeypatch.setattr(gl128_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(gl128_mod.time, "sleep", sleep)
+
+    samples = (
+        [(0x04, True, False)] * 10
+        + [(0x00, True, False)]
+        + [(0x04, True, False)]
+        + [(0x04, False, True)]
+    )
+    index = {"n": 0}
+    saw_motor_on_after_floor = {"ok": False}
+
+    def read_probe():
+        return samples[min(index["n"], len(samples) - 1)][0]
+
+    def read_status():
+        _probe, motor, finished = samples[min(index["n"], len(samples) - 1)]
+        index["n"] += 1
+        if clock["t"] >= 0.25 and motor:
+            saw_motor_on_after_floor["ok"] = True
+        return ScannerStatus(
+            raw=0,
+            is_replugged=False,
+            is_buffer_empty=True,
+            is_feeding_finished=finished,
+            is_scanning_finished=False,
+            is_at_home=False,
+            is_lamp_on=True,
+            is_front_end_busy=False,
+            is_motor_enabled=motor,
+        )
+
+    asic = Gl128(MagicMock(), MODEL_8200I_SE)
+    asic._read_feed_probe = read_probe
+    asic.read_status_reliable = read_status
+    asic._wait_feed_probe_done(
+        steps=13128,
+        timeout_s=5.0,
+        stale_done=True,
+        require_motion=True,
+        min_motion_s=0.25,
+    )
+    assert saw_motor_on_after_floor["ok"]
+    assert index["n"] == len(samples)

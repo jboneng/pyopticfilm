@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **8200i SE 7200 dpi line timing** follows the native window width (`LPERIOD` and dummy/clock bytes from four SilverFast widths). A window wider than 10200 native pixels keeps the 15963 dpi-table period. The 8100 V2 7200 dpi period stays 16035.
 - **GL128 host CCD stagger** at 1440, 2400, and 7200 dpi, with a separate dark level for even and odd columns. The ASIC stagger bit stays clear.
 
+### Fixed
+
+- **GL128 positioning feed** waits until `0x21` has left `0x04` and the motor is idle. A leftover completion used to end the fast feed while it was still moving, so the image pass could start on that move: a high fast whine, a white band along the top, and a black frame.
+- **GL128 colour lamp** is turned on before the positioning feeds, so the tube can settle during that move.
+
 ## [1.3.4] - 2026-09-25
 
 ### Added

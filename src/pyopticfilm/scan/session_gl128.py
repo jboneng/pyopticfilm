@@ -326,6 +326,10 @@ class Gl128ScanSession(ScanSession):
                     f"scan-window end. Max LINCNT here is {max_lc} "
                     "(see captures/8200i-se/MOTOR.md)."
                 )
+            # Colour lamp before the feeds so the tube can settle during the
+            # move. Infrared keeps its lamp write after the register blast.
+            if self._lamp_requested and not infrared:
+                self.asic.lamp_on()
             self.asic.position_for_full_frame_scan(scan_steps=scan_steps)
 
         self.asic.upload_tables(
@@ -342,10 +346,13 @@ class Gl128ScanSession(ScanSession):
         self.asic.protocol.write_registers_batched(sorted(cache.items()))
         self.asic._reg_cache.update(cache)
 
-        if self._lamp_requested:
-            self.asic.lamp_on()
-        else:
+        # Colour image passes already struck the lamp before positioning.
+        # ``0x03`` is left out of the register blast, so that write stands.
+        # With the motor gated off there is no feed, so the lamp is struck here.
+        if not self._lamp_requested:
             self.asic.lamp_off()
+        elif shading or infrared or not getattr(self.asic, "_motor_moves_enabled", False):
+            self.asic.lamp_on()
 
         # Base class feed-wait uses this; GL128 feeds synchronously above.
         self._feedl = 0

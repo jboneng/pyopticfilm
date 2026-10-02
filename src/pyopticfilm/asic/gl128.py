@@ -1638,14 +1638,16 @@ class Gl128:
     ) -> None:
         """Wait for a feed to finish.
 
-        When ``require_motion`` is true (positioning feeds), the wait is
-        capture-faithful: it refuses to accept a stale ``0x21=0x04``
-        completion. Instead, it requires observing motor motion on the
-        `0x101` status register at least once before accepting completion.
+        When ``require_motion`` is true (positioning feeds), a leftover
+        ``0x21=0x04`` from the previous feed is ignored until the probe
+        reads something else after ``START``. Completion also requires the
+        motor to be idle, so a fast move still in progress cannot be treated
+        as finished.
         """
         deadline = time.monotonic() + timeout_s
         motion_seen = False
         motion_start_t: float | None = None
+        probe_cleared = not stale_done
         while time.monotonic() < deadline:
             probe = self._read_feed_probe()
             status = self.read_status_reliable()
@@ -1655,6 +1657,8 @@ class Gl128:
                 if status.is_feeding_finished and not status.is_motor_enabled:
                     return
             else:
+                if probe != _FEED_PROBE_DONE:
+                    probe_cleared = True
                 if not motion_seen:
                     # Phase 1: observe motion (use 0x101's MOTORENB bit).
                     if status.is_motor_enabled:
@@ -1667,9 +1671,9 @@ class Gl128:
                     if min_motion_s is not None and motion_start_t is not None and (time.monotonic() - motion_start_t) < min_motion_s:
                         time.sleep(HOME_POLL_S)
                         continue
-                    if probe == _FEED_PROBE_DONE:
-                        return
-                    if status.is_feeding_finished and not status.is_motor_enabled:
+                    motor_idle = not status.is_motor_enabled
+                    probe_done = probe == _FEED_PROBE_DONE and probe_cleared
+                    if motor_idle and (probe_done or status.is_feeding_finished):
                         return
             time.sleep(HOME_POLL_S)
         # Feed timed out — clear SCAN and drop motor power (not an AGOHOME park).
