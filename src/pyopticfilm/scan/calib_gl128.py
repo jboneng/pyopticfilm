@@ -1073,6 +1073,45 @@ def channel_means_u16(
     return (sums[0] / pixels, sums[1] / pixels, sums[2] / pixels)
 
 
+def _rgb_mean(acc: list[int], count: int) -> tuple[int, int, int]:
+    return (round(acc[0] / count), round(acc[1] / count), round(acc[2] / count))
+
+
+def parity_dark_from_columns(
+    dark_per_pixel: Sequence[Sequence[int]],
+) -> list[tuple[int, int, int]]:
+    """Broadcast the even-column mean and the odd-column mean separately.
+
+    At 1440, 2400, and 7200 dpi the two CCD rows land on alternate columns
+    and their dark levels differ. One mean leaves a stripe in the shadows.
+    """
+    if not dark_per_pixel:
+        raise ValueError("dark_per_pixel is empty")
+    even = [0, 0, 0]
+    odd = [0, 0, 0]
+    n_even = n_odd = 0
+    for i, sample in enumerate(dark_per_pixel):
+        if len(sample) != 3:
+            raise ValueError("each dark sample must be length-3 RGB")
+        acc = even if i % 2 == 0 else odd
+        if i % 2 == 0:
+            n_even += 1
+        else:
+            n_odd += 1
+        for c in range(3):
+            acc[c] += int(sample[c])
+    if n_even == 0:
+        mean = _rgb_mean(odd, n_odd)
+        even_mean = odd_mean = mean
+    elif n_odd == 0:
+        mean = _rgb_mean(even, n_even)
+        even_mean = odd_mean = mean
+    else:
+        even_mean = _rgb_mean(even, n_even)
+        odd_mean = _rgb_mean(odd, n_odd)
+    return [even_mean if i % 2 == 0 else odd_mean for i in range(len(dark_per_pixel))]
+
+
 def constant_dark_from_columns(
     dark_per_pixel: Sequence[Sequence[int]],
 ) -> list[tuple[int, int, int]]:

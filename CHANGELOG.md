@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **GL128 cold-boot clock and lamp train**: vendor request `0x8c` to indices `0x10` and `0x13`, and the `0x03` lamp pulse train, including a second train on the first shading pass. After a power cycle the analog levels stay about 25% high and a single `0x20` leaves the lamp on until these run.
+
+### Changed
+
+- **8200i SE 7200 dpi line timing** follows the native window width (`LPERIOD` and dummy/clock bytes from four SilverFast widths). A window wider than 10200 native pixels keeps the 15963 dpi-table period. The 8100 V2 7200 dpi period stays 16035.
+- **GL128 host CCD stagger** at 1440, 2400, and 7200 dpi, with a separate dark level for even and odd columns. The ASIC stagger bit stays clear.
+
 ## [1.3.4] - 2026-09-25
 
 ### Added

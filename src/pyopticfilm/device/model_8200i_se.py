@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """OpticFilm 8200i SE model tables (GL128).
 
-SANE genesys has no GL128 command set, so nothing here is ported from SANE.
-Every register value is taken from USB captures of the Windows driver stored in
-``captures/8200i-se/``; each table below names the session that produced it.
+SANE genesys now has a GL128 driver ported from this project and checked
+against SilverFast. The 7200 dpi width timing on this model follows that
+check. Every other register value is taken from USB captures of the Windows
+driver stored in ``captures/8200i-se/``; each table below names the session
+that produced it.
 See ``captures/8200i-se/PROTOCOL.md`` for the full protocol synthesis and
 ``SESSION_LOG.md`` / per-session ``NOTES.md`` for decode detail.
 
@@ -88,6 +90,38 @@ class Model8200iSE(Gl128Common):
     ladder_lincnt_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(LADDER_LINCNT_BY_DPI)
     )
+
+    def timing_for_native_width(
+        self, resolution: int, width_native: int
+    ) -> tuple[int, tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]] | None:
+        """7200 dpi line timing for a native window, or ``None`` to use the DPI table.
+
+        SilverFast sets ``LPERIOD``, dummy and pixel clocks from the window
+        width at 7200 dpi. Four captured widths are the rows below; a wider
+        window keeps :meth:`line_period_for` (15963) and the DPI clock tables.
+        The 8100 V2 does not use this — its 7200 dpi line period stays 16035.
+        """
+        if self.asic_dpi_for(resolution) != 7200:
+            return None
+        width = int(width_native)
+        for max_width, lperiod, image, dark, white in _SE_7200_WIDTH_PROGRAMS:
+            if width <= max_width:
+                return lperiod, image, dark, white
+        return None
+
+
+#: ``(max native width, LPERIOD, image clocks, dark clocks, white clocks)``.
+#: Clocks are ``(0x2B, 0xA5, 0xAB)``. ``LPERIOD = 10851 + width/2`` on these
+#: four SilverFast 7200 dpi captures; the clock bytes do not follow a formula.
+_SE_7200_WIDTH_PROGRAMS: tuple[
+    tuple[int, int, tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]],
+    ...,
+] = (
+    (1416, 11559, (0x03, 0x01, 0x01), (0x04, 0x01, 0x30), (0x02, 0x02, 0x02)),
+    (2832, 12267, (0x05, 0x01, 0x01), (0x07, 0x01, 0x30), (0x03, 0x02, 0x02)),
+    (5664, 13683, (0x09, 0x01, 0x01), (0x0D, 0x01, 0x30), (0x09, 0x01, 0x01)),
+    (10200, 15951, (0x17, 0x01, 0x01), (0x17, 0x01, 0x30), (0x0F, 0x01, 0x01)),
+)
 
 
 MODEL_8200I_SE = Model8200iSE()

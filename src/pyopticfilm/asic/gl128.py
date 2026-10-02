@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """GL128 driver for OpticFilm 8200i SE and 8100 (V2).
 
-SANE genesys has no GL128 command set, so none of this is ported from SANE.
-Every register write below replays what the Windows driver does in the USB
-captures under ``captures/8200i-se/``; the model tables live in
-``pyopticfilm.device.gl128_common`` (8100 V2 is a sibling leaf, not an SE subclass).
+The register map replays the Windows driver captures under
+``captures/8200i-se/``. Cold-boot clock requests and the ``0x03`` lamp pulse
+train follow SilverFast via the SANE GL128 driver (genesys ``gl128.cpp``):
+without them a power cycle leaves analog levels high and the lamp stuck on.
+Model tables live in ``pyopticfilm.device.gl128_common`` (8100 V2 is a sibling
+leaf, not an SE subclass).
 
 Differences from :class:`~pyopticfilm.asic.gl845.Gl845` that matter here:
 
@@ -61,6 +63,7 @@ from pyopticfilm.scan.calib_gl128 import (
     declared_shading_size,
     equalize_ir_white_columns,
     make_unity_white_table,
+    parity_dark_from_columns,
     search_afe_codes,
     shading_acquire_width,
     shading_columns_mean,
@@ -210,6 +213,8 @@ class Gl128:
         #: Set after a successful :meth:`run_asic_shading` upload this session.
         #: IR Lab never sets this — ASIC DVDSET clipped IR to full scale.
         self.asic_shading_ready = False
+        #: Second ``0x03`` lamp train still owed, once after :meth:`asic_boot`.
+        self._lamp_boot_sequence_pending = False
         #: Equalized per-column IR white (one value/column) for host flatten.
         self.last_ir_host_white: list[int] | None = None
         #: True when :attr:`last_ir_host_white` passed the IR validator.
@@ -796,8 +801,18 @@ class Gl128:
             dpiset=dpiset,
         )
         clocks = getattr(self.model, "shading_strip_clocks", None)
-        if callable(clocks):
+        timing_fn = getattr(self.model, "timing_for_native_width", None)
+        program = (
+            timing_fn(int(resolution), end - start)
+            if callable(timing_fn)
+            else None
+        )
+        if program is not None:
+            lperiod, _image, dark_clocks, white_clocks = program
+            dummy, clk_a, clk_b = white_clocks if dvdset else dark_clocks
+        elif callable(clocks):
             dummy, clk_a, clk_b = clocks(int(resolution), dvdset=dvdset)
+            lperiod = int(self.model.line_period_for(int(resolution)))
         else:
             asic_dpi = self.model.asic_dpi_for(int(resolution))
             dummy_map = getattr(self.model, "dummy_by_dpi", None)
@@ -805,6 +820,7 @@ class Gl128:
             dummy = int(dummy_map.get(asic_dpi, 0x02)) if dummy_map else 0x02
             clk = int(clock_map.get(asic_dpi, 0x02)) if clock_map else 0x02
             clk_a = clk_b = clk
+            lperiod = int(self.model.line_period_for(int(resolution)))
         # Session 04 leaves the geometry standing between the dark strip and the
         # DVDSET white; write it on both so a white strip never inherits a stale
         # window (the values are identical when the caller passes one window).
@@ -818,7 +834,7 @@ class Gl128:
         self.protocol.write_u24(r.REG_STRPIXEL, start)
         self.protocol.write_u24(r.REG_ENDPIXEL, end)
         self.protocol.write_u24(r.REG_FEEDL, 1)
-        self.protocol.write_u24(r.REG_LPERIOD, int(self.model.line_period_for(int(resolution))))
+        self.protocol.write_u24(r.REG_LPERIOD, int(lperiod))
         self.protocol.write_u24(r.REG_EXPOSURE, int(self.model.exposure_lperiod))
         self._write(r.REG_DEPTH_A, r.DEPTH16_A)
         self._write(r.REG_DEPTH_B, r.DEPTH16_B)
@@ -1001,6 +1017,7 @@ class Gl128:
             self.set_scan_method(method)
         infrared = self._scan_method == "infrared"
         self._require_carriage_at_home("ASIC shading start")
+        self._second_lamp_train()
         start, end, used_dpiset = self._shading_window(
             pixels=shading_width_for_resolution(resolution),
             resolution=resolution,
@@ -1056,7 +1073,20 @@ class Gl128:
                 shading_columns_mean(dark[:n]),
                 dark[0],
             )
-        unity = make_unity_white_table(dark, declared_size=declared)
+        step = max(
+            1,
+            self.model.optical_resolution // max(1, self.model.asic_dpi_for(int(resolution))),
+        )
+        if infrared or step % 2 == 0:
+            table_dark = dark
+        else:
+            table_dark = parity_dark_from_columns(dark)
+            logger.info(
+                "GL128 parity dark even=%s odd=%s",
+                table_dark[0],
+                table_dark[1] if len(table_dark) > 1 else table_dark[0],
+            )
+        unity = make_unity_white_table(table_dark, declared_size=declared, flatten_dark=not infrared and step % 2 == 0)
         self.upload_shading_table(unity)
 
         # SF session 04: lamp on → exposure AHB → arm DVDSET (0x22) → white strip.
@@ -1106,7 +1136,12 @@ class Gl128:
                 white[0],
             )
         gains = shading_gains_from_white(white)
-        measured = build_measured_shading_table(dark, white, declared_size=declared)
+        measured = build_measured_shading_table(
+            table_dark,
+            white,
+            declared_size=declared,
+            flatten_dark=not infrared and step % 2 == 0,
+        )
         self.upload_shading_table(measured)
         self._write(self.registers.REG_0x02, 0x00)
         self._require_carriage_at_home("ASIC shading end")
@@ -1242,10 +1277,14 @@ class Gl128:
         )
 
     def asic_boot(self, *, cold: bool | None = None) -> None:
-        """Replay the captured cold-boot sequence.
+        """Replay the captured cold-boot sequence, then the clock and lamp train.
 
-        The Windows driver performs no soft reset and never writes ``0x0E``-
-        ``0x10``, so neither does this.
+        The Windows driver performs no soft reset. After the register blast,
+        SilverFast sends vendor request ``0x8c`` to indices ``0x10`` and
+        ``0x13`` (value ``0x0c``) and a ``0x03`` pulse train. Without the
+        clock request, a power cycle leaves every analog level about 25% high
+        and the white reference clips. Without the train, ``0x03=0x20`` does
+        not switch the lamp off. Both last until the next power cycle.
         """
         del cold
         self.protocol.write_ahb(_BOOT_BLOB_ADDR_A, _BOOT_BLOB_A)
@@ -1254,12 +1293,66 @@ class Gl128:
         self._write_many(dict(self.model.memory_layout_regs))
         self.set_frontend_init()
         self._write_many(dict(self.model.gpo_regs))
+        self._boot_clock_and_lamp()
         logger.info(
             "GL128 boot: %d init + %d layout + %d gpo registers",
             len(self.model.init_regs),
             len(self.model.memory_layout_regs),
             len(self.model.gpo_regs),
         )
+
+    def _write_clock_setup(self) -> None:
+        """SilverFast clock set-up: ``0x8c`` to indices ``0x10`` and ``0x13``."""
+        self.protocol.write_0x8c(0x10, 0x0C)
+        self.protocol.write_0x8c(0x13, 0x0C)
+
+    def _write_lamp_pulses(self, values: tuple[int, ...]) -> None:
+        """Write ``0x03`` values 1.5 ms apart, as in SilverFast's captures."""
+        r = self.registers
+        first = True
+        for value in values:
+            if not first:
+                time.sleep(0.0015)
+            first = False
+            self._write(r.REG_0x03, int(value))
+
+    def _boot_clock_and_lamp(self) -> None:
+        """Clock requests and the first lamp pulse train."""
+        r = self.registers
+        self._write_clock_setup()
+        self._write(0x0B, 0x44)
+        self._write(0x13, 0x0F)
+        self._write(0x0B, 0x4C)
+        lamp_off_at = time.monotonic()
+        self._write_lamp_pulses((0x10, 0x00))
+        self._write(r.REG_DEPTH_A, 0x07)
+        self._write(r.REG_DEPTH_A, 0x07)
+        time.sleep(0.023)
+        self._write(r.REG_DEPTH_A, 0x17)
+        self._write(r.REG_DEPTH_A, 0x1F)
+        remain = 0.055 - (time.monotonic() - lamp_off_at)
+        if remain > 0:
+            time.sleep(remain)
+        self._write_lamp_pulses((0x20, 0x30, 0x20, 0x30))
+        time.sleep(0.065)
+        self._write_clock_setup()
+        self._write(0x13, 0x08)
+        self._lamp_boot_sequence_pending = True
+
+    def _second_lamp_train(self) -> None:
+        """Second ``0x03`` train, once, before the first shading pass."""
+        if not self._lamp_boot_sequence_pending:
+            return
+        r = self.registers
+        self._write(r.REG_0x03, r.XPASEL)
+        self._write(r.REG_DEPTH_A, r.DEPTH16_A)
+        self.set_frontend_init()
+        time.sleep(0.190)
+        self._write(r.REG_0x03, 0x00)
+        time.sleep(0.0023)
+        self._write_lamp_pulses((0x20, 0x20, 0x30, 0x20, 0x30))
+        self._lamp_boot_sequence_pending = False
+        logger.info("GL128 second lamp pulse train")
 
     def init(self, *, force: bool = False) -> None:
         if self._initialized and not force:

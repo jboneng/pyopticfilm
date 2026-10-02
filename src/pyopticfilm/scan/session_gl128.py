@@ -191,18 +191,25 @@ class Gl128ScanSession(ScanSession):
         cache = model.boot_register_map()
         cache.update(model.gpo_regs)
         cache.update(model.sensor_custom_regs)
+        image_lperiod = None
 
         try:
             asic_dpi = model.asic_dpi_for(dpi)
-            cache[0x2B] = model.dummy_by_dpi[asic_dpi]
-            long_pass = bool(self._pass_long_exposure)
-            clk_fn = getattr(model, "pixel_clock_for_image", None)
-            if callable(clk_fn):
-                clk = int(clk_fn(dpi, long_exposure=long_pass))
+            width_native = int(geometry.pixel_endx) - int(geometry.pixel_startx)
+            program = self._width_program(dpi, width_native)
+            if program is not None:
+                image_lperiod, image_clocks, _dark_clocks, _white_clocks = program
+                cache[0x2B], cache[0xA5], cache[0xAB] = image_clocks
             else:
-                clk = int(model.pixel_clock_by_dpi[asic_dpi])
-            cache[0xA5] = clk
-            cache[0xAB] = clk
+                cache[0x2B] = model.dummy_by_dpi[asic_dpi]
+                long_pass = bool(self._pass_long_exposure)
+                clk_fn = getattr(model, "pixel_clock_for_image", None)
+                if callable(clk_fn):
+                    clk = int(clk_fn(dpi, long_exposure=long_pass))
+                else:
+                    clk = int(model.pixel_clock_by_dpi[asic_dpi])
+                cache[0xA5] = clk
+                cache[0xAB] = clk
         except KeyError as exc:
             raise ScanError(
                 f"No capture-derived register values for {dpi} dpi on "
@@ -243,7 +250,9 @@ class Gl128ScanSession(ScanSession):
         cache[r.REG_0x02] = motor
 
         self._set24(cache, r.REG_LINCNT, geometry.lincnt_register)
-        self._set24(cache, r.REG_LPERIOD, model.line_period_for(dpi))
+        if image_lperiod is None:
+            image_lperiod = model.line_period_for(dpi)
+        self._set24(cache, r.REG_LPERIOD, int(image_lperiod))
         # Captures: AFE/shading always use DPISET = optical_resolution/6 (1200).
         dpiset = (
             model.optical_resolution // 6 if shading else geometry.register_dpiset
@@ -825,8 +834,21 @@ class Gl128ScanSession(ScanSession):
             )
 
     def _line_interval_s(self, geometry: ScanGeometry) -> float:
+        start = getattr(geometry, "pixel_startx", None)
+        end = getattr(geometry, "pixel_endx", None)
+        if isinstance(start, int) and isinstance(end, int) and not isinstance(start, bool):
+            program = self._width_program(geometry.resolution, end - start)
+            if program is not None:
+                return float(program[0]) * _LINE_PERIOD_TO_SECONDS
         lperiod = float(self.model.line_period_for(geometry.resolution))
         return lperiod * _LINE_PERIOD_TO_SECONDS
+
+    def _width_program(self, resolution: int, width_native: int):
+        """SE 7200 dpi width row, or ``None`` when the DPI table still applies."""
+        timing_fn = getattr(self.model, "timing_for_native_width", None)
+        if not callable(timing_fn):
+            return None
+        return timing_fn(int(resolution), int(width_native))
 
     @staticmethod
     def _chunk_bytes(geometry: ScanGeometry, remaining: int) -> int:

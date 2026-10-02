@@ -212,11 +212,14 @@ STAGGER_BY_DPI: dict[int, tuple[int, ...]] = {
     720: (),
     900: (),
     1200: (),
-    1440: (),
+    # Host correction after Y pair-average. The ASIC STAGGER bit stays clear.
+    # Column step is odd at these PPIs, so the two CCD rows (4/7200 inch
+    # apart) land on alternate output columns. Even columns are delayed.
+    1440: (1, 0),
     1800: (),
-    2400: (),
+    2400: (2, 0),
     3600: (),
-    7200: (),
+    7200: (4, 0),
 }
 
 ALL_PPI: tuple[int, ...] = (
