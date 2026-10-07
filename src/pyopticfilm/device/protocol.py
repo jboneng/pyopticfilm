@@ -167,6 +167,10 @@ class Gl128Model(FilmModel, Protocol):
 
     def image_exposure(self, *, long_exposure: bool = False) -> int: ...
 
+    def feed_to_scan_steps_for_dpi(
+        self, resolution: int, *, long_exposure: bool = False
+    ) -> int: ...
+
     def feed_to_scan_steps_for_area(
         self,
         area: tuple[float, float, float, float] | None = None,

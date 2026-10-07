@@ -46,10 +46,21 @@ _STATUS_IN_MAX = 512
 
 #: GL128 ``REG_EXPOSURE`` (0x7D) — session 14 multi-exposure bracket.
 _REG_EXPOSURE = 0x7D
+#: SE/V2 defaults when no decode model is passed (session 14: 14000 / 3×).
 ME_EXPOSURE_SHORT = 14000
-ME_EXPOSURE_LONG = 42000  # exactly 3× short
+ME_EXPOSURE_LONG = 42000  # exactly 3× short (SE session 14; adaptive may differ)
 #: Accept carved bulks this close to the announced size (truncated captures).
 _CARVE_COMPLETE_FRAC = 0.98
+
+
+def _me_exposure_short(model: FilmModel | None) -> int:
+    """Short-bracket exposure for ME labeling (leaf ``exposure_short`` or SE default)."""
+    if model is None:
+        return ME_EXPOSURE_SHORT
+    short = getattr(model, "exposure_short", None)
+    if short is None:
+        return ME_EXPOSURE_SHORT
+    return int(short)
 
 _USBPCAP_BASE = struct.Struct("<HQiHBHHBBI")
 assert _USBPCAP_BASE.size == 27
@@ -217,16 +228,30 @@ def exposure_from_regs(regs: dict[int, int]) -> int | None:
     return _u24(regs, _REG_EXPOSURE)
 
 
-def is_me_long_pass(regs: dict[int, int]) -> bool:
-    """True for the long multi-exposure color bracket (session 14: 42000)."""
+def is_me_long_pass(
+    regs: dict[int, int], *, model: FilmModel | None = None
+) -> bool:
+    """True for a non-IR colour pass above the model's short exposure.
+
+    With no model, matches SE session 14 exactly (``ME_EXPOSURE_LONG``). With
+    a model, any ``exp > exposure_short`` counts as long (SE 42000, 8300i
+    adaptive ~60000, other adaptive values).
+    """
     if is_ir_capture_pass(regs):
         return False
-    return exposure_from_regs(regs) == ME_EXPOSURE_LONG
+    exp = exposure_from_regs(regs)
+    if exp is None:
+        return False
+    if model is None:
+        return exp == ME_EXPOSURE_LONG
+    return exp > _me_exposure_short(model)
 
 
-def capture_has_me_bracket(snapshots: list[dict[int, int]]) -> bool:
-    """True when a non-IR image pass uses the long ME exposure."""
-    return any(is_me_long_pass(regs) for regs in snapshots)
+def capture_has_me_bracket(
+    snapshots: list[dict[int, int]], *, model: FilmModel | None = None
+) -> bool:
+    """True when a non-IR image pass uses a long ME exposure."""
+    return any(is_me_long_pass(regs, model=model) for regs in snapshots)
 
 
 def classify_capture_pass_label(
@@ -234,20 +259,28 @@ def classify_capture_pass_label(
     *,
     kind: str,
     capture_has_me: bool,
+    model: FilmModel | None = None,
 ) -> str:
     """Capture-tab label: ``color ME-short``, ``color ME-long``, ``ir``, …"""
     if kind == "ir":
         return "ir"
     exp = exposure_from_regs(regs)
+    short = _me_exposure_short(model)
+    if model is None:
+        is_long = exp == ME_EXPOSURE_LONG
+        is_short = exp == ME_EXPOSURE_SHORT
+    else:
+        is_long = exp is not None and exp > short
+        is_short = exp == short
     if kind == "prescan":
-        if capture_has_me and exp == ME_EXPOSURE_LONG:
+        if capture_has_me and is_long:
             return "prescan ME-long"
-        if capture_has_me and exp == ME_EXPOSURE_SHORT:
+        if capture_has_me and is_short:
             return "prescan ME-short"
         return "prescan"
-    if capture_has_me and exp == ME_EXPOSURE_LONG:
+    if capture_has_me and is_long:
         return "color ME-long"
-    if capture_has_me and exp == ME_EXPOSURE_SHORT:
+    if capture_has_me and is_short:
         return "color ME-short"
     return kind
 
@@ -474,7 +507,10 @@ def carve_image_bulk(analysis: CaptureAnalysis) -> bytes | None:
 
 
 def enumerate_capture_passes(
-    analysis: CaptureAnalysis, *, asic: str = "GL128"
+    analysis: CaptureAnalysis,
+    *,
+    asic: str = "GL128",
+    model: FilmModel | None = None,
 ) -> list[CaptureImagePass]:
     """Classify and carve every full-image pass in a capture."""
     preambles = image_preambles_for_decode(analysis)
@@ -485,7 +521,9 @@ def enumerate_capture_passes(
         regs = registers_before_packet(analysis, preamble.packet_index, asic=asic)
         snapshots.append((preamble, regs))
     capture_has_ir = any(is_ir_capture_pass(regs) for _, regs in snapshots)
-    capture_has_me = capture_has_me_bracket([regs for _, regs in snapshots])
+    capture_has_me = capture_has_me_bracket(
+        [regs for _, regs in snapshots], model=model
+    )
     passes: list[CaptureImagePass] = []
     for preamble, regs in snapshots:
         bulk = carve_bulk_after_preamble(analysis, preamble)
@@ -495,7 +533,7 @@ def enumerate_capture_passes(
             regs, capture_has_ir=capture_has_ir, asic=asic
         )
         label = classify_capture_pass_label(
-            regs, kind=kind, capture_has_me=capture_has_me
+            regs, kind=kind, capture_has_me=capture_has_me, model=model
         )
         passes.append(
             CaptureImagePass(
@@ -510,7 +548,10 @@ def enumerate_capture_passes(
 
 
 def summarize_capture_image_preambles(
-    analysis: CaptureAnalysis, *, asic: str = "GL128"
+    analysis: CaptureAnalysis,
+    *,
+    asic: str = "GL128",
+    model: FilmModel | None = None,
 ) -> list[str]:
     """Capture-tab lines for every large image preamble (even if carve fails)."""
     preambles = image_preambles_for_decode(analysis)
@@ -521,7 +562,9 @@ def summarize_capture_image_preambles(
         for p in preambles
     ]
     capture_has_ir = any(is_ir_capture_pass(regs) for _, regs in snapshots)
-    capture_has_me = capture_has_me_bracket([regs for _, regs in snapshots])
+    capture_has_me = capture_has_me_bracket(
+        [regs for _, regs in snapshots], model=model
+    )
     lines = [
         f"Image preambles: {len(snapshots)}"
         + (" (multi-exposure)" if capture_has_me else "")
@@ -532,7 +575,7 @@ def summarize_capture_image_preambles(
             regs, capture_has_ir=capture_has_ir, asic=asic
         )
         label = classify_capture_pass_label(
-            regs, kind=kind, capture_has_me=capture_has_me
+            regs, kind=kind, capture_has_me=capture_has_me, model=model
         )
         exp = exposure_from_regs(regs)
         a5 = regs.get(0xA5)
@@ -1158,8 +1201,10 @@ def decode_all_capture_passes(
     """Decode every full-image pass and route to prescan / colour / IR."""
     asic = str(getattr(model, "asic", "") or "")
     result = CaptureDecodeResult()
-    result.log_lines.extend(summarize_capture_image_preambles(analysis, asic=asic))
-    passes = enumerate_capture_passes(analysis, asic=asic)
+    result.log_lines.extend(
+        summarize_capture_image_preambles(analysis, asic=asic, model=model)
+    )
+    passes = enumerate_capture_passes(analysis, asic=asic, model=model)
     if not passes:
         pre = analysis.image_preamble
         bulk = analysis.image_bulk
@@ -1202,7 +1247,9 @@ def decode_all_capture_passes(
             f"(pkt {image_pass.preamble.packet_index}, "
             f"{len(image_pass.bulk)} bytes)"
         )
-        if image_pass.kind == "color" and is_me_long_pass(image_pass.registers):
+        if image_pass.kind == "color" and is_me_long_pass(
+            image_pass.registers, model=model
+        ):
             color_long = (rgb, geo)
         elif image_pass.kind == "color":
             color_short = (rgb, geo)

@@ -530,6 +530,17 @@ class Gl128Common:
         """``REG_EXPOSURE`` for short or long ME bracket."""
         return int(self.exposure_long if long_exposure else self.exposure_short)
 
+    def feed_to_scan_steps_for_dpi(
+        self, resolution: int, *, long_exposure: bool = False
+    ) -> int:
+        """Full-frame second-feed steps at ``resolution``.
+
+        Default is :attr:`feed_to_scan_steps` (SE/V2). The 8300i SE overrides
+        with a PPI-dependent colour-short map; ME-long uses 13128.
+        """
+        del resolution, long_exposure
+        return int(self.feed_to_scan_steps)
+
     def feed_to_scan_steps_for_area(
         self,
         area: tuple[float, float, float, float] | None = None,
@@ -539,7 +550,9 @@ class Gl128Common:
         Default full frame (``area is None``) uses :attr:`feed_to_scan_steps`.
         Otherwise ``y1`` is a fraction of the scan window, which runs from the
         preview top (:attr:`feed_to_scan_top_steps`) to the window end
-        (:attr:`scan_window_end_steps`).
+        (:attr:`scan_window_end_steps`). Prefer
+        :meth:`feed_to_scan_steps_for_dpi` for full-frame image passes that
+        know the scan DPI.
         """
         if area is None:
             return int(self.feed_to_scan_steps)

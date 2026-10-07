@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Scan session for GL128 OpticFilm (8200i SE and 8100 V2).
+"""Scan session for GL128 OpticFilm (8200i SE, 8100 V2, and 8300i SE).
 
 Only the chip-specific steps are overridden; run/assemble/calibration lookup
 stay in :class:`~pyopticfilm.scan.session.ScanSession`. What differs from GL845:
@@ -84,25 +84,43 @@ except ImportError:  # pragma: no cover
     _MOTOR_GATED_HINT = "GL128 motor moves are temporarily disabled."
 
 
-def image_feed2_steps(model: FilmModel, geometry: ScanGeometry) -> int:
+def image_feed2_steps(
+    model: FilmModel,
+    geometry: ScanGeometry,
+    *,
+    long_exposure: bool = False,
+) -> int:
     """Second-feed steps for an image pass.
 
     Prefer ``geometry.area``. If that tuple was dropped, reconstruct from
     ``area_y1`` so a crop does not fall back to full-frame ``13704``.
+    Full-frame (no crop) uses :meth:`~Gl128Common.feed_to_scan_steps_for_dpi`
+    when available so PPI-dependent leaves (8300i SE) match captures.
     """
-    feed_fn = getattr(model, "feed_to_scan_steps_for_area", None)
-    if not callable(feed_fn):
-        return int(getattr(model, "feed_to_scan_steps", 0) or 0)
     area = geometry.area
     if area is None:
         y1 = float(getattr(geometry, "area_y1", 0.0) or 0.0)
         if y1 > 1e-9:
             area = (0.0, y1, 1.0, 1.0)
+    if area is None:
+        dpi_fn = getattr(model, "feed_to_scan_steps_for_dpi", None)
+        if callable(dpi_fn):
+            return int(
+                dpi_fn(int(geometry.resolution), long_exposure=bool(long_exposure))
+            )
+        return int(getattr(model, "feed_to_scan_steps", 0) or 0)
+    feed_fn = getattr(model, "feed_to_scan_steps_for_area", None)
+    if not callable(feed_fn):
+        return int(getattr(model, "feed_to_scan_steps", 0) or 0)
     return int(feed_fn(area))
 
 
 class Gl128ScanSession(ScanSession):
-    """GL128 scan state machine for OpticFilm 8200i SE and 8100 (V2)."""
+    """GL128 scan state machine for OpticFilm 8200i SE, 8100 (V2), and 8300i SE.
+
+    The 8300i SE uses the same session path with leaf-specific tables;
+    ``scan_ready`` stays ``False`` until hardware sign-off.
+    """
 
     def __init__(
         self,
@@ -302,7 +320,11 @@ class Gl128ScanSession(ScanSession):
         # grinding bug). Calibration passes stay put (no motor). Positioning is
         # skipped while motor moves are gated so configure unit tests stay safe.
         if not shading and getattr(self.asic, "_motor_moves_enabled", False):
-            scan_steps = image_feed2_steps(model, geometry)
+            scan_steps = image_feed2_steps(
+                model,
+                geometry,
+                long_exposure=bool(self._pass_long_exposure),
+            )
             # The scan must stop at the window end: feed2 + travel <= 27636
             # steps. Overrunning it is what ground the motor in the Lab.
             max_fn = getattr(model, "max_lincnt_for", None)
@@ -488,7 +510,7 @@ class Gl128ScanSession(ScanSession):
                 key,
                 geometry.resolution,
                 geometry.area,
-                image_feed2_steps(model, geometry),
+                image_feed2_steps(model, geometry, long_exposure=bool(long_pass)),
                 geometry.lincnt_register,
                 geometry.pixel_startx,
                 geometry.pixel_endx,

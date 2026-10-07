@@ -10,11 +10,11 @@ All divergent knobs below come from SilverFast 9 USBPcap full-frame captures
 (``docs/gl128-model-comparison.md`` §10).  Summary:
 
 **Geometry (V2-like)**
-    Full-frame STR/END = 242/10610.  Settled feed2 is PPI-dependent
-    (13040…13128); this leaf uses **13128** (7200 / ME-long value and V2 TA
-    top) as ``feed_to_scan_steps``.  Image ``LINCNT`` is the V2 ladder table
-    (SilverFast programs SF = V2/4 on the wire; pyopticfilm keeps the 4×
-    convention).
+    Full-frame STR/END = 242/10610.  Settled colour-short feed2 is
+    PPI-dependent (13040…13128); :meth:`feed_to_scan_steps_for_dpi` programs
+    that map (ME-long → 13128).  ``feed_to_scan_steps`` stays 13128 as a
+    dpi-less fallback.  Image ``LINCNT`` is the V2 ladder table (SilverFast
+    programs SF = V2/4 on the wire; pyopticfilm keeps the 4× convention).
 
 **Timing**
     Image-pass ``LPERIOD`` matches the V2 capture ladder at every measured
@@ -47,86 +47,100 @@ from dataclasses import dataclass, field
 from pyopticfilm.device.gl128_common import LADDER_LINCNT_BY_DPI, Gl128Common
 from pyopticfilm.device.tables_8300i_se import SLOPE_TABLE_FAST, SLOPE_TABLE_SLOW
 
-# V2 capture LPERIOD ladder (docs §5 / 06_ppi_ladder). 8300i matches at every
-# measured PPI (300/1200/2400/3600/7200); unmeasured rungs use the same table.
+# Measured full-frame PPI in the capture set: 300, 1200, 2400, 3600, 7200.
+# Mid-ladder keys below are filled (not capture-proven); CI goldens at 1800
+# use those fills — see docs §10.8.
+
+# V2 capture LPERIOD ladder (docs §5 / 06_ppi_ladder). Measured PPI match
+# byte-identically; unmeasured rungs (150/600/720/900/1440/1800) are the same
+# V2 table fills, not an 8300i capture.
 _LPERIOD_BY_DPI_8300I: dict[int, int] = {
-    150: 11067,
-    300: 11067,
-    600: 11067,
-    720: 11110,
-    900: 11175,
-    1200: 11283,
-    1440: 11369,
-    1800: 11499,
-    2400: 11715,
-    3600: 13443,
-    7200: 16035,
+    150: 11067,  # filled (V2 ladder; asic band shares 300)
+    300: 11067,  # measured
+    600: 11067,  # filled (V2 ladder; asic band shares 300)
+    720: 11110,  # filled (V2 ladder)
+    900: 11175,  # filled (V2 ladder)
+    1200: 11283,  # measured
+    1440: 11369,  # filled (V2 ladder)
+    1800: 11499,  # filled (V2 ladder; CI setup golden)
+    2400: 11715,  # measured
+    3600: 13443,  # measured
+    7200: 16035,  # measured
 }
 assert set(_LPERIOD_BY_DPI_8300I) == set(LADDER_LINCNT_BY_DPI)
 
 # Same physical full-frame height as the 8100 V2 ladder (SF wire LINCNT × 4).
 # Measured at 300/1200/2400/3600/7200; other rungs match V2's
-# SE + 128 * asic_dpi / 600 formula.
+# SE + 128 * asic_dpi / 600 formula (filled).
 _LADDER_LINCNT_BY_DPI_8300I: dict[int, int] = {
-    150: 2420,
-    300: 2420,
-    600: 2420,
-    720: 2904,
-    900: 3628,
-    1200: 4836,
-    1440: 5804,
-    1800: 7252,
-    2400: 9668,
-    3600: 14500,
-    7200: 29012,
+    150: 2420,  # filled
+    300: 2420,  # measured (SF×4)
+    600: 2420,  # filled
+    720: 2904,  # filled
+    900: 3628,  # filled
+    1200: 4836,  # measured (SF×4)
+    1440: 5804,  # filled
+    1800: 7252,  # filled (CI setup golden)
+    2400: 9668,  # measured (SF×4)
+    3600: 14500,  # measured (SF×4)
+    7200: 29012,  # measured (SF×4)
 }
 assert set(_LADDER_LINCNT_BY_DPI_8300I) == set(LADDER_LINCNT_BY_DPI)
 
 # Image-pass dummy 0x2B. Measured at 300/1200/2400/3600/7200; other rungs use
 # the nearest measured asic-dpi band (150/300/600 share; 720/900→600 band;
-# 1440/1800→1200 band).
+# 1440/1800→1200 band) — filled, not capture-proven.
 _DUMMY_BY_DPI_8300I: dict[int, int] = {
-    150: 0x06,
-    300: 0x06,
-    600: 0x06,
-    720: 0x06,
-    900: 0x06,
-    1200: 0x07,
-    1440: 0x07,
-    1800: 0x07,
-    2400: 0x0B,
-    3600: 0x10,
-    7200: 0x1F,
+    150: 0x06,  # filled → 300 band
+    300: 0x06,  # measured
+    600: 0x06,  # filled → 300 band
+    720: 0x06,  # filled → 300 band
+    900: 0x06,  # filled → 300 band
+    1200: 0x07,  # measured
+    1440: 0x07,  # filled → 1200 band
+    1800: 0x07,  # filled → 1200 band (CI setup golden)
+    2400: 0x0B,  # measured
+    3600: 0x10,  # measured
+    7200: 0x1F,  # measured
 }
 
 # Image-pass 0xA5/0xAB. Same fill policy as dummy.
 _PIXEL_CLOCK_BY_DPI_8300I: dict[int, int] = {
-    150: 0x59,
-    300: 0x59,
-    600: 0x59,
-    720: 0x59,
-    900: 0x59,
-    1200: 0x12,
-    1440: 0x12,
-    1800: 0x12,
-    2400: 0x05,
-    3600: 0x03,
-    7200: 0x02,
+    150: 0x59,  # filled → 300 band
+    300: 0x59,  # measured
+    600: 0x59,  # filled → 300 band
+    720: 0x59,  # filled → 300 band
+    900: 0x59,  # filled → 300 band
+    1200: 0x12,  # measured
+    1440: 0x12,  # filled → 1200 band
+    1800: 0x12,  # filled → 1200 band (CI setup golden)
+    2400: 0x05,  # measured
+    3600: 0x03,  # measured
+    7200: 0x02,  # measured
 }
 
-# ME long image pass: 0x02 observed at 1200 and 3600.
+# ME long image pass: 0x02 observed at 1200 and 3600; other rungs filled.
 _PIXEL_CLOCK_LONG_BY_DPI_8300I: dict[int, int] = {
     150: 0x02,
     300: 0x02,
     600: 0x02,
     720: 0x02,
     900: 0x02,
-    1200: 0x02,
+    1200: 0x02,  # measured
     1440: 0x02,
     1800: 0x02,
     2400: 0x02,
-    3600: 0x02,
+    3600: 0x02,  # measured
     7200: 0x02,
+}
+
+# Colour-short settled feed2 by asic dpi (docs §10.2). ME-long → 13128.
+_FEED2_BY_ASIC_DPI_8300I: dict[int, int] = {
+    600: 13040,  # measured at 300 (DPISET 100)
+    1200: 13112,  # measured
+    2400: 13124,  # measured
+    3600: 13126,  # measured
+    7200: 13128,  # measured
 }
 
 # Shading strip (dummy, clk_a, clk_b) keyed by asic_dpi. 150/300/600 share the
@@ -157,7 +171,7 @@ class Model8300iSE(Gl128Common):
     supports_infrared: bool = True
     scan_ready: bool = False
 
-    # 7200 / ME-long settled feed2; colour-short at lower PPI is 13040…13126.
+    # Dpi-less fallback (7200 / ME-long). Prefer feed_to_scan_steps_for_dpi.
     feed_to_scan_steps: int = 13128
 
     lperiod_by_dpi: Mapping[int, int] = field(
@@ -185,6 +199,19 @@ class Model8300iSE(Gl128Common):
     dummy_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(_DUMMY_BY_DPI_8300I)
     )
+
+    def feed_to_scan_steps_for_dpi(
+        self, resolution: int, *, long_exposure: bool = False
+    ) -> int:
+        """Colour-short feed2 by asic dpi; ME-long always 13128 (docs §10.2)."""
+        if long_exposure:
+            return 13128
+        key = self.asic_dpi_for(resolution)
+        table = _FEED2_BY_ASIC_DPI_8300I
+        if key in table:
+            return int(table[key])
+        nearest = min(table, key=lambda k: abs(int(k) - int(key)))
+        return int(table[nearest])
 
     def slope_table_fast(self) -> tuple[int, ...]:
         """8300i CUSTOM fast ramp (head ``0x846A``)."""

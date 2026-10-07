@@ -11,7 +11,8 @@ Most tables below still use the original three columns (8100 V2 / 8200i SE /
 135i). **OpticFilm 8300i SE** (`07b3:181f`) is documented in
 [§10](#10-opticfilm-8300i-se-07b3181f--capture-synthesis) from a dedicated
 SilverFast full-frame capture set; that section is the source of truth for
-an upcoming `Model8300iSE` leaf (not an alias of the 8200i SE).
+the in-tree `Model8300iSE` leaf (`scan_ready=False` until hardware sign-off;
+not an alias of the 8200i SE).
 
 ## How to read this
 
@@ -618,7 +619,9 @@ and 16040 depending on PPI.
 | 1 | image-pass placeholder |
 
 SE ladder origin 13560 and historical SE full-frame 13704 do **not** appear
-as settled feed2 values. Do not treat 13128 as the only 8300i feed2.
+as settled feed2 values. `Model8300iSE.feed_to_scan_steps_for_dpi` programs
+the PPI-dependent colour-short map (ME-long → 13128); `feed_to_scan_steps`
+remains 13128 only as a dpi-less fallback.
 
 ### 10.6 Slope ROM (AHB `0x1000C000` / `0x10010000`)
 
@@ -650,7 +653,7 @@ SE ROM through `Gl128Common` defaults.
 ### 10.8 Open gaps (8300i SE)
 
 - Dedicated cold-boot-only capture. Scan captures’ first-writes are mostly SE `INIT_REGS` with some real-looking diffs (`0x7E`/`0x7F` already 15000; `0x52`–`0x5B` / `0x70`–`0x73`) plus scan-overlay contamination — not a clean boot oracle
-- Full PPI ladder (missing 150/600/720/900/1440/1800)
+- Full PPI ladder (missing 150/600/720/900/1440/1800). Mid-ladder fills in `model_8300i_se.py` (nearest measured asic-dpi band / V2 LPERIOD table) are **not** capture-proven. CI setup goldens at **1800** use those filled values — there is no 1800 capture
 - Hardware confirmation that CUSTOM slope ROM is accepted (park + feeds/scans; wrong slopes have caused hard motor stops on GL128)
 - AFE gain/offset search targets vs SE session-04 defaults
 - Product string / configuration descriptor from an in-tree capture (PID/`bcdDevice` are in the pcaps)

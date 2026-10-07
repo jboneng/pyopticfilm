@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Capture-derived motor slope ROM for the OpticFilm 8300i SE (GL128).
 
-Extracted from SilverFast 9 USBPcap full-frame captures
-(``c:\\Users\\jbone\\Desktop\\8300i_captures``). Every measured PPI uploads the
-same two 512-byte tables to AHB ``0x1000C000`` and ``0x10010000``:
+Extracted from SilverFast 9 USBPcap full-frame captures for the OpticFilm
+8300i SE (see ``docs/gl128-model-comparison.md`` §10.6). Every measured PPI
+uploads the same two 512-byte tables to AHB ``0x1000C000`` and ``0x10010000``:
 
 * Slow ramp (``SLOPE_TABLE_SLOW``): reference feed (~28292). Head ``0x32BB``.
 * Fast ramp (``SLOPE_TABLE_FAST``): feed2 / scan positioning. Head ``0x846A``.

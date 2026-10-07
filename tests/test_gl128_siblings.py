@@ -96,6 +96,16 @@ def test_divergent_fields_match_capture_catalog():
     assert MODEL_8300I_SE.slope_table_fast()[0] == 0x846A
     assert MODEL_8300I_SE.slope_table_slow() != MODEL_8200I_SE.slope_table_slow()
     assert MODEL_8300I_SE.slope_table_fast() != MODEL_8200I_SE.slope_table_fast()
+    # Colour-short feed2 is PPI-dependent on 8300i; SE/V2 stay constant.
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(300) == 13040
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(1200) == 13112
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(2400) == 13124
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(3600) == 13126
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(7200) == 13128
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(1200, long_exposure=True) == 13128
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(3600, long_exposure=True) == 13128
+    assert MODEL_8200I_SE.feed_to_scan_steps_for_dpi(1200) == MODEL_8200I_SE.feed_to_scan_steps
+    assert MODEL_8100_V2.feed_to_scan_steps_for_dpi(7200) == MODEL_8100_V2.feed_to_scan_steps
     assert dict(MODEL_8200I_SE.max_image_lincnt_by_feed2) == {
         13128: 4836,
         13560: 27476,

@@ -17,10 +17,13 @@ successful park.
 | **Protocol validated** | Python USB traffic for a documented setup matches a golden trace, and optical registers match independently computed geometry. A SANE genesys register dump, when present, is an additional oracle. |
 | **Experimental** | Tables and session code exist; `scan()`, `home()`, `park()`, and `calibrate()` stay locked. |
 
-The GL128 models (8200i SE and 8100 V2) are capture-derived (not a SANE port).
-SANE is not an oracle for them. Register-program goldens for `init` + configure
-are under `tests/traces/python/8200i_se/` and `tests/traces/python/8100_v2/`.
-The 8100 V2 shares SE-identical tables via `Gl128Common` but has no IR.
+The GL128 models (8200i SE, 8100 V2, and 8300i SE) are capture-derived (not a
+SANE port). SANE is not an oracle for them. Register-program goldens for
+`init` + configure are under `tests/traces/python/8200i_se/`,
+`tests/traces/python/8100_v2/`, and `tests/traces/python/8300i_se/`. The 8100
+V2 and 8300i SE share SE-identical tables via `Gl128Common` where captures
+match; each leaf declares capture-proven divergences. The 8100 V2 has no IR;
+the 8300i SE keeps `scan_ready=False` until hardware sign-off.
 
 ## Architecture
 
