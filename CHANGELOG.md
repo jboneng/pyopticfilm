@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **OpticFilm 8300i SE** (`07b3:181f`): GL128 leaf (`Model8300iSE`) with capture-derived geometry (V2-scale `LINCNT`, feed2 13128), V2-matched `LPERIOD`, exposure 15000, image dummy/pixel-clock maps, shading-strip clocks (white @7200 dummy `0x26`), and CUSTOM motor slope ROM (`tables_8300i_se.py`, heads `0x32BB` / `0x846A`). IR capable. `scan_ready=False` until hardware sign-off. Setup goldens at `tests/traces/python/8300i_se/`. See `docs/gl128-model-comparison.md` §10.
+
+### Changed
+
+- **GL128 sibling catalog**: `scan_ready`, `exposure_lperiod` / `exposure_short`, and image `pixel_clock_*` / `dummy_by_dpi` are leaf-divergent fields (SE and V2 keep their previous values). Scan Lab capture decode keeps the selected GL128 leaf instead of always forcing the 8200i SE.
+- **GL128 slope uploads** read `model.slope_table_slow()` / `slope_table_fast()` instead of hard-importing the SE ROM, so the 8300i SE can use its CUSTOM tables without retargeting SE/V2.
+
 ## [1.3.4] - 2026-09-25
 
 ### Added

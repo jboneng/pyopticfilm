@@ -29,6 +29,8 @@ from pyopticfilm.usb.device import (
     PID_OPTICFILM_7600I,
     PID_OPTICFILM_8100,
     PID_OPTICFILM_8200I,
+    PID_OPTICFILM_8200I_SE,
+    PID_OPTICFILM_8300I_SE,
     SUPPORTED_IDS,
     VID_PLUSTEK,
 )
@@ -37,6 +39,8 @@ from pyopticfilm.usb.device import (
 def test_supported_ids_cover_complete_opticfilm():
     expected = {
         PID_OPTICFILM_8200I,
+        PID_OPTICFILM_8200I_SE,
+        PID_OPTICFILM_8300I_SE,
         PID_OPTICFILM_7200,
         PID_OPTICFILM_7200I,
         PID_OPTICFILM_7200_V2,
@@ -60,9 +64,13 @@ def test_bcd_disambiguation_7400_and_7600i():
 
 def test_simple_pid_aliases():
     from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
+    from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
+    from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
     from pyopticfilm.usb.device import PID_OPTICFILM_8100_V2
 
     assert model_for_device(PID_OPTICFILM_8200I) is MODEL_8200I
+    assert model_for_device(PID_OPTICFILM_8200I_SE) is MODEL_8200I_SE
+    assert model_for_device(PID_OPTICFILM_8300I_SE) is MODEL_8300I_SE
     assert model_for_device(PID_OPTICFILM_8100) is MODEL_8100
     assert model_for_device(PID_OPTICFILM_8100_V2) is MODEL_8100_V2
     assert model_for_device(PID_OPTICFILM_7200I) is MODEL_7200I

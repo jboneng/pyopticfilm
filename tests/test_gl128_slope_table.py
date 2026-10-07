@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """GL128 motor slope-table selection per feed.
 
-Both models' vendor captures agree: first (reference) feed
-``SLOPE_TABLE_SLOW``, second (final positioning) feed ``SLOPE_TABLE_FAST``.
-8200i SE SilverFast: 39/39 positioning pairs. 8100 V2: byte-exact and
-REG_FEEDL-cross-checked across two independent 2026-09 capture sessions (see
-jboneng/pyopticfilm#56). ``feed()`` still uploads the fast ramp on both
-models.
+Vendor captures agree on order: first (reference) feed slow ramp, second
+(final positioning) feed fast ramp. 8200i SE SilverFast: 39/39 positioning
+pairs. 8100 V2: byte-exact across two 2026-09 sessions (jboneng/pyopticfilm#56).
+8300i SE uses the same order with CUSTOM payloads (heads ``0x32BB`` /
+``0x846A``). ``feed()`` still uploads the fast ramp.
 """
 
 from __future__ import annotations
@@ -16,8 +15,15 @@ from unittest.mock import MagicMock
 from pyopticfilm.asic.gl128 import Gl128
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
+from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
 from pyopticfilm.device.select import create_asic
 from pyopticfilm.device.tables_8200i_se import SLOPE_TABLE_FAST, SLOPE_TABLE_SLOW
+from pyopticfilm.device.tables_8300i_se import (
+    SLOPE_TABLE_FAST as SLOPE_TABLE_FAST_8300I,
+)
+from pyopticfilm.device.tables_8300i_se import (
+    SLOPE_TABLE_SLOW as SLOPE_TABLE_SLOW_8300I,
+)
 from pyopticfilm.usb.fake import MockScannerTransport
 from pyopticfilm.usb.protocol import GenesysUsbProtocol
 
@@ -101,3 +107,38 @@ def test_position_for_full_frame_scan_uses_slow_then_fast_on_v2(monkeypatch):
     assert ahb_writes[1] == slow
     assert ahb_writes[2] == fast
     assert ahb_writes[3] == fast
+
+
+def test_upload_fast_slopes_8300i_uses_custom_rom():
+    asic = Gl128(MagicMock(), MODEL_8300I_SE)
+    asic._upload_fast_slopes()
+    for call in asic.protocol.write_ahb.call_args_list:
+        assert call.args[1] == _pack(SLOPE_TABLE_FAST_8300I)
+        assert call.args[1][:2] == bytes((0x6A, 0x84))  # LE head 0x846A
+
+    asic.protocol.write_ahb.reset_mock()
+    asic._upload_fast_slopes(use_slow=True)
+    for call in asic.protocol.write_ahb.call_args_list:
+        assert call.args[1] == _pack(SLOPE_TABLE_SLOW_8300I)
+        assert call.args[1][:2] == bytes((0xBB, 0x32))  # LE head 0x32BB
+
+
+def test_position_for_full_frame_scan_8300i_custom_slow_then_fast(monkeypatch):
+    """8300i SE: same SLOW→FAST order, CUSTOM payloads."""
+    usb = MockScannerTransport()
+    protocol = GenesysUsbProtocol(usb)
+    asic = create_asic(protocol, MODEL_8300I_SE)
+    asic._motor_moves_enabled = True
+    ahb_writes = _track_ahb_writes(asic, protocol)
+
+    asic.position_for_full_frame_scan(scan_steps=13128)
+
+    fast = _pack(SLOPE_TABLE_FAST_8300I)
+    slow = _pack(SLOPE_TABLE_SLOW_8300I)
+    assert len(ahb_writes) == 4
+    assert ahb_writes[0] == slow
+    assert ahb_writes[1] == slow
+    assert ahb_writes[2] == fast
+    assert ahb_writes[3] == fast
+    assert slow != _pack(SLOPE_TABLE_SLOW)
+    assert fast != _pack(SLOPE_TABLE_FAST)

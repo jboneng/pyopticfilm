@@ -876,8 +876,15 @@ def capture_looks_gl128(analysis: CaptureAnalysis) -> bool:
 
 
 def model_for_capture_decode(analysis: CaptureAnalysis, selected: FilmModel) -> FilmModel:
-    """Prefer GL128 (SE / 8100 V2) tables when the capture is clearly GL128."""
+    """Prefer a GL128 leaf when the capture is clearly GL128.
+
+    Keeps the Lab-selected GL128 model (SE / 8100 V2 / 8300i SE) so decode and
+    motor diffs use that leaf's tables. Falls back to the 8200i SE when the
+    selection is a non-GL128 model.
+    """
     if capture_looks_gl128(analysis):
+        if str(getattr(selected, "asic", "") or "").upper() == "GL128":
+            return selected
         from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 
         return MODEL_8200I_SE

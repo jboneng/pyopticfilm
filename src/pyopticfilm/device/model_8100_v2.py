@@ -73,7 +73,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from pyopticfilm.device.gl128_common import LADDER_LINCNT_BY_DPI, LPERIOD_BY_DPI, Gl128Common
+from pyopticfilm.device.gl128_common import (
+    DUMMY_BY_DPI,
+    LADDER_LINCNT_BY_DPI,
+    LPERIOD_BY_DPI,
+    PIXEL_CLOCK_BY_DPI,
+    PIXEL_CLOCK_LONG_BY_DPI,
+    Gl128Common,
+)
 
 # V2 7200 dpi LPERIOD observed in all three scan phases (dark/white shading and
 # image pass): 16 035.  All other DPI entries are carried over from the shared
@@ -115,6 +122,7 @@ class Model8100V2(Gl128Common):
     model: str = "OpticFilm 8100 (V2)"
     usb_product_id: int = 0x1824
     supports_infrared: bool = False
+    scan_ready: bool = True
 
     # Capture-derived override: V2 full-frame scan starts at the TA window top.
     # 04_color_7200.pcapng frame 2999, regs 0x3D–0x3F = 0x003348 = 13 128.
@@ -138,6 +146,17 @@ class Model8100V2(Gl128Common):
     ladder_lincnt_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(_LADDER_LINCNT_BY_DPI_V2)
     )
+
+    # Capture-identical to the SE session-13 maps (shared before 8300i promotion).
+    exposure_lperiod: int = 14000
+    exposure_short: int = 14000
+    pixel_clock_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(PIXEL_CLOCK_BY_DPI)
+    )
+    pixel_clock_long_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(PIXEL_CLOCK_LONG_BY_DPI)
+    )
+    dummy_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(DUMMY_BY_DPI))
 
     def shading_strip_clocks(self, resolution: int, *, dvdset: bool) -> tuple[int, int, int]:
         """Return ``(dummy, clk_a, clk_b)`` for a shading strip.

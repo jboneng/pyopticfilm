@@ -23,13 +23,13 @@ PRESCAN_DPI = 1200
 
 
 def is_gl128_opticfilm(model: Any) -> bool:
-    """True for GL128 OpticFilm models (8200i SE and 8100 V2)."""
+    """True for GL128 OpticFilm models (8200i SE, 8100 V2, 8300i SE)."""
     asic = getattr(model, "asic", None)
     pid = getattr(model, "usb_product_id", None)
     if str(asic or "") == "GL128":
         return True
     try:
-        return int(pid) in {0x1825, 0x1824}
+        return int(pid) in {0x1825, 0x1824, 0x181F}
     except (TypeError, ValueError):
         return False
 

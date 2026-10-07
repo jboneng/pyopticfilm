@@ -18,6 +18,7 @@ Support is one of:
 |-------|--------|------|---------|
 | OpticFilm 8200i SE | `07b3:1825` | GL128 | **Hardware tested** |
 | OpticFilm 8100 (V2) | `07b3:1824` | GL128 | **Hardware tested** (no IR) |
+| OpticFilm 8300i SE | `07b3:181f` | GL128 | Protocol validated (setup traces; scan locked; IR capable) |
 | OpticFilm 8200i | `07b3:130d` | GL845 | Protocol validated (setup traces; scan locked) |
 | OpticFilm 8100 | `07b3:130c` | GL845 | Experimental |
 | OpticFilm 7600i (v1 / v2) | `07b3:0c3b` | GL845 / GL843 | Experimental |
@@ -282,7 +283,7 @@ The cache key includes resolution, crop geometry, and scan method (transparency 
 
 Code for additional OpticFilm variants is included so enumeration, model selection, SANE-derived geometry tables, and hardwareless USB traces can be exercised without hardware. These paths are **deliberately locked** for motor moves and image acquisition:
 
-- `model.scan_ready` is `True` only for the 8200i SE and 8100 (V2); all other models stay `False`
+- `model.scan_ready` is `True` only for the 8200i SE and 8100 (V2); the 8300i SE and all other models stay `False`
 - `Scanner._ensure_scan_ready()` blocks scan, calibrate, home, and park on non-scan-ready models
 - GL128 motor moves stay disabled unless the model is scan-ready
 - Protocol-validated (currently OpticFilm 8200i setup traces) is not hardware support
@@ -292,7 +293,7 @@ If you have a non-scan-ready OpticFilm and want to help validate scanning, open 
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for model-lock policy and how to specialize
-GL128 siblings (8200i SE vs 8100 V2) without retargeting frozen oracles.
+GL128 siblings (8200i SE / 8100 V2 / 8300i SE) without retargeting frozen oracles.
 
 ```bash
 uv sync --all-groups

@@ -9,6 +9,7 @@ import pytest
 
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
+from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
 from scanners.setup_gl128 import run_gl128_setup
 from scanners.trace_compare import (
     GL128_OPTICAL_REGISTER_KEYS,
@@ -24,6 +25,9 @@ _CASES = (
     ("8100_v2", MODEL_8100_V2, 1200),
     ("8100_v2", MODEL_8100_V2, 1800),
     ("8100_v2", MODEL_8100_V2, 7200),
+    ("8300i_se", MODEL_8300I_SE, 1200),
+    ("8300i_se", MODEL_8300I_SE, 1800),
+    ("8300i_se", MODEL_8300I_SE, 7200),
 )
 
 

@@ -206,18 +206,20 @@ model's files under `tests/model_lock/`, confirm on **that** hardware:
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-## GL128 (8200i SE and 8100 V2)
+## GL128 (8200i SE, 8100 V2, 8300i SE)
 
 Use USB captures → golden traces when converting existing PCAP/PCAPNG files.
 Do not compare the GL128 path to SANE genesys (there is no GL128 command set).
-The 8100 V2 is a capture-derived sibling of the 8200i SE (shared `Gl128Common`
-tables; no IR). It does not subclass the SE model class.
+The 8100 V2 and 8300i SE are capture-derived siblings of the 8200i SE (shared
+`Gl128Common` tables). They do not subclass the SE model class. The 8300i SE
+has IR; `scan_ready` stays `False` until hardware sign-off.
 
 CI goldens for ASIC `init()` + `Gl128ScanSession._configure()` (motors gated)
 live at:
 
 - `tests/traces/python/8200i_se/{1200,1800,7200}_rgb16_setup.json`
 - `tests/traces/python/8100_v2/{1200,1800,7200}_rgb16_setup.json`
+- `tests/traces/python/8300i_se/{1200,1800,7200}_rgb16_setup.json`
 
 Regenerate after an intentional GL128 setup-register change:
 
@@ -225,5 +227,5 @@ Regenerate after an intentional GL128 setup-register change:
 python tools/dump_gl128_setup_trace.py
 ```
 
-Review the optical-register diff. Do not copy SE JSON over V2 (or the reverse)
+Review the optical-register diff. Do not copy one model's JSON over another
 to make CI green.
