@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **GL128 slope uploads** read `model.slope_table_slow()` / `slope_table_fast()` instead of hard-importing the SE ROM, so the 8300i SE can use its CUSTOM tables without retargeting SE/V2.
 - **8300i SE full-frame feed2** follows the capture PPI map via `feed_to_scan_steps_for_dpi` (ME-long → 13128); SE/V2 still use a constant `feed_to_scan_steps`.
 - **Scan Lab capture ME labels** use the selected leaf’s `exposure_short` (and treat any higher non-IR exposure as ME-long), so 8300i 15000 / ~60000 brackets label correctly.
+- **8300i SE mid-ladder** (expanded captures): correct 900/1800 image dummy, pixel clock, feed2, and shading-strip clocks (nearest-band fills were wrong); promote measured 150/600/900/1800 rows. Cold-boot startup matches SE `INIT_REGS` (116/116).
 
 ## [1.3.4] - 2026-09-25
 

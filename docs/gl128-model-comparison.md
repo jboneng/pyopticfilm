@@ -39,7 +39,7 @@ it is not automatically a SilverFast equivalent.
 |-------|-----|----------|--------------------|
 | 8100 V2 | `07b3:1824` | `pyopticfilm_captures/8100-v2` (SilverFast 9, USBPcap, 2026-09-05) | Session `02_cold_boot_open`, `04_color_7200`, `06_ppi_ladder` via `tools/capture_ledger.py`; leaf class `model_8100_v2.py`; `docs/register-reference.md` |
 | 8200i SE | `07b3:1825` | `pyopticfilm_captures/8200i-se` (SilverFast 9, USBPcap, 2026-07/08) | `decoded/gl128_tables.json`, `decoded/ppi_lincnt_feed.json`, `13_ppi_ladder/decoded_ppi_ladder.json`; `model_8200i_se.py` / `gl128_common.py` |
-| 8300i SE | `07b3:181f` (`bcdDevice=0x0702`, proven in the pcaps) | Local `8300i_captures/` set (SilverFast 9, USBPcap; full-frame 300 / 1200+IR+ME / 2400 / 3600+ME / 7200) | §10 synthesis; leaf `model_8300i_se.py` (`scan_ready=False`) |
+| 8300i SE | `07b3:181f` (`bcdDevice=0x0702`, proven in the pcaps) | Local `8300i_captures/` set (SilverFast 9, USBPcap; full-frame 150/300/600/900/1200/1800/2400/3600/7200 + IR siblings + ME @1200/3600 + cold-boot startup) | §10 synthesis; leaf `model_8300i_se.py` (`scan_ready=False`) |
 | 135i | `07b3:1436` | `plustek 135i captures` (VueScan, usbmon linktype 220, 2026-08-31) | `135i_protocol_analysis.md` (Scan Lab’s USBPcap importer does not read usbmon) |
 
 In-tree shared vs divergent knobs for the two hardware-tested models:
@@ -505,24 +505,33 @@ The acquire launch is the same START + AGOHOME image pass on all three.
 
 ## 10. OpticFilm 8300i SE (`07b3:181f`) — capture synthesis
 
-Phase-1 decode of five SilverFast 9 full-frame USBPcap captures (Windows VM,
-USBPcap). Product sticker / marketing name is **8300i SE**; SilverFast may
-list the unit as **8300i**. USB product string reported by hardware reporters:
-`Film Scanner(A2K)`. `bcdDevice` from reporters: `0x0702` (same family as
-SE/V2).
+SilverFast 9 full-frame USBPcap captures (Windows). Product sticker /
+marketing name is **8300i SE**; SilverFast may list the unit as **8300i**.
+USB product string reported by hardware reporters: `Film Scanner(A2K)`.
+`bcdDevice` from reporters / pcaps: `0x0702` (same family as SE/V2).
 
-Captures used:
+Captures used (expanded set):
 
 | File | PPI | IR | ME |
 |------|-----|----|----|
+| `capture_plug-in+silverfast-startup.pcapng` | — | — | cold boot |
+| `capture_150_full-frame_with-ir_no-me.pcapng` | 150 | yes (`0xF4`) | no |
 | `capture_300_full-frame_no-ir_no-me.pcapng` | 300 | no | no |
+| `capture_300_full-frame_with-ir_no-me.pcapng` | 300 | yes | no |
+| `capture_600_full-frame_with-ir_no-me.pcapng` | 600 | yes | no |
+| `capture_900_full-frame_with-ir_no-me.pcapng` | 900 | yes | no |
+| `capture_1200_full-frame_with-ir_no-me.pcapng` | 1200 | yes | no |
 | `capture_1200_full-frame_with-ir_with-me.pcapng` | 1200 | yes | yes |
+| `capture_1800_full-frame_with-ir_no-me.pcapng` | 1800 | yes | no |
 | `capture_2400_full-frame_no-ir_no-me.pcapng` | 2400 | no | no |
+| `capture_2400_full-frame_with-ir_no-me.pcapng` | 2400 | yes (`0xF4`) | no |
 | `capture_3600_full-frame_no-ir_with-me.pcapng` | 3600 | no | yes |
+| `capture_3600_full-frame_with-ir_no-me.pcapng` | 3600 | yes | no |
 | `capture_7200_full-frame_no-ir_no-me.pcapng` | 7200 | no | no |
+| `capture_7200_full-frame_with-ir_no-me.pcapng` | 7200 | incomplete (no IR image preamble) | no |
 
-No dedicated cold-boot-only capture; boot/`INIT_REGS` identity vs SE is
-**unknown** here. No 150/600/720/900/1440/1800 rungs in this set.
+Still missing: **720**, **1440**. Cold-boot startup first-writes match SE
+`INIT_REGS` **116/116** — no 8300i-specific INIT leaf.
 
 ### 10.1 SilverFast `LINCNT` vs pyopticfilm
 
@@ -533,8 +542,10 @@ chunky RGB). That SF value is **exactly** the 8100 V2 pyopticfilm
 
 | PPI | SF `LINCNT` | SF×4 (= pyopticfilm V2) | SE ladder |
 |-----|-------------|-------------------------|-----------|
-| 300 | 605 | **2420** | 2292 |
+| 150/300/600 | 605 | **2420** | 2292 |
+| 900 | 907 | **3628** | 3436 |
 | 1200 | 1209 | **4836** | 4580 |
+| 1800 | 1813 | **7252** | 6868 |
 | 2400 | 2417 | **9668** | 9156 |
 | 3600 | 3625 | **14500** | 13732 |
 | 7200 | 7253 | **29012** | 27476 |
@@ -556,14 +567,20 @@ before that preamble — not a mid-byte write.
 
 | PPI | feed2 (settled) | DPISET | SF `LINCNT` | py `LINCNT` (×4) | `LPERIOD` | vs SE | vs V2 | expo | `0xA5`/`0xAB` | SE `0xA5` | dummy `0x2B` | STR / END |
 |-----|-----------------|--------|-------------|------------------|-----------|-------|-------|------|---------------|-----------|--------------|-----------|
+| 150 | **13040** | 100 | 605 | 2420 | 11067 | +3 | 0 | 15000 | `0x59` | `0x02` | `0x06` | 242 / 10610 |
 | 300 | **13040** | 100 | 605 | 2420 | 11067 | +3 | 0 | 15000 | `0x59` | `0x02` | `0x06` | 242 / 10610 |
+| 600 | **13040** | 100 | 605 | 2420 | 11067 | +3 | 0 | 15000 | `0x59` | `0x02` | `0x06` | 242 / 10610 |
+| 900 | **13096** | 150 | 907 | 3628 | 11175 | +8 | 0 | 15000 | **`0x22`** | `0x02` | `0x06` | 242 / 10610 |
 | 1200 | **13112** | 200 | 1209 | 4836 | 11283 | +6 | 0 | 15000 | `0x12` | `0x02` | `0x07` | 242 / 10610 |
+| 1800 | **13122** | 300 | 1813 | 7252 | 11499 | +9 | 0 | 15000 | **`0x08`** | `0x02` | **`0x08`** | 242 / 10610 |
 | 2400 | **13124** | 400 | 2417 | 9668 | 11715 | +12 | 0 | 15000 | `0x05` | `0x01` | `0x0B` | 242 / 10610 |
 | 3600 | **13126** | 600 | 3625 | 14500 | 13443 | +36 | 0 | 15000 | `0x03` | `0x01` | `0x10` | 242 / 10610 |
 | 7200 | **13128** | 1200 | 7253 | 29012 | 16035 | +72 | 0 | 15000 | `0x02` | `0x01` | `0x1F` | 242 / 10610 |
 
-Offsets from V2’s 13128: 88 / 16 / 4 / 2 / 0 steps. ME-long passes at 1200
-and 3600 do write **13128**. 300 and 2400 never write 13128.
+Offsets from V2’s 13128: **88 / 88 / 88 / 32 / 16 / 6 / 4 / 2 / 0** steps
+(150…7200). ME-long passes at 1200 and 3600 do write **13128**. Nearest-band
+fills for clocks/feed2/dummy are **wrong** at 900/1800 — leaf tables use the
+measured values above. Still no 720/1440 captures.
 
 `DPISET` matches the shared `max(ppi, 600) / 6` formula. `LPERIOD` matches
 the V2 capture table at every measured PPI (including the full V2 ladder
@@ -578,12 +595,16 @@ From `capture_1200_full-frame_with-ir_with-me.pcapng`:
 |------|------|--------|-------|
 | Colour short | 15000 | `0xC0` | same geometry as other PPIs |
 | IR | 15000 | **`0xB4`** | IR LED bit set (same recipe as SE session 05: `0xB0` → `0xB4`) |
-| Colour ME long | **60000** | `0xC0` | adaptive long; `0xA5`/`0xAB` = `0x02` |
+| Colour ME long | **60000** | `0xC0` | adaptive long; `0xA5`/`0xAB` = `0x02`; feed2 **13128** |
 
 `capture_3600_full-frame_no-ir_with-me.pcapng` has colour short @ 15000 then
-ME long @ **60000** (no IR). Supports `supports_infrared=True` and the
-existing GL128 ME path; long exposure observed is 60000 (within the
+ME long @ **60000** (no IR; feed2 **13128**). Supports `supports_infrared=True`
+and the existing GL128 ME path; long exposure observed is 60000 (within the
 14000–85000 clamp), not the 42000 floor.
+
+IR `0x37` is usually **`0xB4`**; at **150** and **2400** captures see **`0xF4`**
+(IR bit `0x04` still set). The `7200_…with-ir` capture never announces a second
+full image preamble — treat 7200 IR as incomplete.
 
 ### 10.4 Shading strips (large RAM reads)
 
@@ -592,10 +613,14 @@ Each colour (re)calib block has two large RAM reads at the scan DPISET
 
 | PPI | Strip | `r01` | DVDSET | DPISET | `LPERIOD` | dummy `0x2B` | `0xA5` | `0xAB` | expo |
 |-----|-------|-------|--------|--------|-----------|--------------|--------|--------|------|
-| 300 | dark | `0x03` | off | 100 | 11067 | `0x02` | `0x01` | `0x30` | 15000 |
-| 300 | white | `0x23` | on | 100 | 11067 | `0x03` | `0x03` | `0x03` | 15000 |
+| 150/300/600 | dark | `0x03` | off | 100 | 11067 | `0x02` | `0x01` | `0x30` | 15000 |
+| 150/300/600 | white | `0x23` | on | 100 | 11067 | `0x03` | `0x03` | `0x03` | 15000 |
+| 900 | dark | `0x03` | off | 150 | 11175 | **`0x03`** | `0x01` | `0x30` | 15000 |
+| 900 | white | `0x23` | on | 150 | 11175 | **`0x04`** | `0x03` | `0x03` | 15000 |
 | 1200 | dark | `0x03` | off | 200 | 11283 | `0x04` | `0x01` | `0x30` | 15000 |
 | 1200 | white | `0x23` | on | 200 | 11283 | `0x06` | `0x03` | `0x03` | 15000 |
+| 1800 | dark | `0x03` | off | 300 | 11499 | **`0x06`** | `0x01` | `0x30` | 15000 |
+| 1800 | white | `0x23` | on | 300 | 11499 | **`0x08`** | `0x03` | `0x03` | 15000 |
 | 2400 | dark | `0x03` | off | 400 | 11715 | `0x08` | `0x01` | `0x30` | 15000 |
 | 2400 | white | `0x23` | on | 400 | 11715 | `0x0B` | `0x02` | `0x02` | 15000 |
 | 3600 | dark | `0x03` | off | 600 | 13443 | `0x0C` | `0x01` | `0x30` | 15000 |
@@ -604,7 +629,8 @@ Each colour (re)calib block has two large RAM reads at the scan DPISET
 | 7200 | white | `0x23` | on | 1200 | 16035 | **`0x26`** | `0x02` | `0x02` | 15000 |
 
 Dark @ 7200 dummy `0x17` matches SE/V2. White @ 7200 is **`0x26`**, not V2’s
-`0x10` or SE’s `0x17`. All shading uses exposure **15000**.
+`0x10` or SE’s `0x17`. All shading uses exposure **15000**. 900/1800 strip
+dummies are **not** the nearest lower-band fills.
 
 AFE probe traffic (DPISET 1200, sizes 3072 / 62268) appears before the
 shading pair on every capture; wide-probe `LPERIOD` examples include 13445
@@ -615,7 +641,7 @@ and 16040 depending on PPI.
 | FEEDL | Role on 8300i SE |
 |------:|------------------|
 | 28292 | feed 1 reference (same as SE/V2) |
-| 13040 / 13112 / 13124 / 13126 / 13128 | feed 2 full-frame origin (PPI-dependent; see §10.2) |
+| 13040 / 13096 / 13112 / 13122 / 13124 / 13126 / 13128 | feed 2 full-frame origin (PPI-dependent; see §10.2) |
 | 1 | image-pass placeholder |
 
 SE ladder origin 13560 and historical SE full-frame 13704 do **not** appear
@@ -652,12 +678,16 @@ SE ROM through `Gl128Common` defaults.
 
 ### 10.8 Open gaps (8300i SE)
 
-- Dedicated cold-boot-only capture. Scan captures’ first-writes are mostly SE `INIT_REGS` with some real-looking diffs (`0x7E`/`0x7F` already 15000; `0x52`–`0x5B` / `0x70`–`0x73`) plus scan-overlay contamination — not a clean boot oracle
-- Full PPI ladder (missing 150/600/720/900/1440/1800). Mid-ladder fills in `model_8300i_se.py` (nearest measured asic-dpi band / V2 LPERIOD table) are **not** capture-proven. CI setup goldens at **1800** use those filled values — there is no 1800 capture
+- Full PPI ladder still missing **720** and **1440** (image clocks / feed2 / shading still nearest-band fills — known-unreliable after 900/1800 corrections)
+- Complete 7200 IR image capture (current with-IR file has no second image preamble)
 - Hardware confirmation that CUSTOM slope ROM is accepted (park + feeds/scans; wrong slopes have caused hard motor stops on GL128)
 - AFE gain/offset search targets vs SE session-04 defaults
 - Product string / configuration descriptor from an in-tree capture (PID/`bcdDevice` are in the pcaps)
 - Hardware sign-off checklist before `scan_ready`
+
+Closed by expanded captures: cold-boot = SE `INIT_REGS` (116/116); measured
+150/600/900/1800 image + shading rows; mid-ladder dummy/clock/feed2 corrected
+at 900/1800.
 
 ## Open capture gaps
 

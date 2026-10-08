@@ -97,8 +97,12 @@ def test_divergent_fields_match_capture_catalog():
     assert MODEL_8300I_SE.slope_table_slow() != MODEL_8200I_SE.slope_table_slow()
     assert MODEL_8300I_SE.slope_table_fast() != MODEL_8200I_SE.slope_table_fast()
     # Colour-short feed2 is PPI-dependent on 8300i; SE/V2 stay constant.
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(150) == 13040
     assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(300) == 13040
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(600) == 13040
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(900) == 13096
     assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(1200) == 13112
+    assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(1800) == 13122
     assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(2400) == 13124
     assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(3600) == 13126
     assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(7200) == 13128
@@ -106,6 +110,17 @@ def test_divergent_fields_match_capture_catalog():
     assert MODEL_8300I_SE.feed_to_scan_steps_for_dpi(3600, long_exposure=True) == 13128
     assert MODEL_8200I_SE.feed_to_scan_steps_for_dpi(1200) == MODEL_8200I_SE.feed_to_scan_steps
     assert MODEL_8100_V2.feed_to_scan_steps_for_dpi(7200) == MODEL_8100_V2.feed_to_scan_steps
+    # Mid-ladder corrections from expanded captures (not nearest-band fills).
+    assert MODEL_8300I_SE.dummy_by_dpi[900] == 0x06
+    assert MODEL_8300I_SE.dummy_by_dpi[1800] == 0x08
+    assert MODEL_8300I_SE.pixel_clock_by_dpi[900] == 0x22
+    assert MODEL_8300I_SE.pixel_clock_by_dpi[1800] == 0x08
+    assert MODEL_8300I_SE.lperiod_by_dpi[900] == 11175
+    assert MODEL_8300I_SE.lperiod_by_dpi[1800] == 11499
+    assert MODEL_8300I_SE.shading_strip_clocks(900, dvdset=False) == (0x03, 0x01, 0x30)
+    assert MODEL_8300I_SE.shading_strip_clocks(900, dvdset=True) == (0x04, 0x03, 0x03)
+    assert MODEL_8300I_SE.shading_strip_clocks(1800, dvdset=False) == (0x06, 0x01, 0x30)
+    assert MODEL_8300I_SE.shading_strip_clocks(1800, dvdset=True) == (0x08, 0x03, 0x03)
     assert dict(MODEL_8200I_SE.max_image_lincnt_by_feed2) == {
         13128: 4836,
         13560: 27476,
