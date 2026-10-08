@@ -9,6 +9,7 @@ from pyopticfilm.device.model_7500i import MODEL_7500I, MODEL_7600I_V1, Model750
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2, Model8100V2
 from pyopticfilm.device.model_8200i import MODEL_8200I, Model8200i
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE, Model8200iSE
+from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE, Model8300iSE
 from pyopticfilm.device.protocol import AsicDriver, FilmModel, Gl128Model, MotorProfile
 from pyopticfilm.device.select import (
     KNOWN_MODELS,
@@ -41,6 +42,7 @@ __all__ = [
     "MODEL_8100_V2",
     "MODEL_8200I",
     "MODEL_8200I_SE",
+    "MODEL_8300I_SE",
     "AsicDriver",
     "FilmModel",
     "Gl128Model",
@@ -52,6 +54,7 @@ __all__ = [
     "Model8100V2",
     "Model8200i",
     "Model8200iSE",
+    "Model8300iSE",
     "MotorProfile",
     "create_asic",
     "dummy_pixel_for",

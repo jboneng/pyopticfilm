@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Shared GL128 tables, ops, and sibling-diff catalog.
 
-OpticFilm 8200i SE and 8100 V2 share register maps and geometry helpers that
-are capture-identical. Capture-proven *divergences* live on the leaf model
-classes (``Model8200iSE``, ``Model8100V2``), which both subclass
-:class:`Gl128Common` rather than each other.
+OpticFilm 8200i SE, 8100 V2, and 8300i SE share register maps and geometry
+helpers that are capture-identical. Capture-proven *divergences* live on the
+leaf model classes (``Model8200iSE``, ``Model8100V2``, ``Model8300iSE``), which
+subclass :class:`Gl128Common` rather than each other.
 
 Adding a field to :class:`Gl128Common` without listing it in
 :data:`GL128_SHARED_FIELDS` (or adding a leaf-only field without listing it in
@@ -248,7 +248,7 @@ LADDER_LINCNT_BY_DPI: dict[int, int] = {
     7200: 27476,
 }
 
-#: Leaf-only fields that must be declared independently on SE and V2.
+#: Leaf-only fields that must be declared independently on every GL128 sibling.
 #: Values are compared in ``tests/test_gl128_siblings.py``.
 GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
     {
@@ -256,11 +256,17 @@ GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
         "model",
         "usb_product_id",
         "supports_infrared",
+        "scan_ready",
         "feed_to_scan_steps",
         "lperiod_by_dpi",
         "max_image_lincnt_by_feed2",
         "ladder_feed2_steps",
         "ladder_lincnt_by_dpi",
+        "exposure_lperiod",
+        "exposure_short",
+        "pixel_clock_by_dpi",
+        "pixel_clock_long_by_dpi",
+        "dummy_by_dpi",
     }
 )
 
@@ -270,7 +276,6 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "vendor",
         "asic",
         "usb_vendor_id",
-        "scan_ready",
         "resolutions_dpi",
         "bpp_gray",
         "bpp_color",
@@ -304,15 +309,10 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "stagger_y_by_dpi",
         "register_dpiset_by_dpi",
         "output_pixel_offset_by_dpi",
-        "pixel_clock_by_dpi",
-        "pixel_clock_long_by_dpi",
-        "dummy_by_dpi",
         "shading_dark_dummy_by_dpi",
         "shading_dark_pixel_clock_a_by_dpi",
         "shading_dark_pixel_clock_b_by_dpi",
         "register_dpihw",
-        "exposure_lperiod",
-        "exposure_short",
         "exposure_long",
         "multi_exposure_factor",
         "me_adaptive_min_exposure",
@@ -360,8 +360,6 @@ class Gl128Common:
     asic: str = "GL128"
     usb_vendor_id: int = 0x07B3
 
-    scan_ready: bool = True
-
     resolutions_dpi: tuple[int, ...] = ALL_PPI
     bpp_gray: tuple[int, ...] = (16,)
     bpp_color: tuple[int, ...] = (16,)
@@ -404,13 +402,6 @@ class Gl128Common:
     output_pixel_offset_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(OUTPUT_PIXEL_OFFSET)
     )
-    pixel_clock_by_dpi: Mapping[int, int] = field(
-        default_factory=lambda: dict(PIXEL_CLOCK_BY_DPI)
-    )
-    pixel_clock_long_by_dpi: Mapping[int, int] = field(
-        default_factory=lambda: dict(PIXEL_CLOCK_LONG_BY_DPI)
-    )
-    dummy_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(DUMMY_BY_DPI))
     shading_dark_dummy_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(SHADING_DARK_DUMMY_BY_DPI)
     )
@@ -422,8 +413,6 @@ class Gl128Common:
     )
 
     register_dpihw: int = 1200
-    exposure_lperiod: int = 14000
-    exposure_short: int = 14000
     exposure_long: int = 42000
     multi_exposure_factor: int = 3
     me_adaptive_min_exposure: int = 42000
@@ -486,6 +475,26 @@ class Gl128Common:
         key = self.asic_dpi_for(resolution)
         return self.lperiod_by_dpi.get(key, self.exposure_lperiod)
 
+    def slope_table_fast(self) -> tuple[int, ...]:
+        """Motor ramp for feed2 / scan positioning (AHB slope windows).
+
+        Default is the 8200i SE capture table. The 8300i SE overrides with its
+        CUSTOM ROM (docs §10.6).
+        """
+        from pyopticfilm.device.tables_8200i_se import SLOPE_TABLE_FAST
+
+        return SLOPE_TABLE_FAST
+
+    def slope_table_slow(self) -> tuple[int, ...]:
+        """Motor ramp for the reference feed / shading acquires.
+
+        Default is the 8200i SE capture table. The 8300i SE overrides with its
+        CUSTOM ROM (docs §10.6).
+        """
+        from pyopticfilm.device.tables_8200i_se import SLOPE_TABLE_SLOW
+
+        return SLOPE_TABLE_SLOW
+
     def shading_strip_clocks(self, resolution: int, *, dvdset: bool) -> tuple[int, int, int]:
         """``(0x2B, 0xA5, 0xAB)`` for a shading strip.
 
@@ -521,6 +530,17 @@ class Gl128Common:
         """``REG_EXPOSURE`` for short or long ME bracket."""
         return int(self.exposure_long if long_exposure else self.exposure_short)
 
+    def feed_to_scan_steps_for_dpi(
+        self, resolution: int, *, long_exposure: bool = False
+    ) -> int:
+        """Full-frame second-feed steps at ``resolution``.
+
+        Default is :attr:`feed_to_scan_steps` (SE/V2). The 8300i SE overrides
+        with a PPI-dependent colour-short map; ME-long uses 13128.
+        """
+        del resolution, long_exposure
+        return int(self.feed_to_scan_steps)
+
     def feed_to_scan_steps_for_area(
         self,
         area: tuple[float, float, float, float] | None = None,
@@ -530,7 +550,9 @@ class Gl128Common:
         Default full frame (``area is None``) uses :attr:`feed_to_scan_steps`.
         Otherwise ``y1`` is a fraction of the scan window, which runs from the
         preview top (:attr:`feed_to_scan_top_steps`) to the window end
-        (:attr:`scan_window_end_steps`).
+        (:attr:`scan_window_end_steps`). Prefer
+        :meth:`feed_to_scan_steps_for_dpi` for full-frame image passes that
+        know the scan DPI.
         """
         if area is None:
             return int(self.feed_to_scan_steps)

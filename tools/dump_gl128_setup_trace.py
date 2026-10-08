@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Dump GL128 init+_configure register programs (8200i SE and 8100 V2).
+"""Dump GL128 init+_configure register programs (SE / 8100 V2 / 8300i SE).
 
 Usage:
     python tools/dump_gl128_setup_trace.py
@@ -21,10 +21,12 @@ from scanners.trace_compare import dump_trace
 
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
+from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
 
 _MODELS = {
     "se": (MODEL_8200I_SE, "8200i_se", "OpticFilm 8200i SE"),
     "v2": (MODEL_8100_V2, "8100_v2", "OpticFilm 8100 (V2)"),
+    "8300i": (MODEL_8300I_SE, "8300i_se", "OpticFilm 8300i SE"),
 }
 _DPIS = (1200, 1800, 7200)
 
@@ -61,10 +63,10 @@ def _dump_one(key: str, dpi: int) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("se", "v2", "all"), default="all")
+    parser.add_argument("--model", choices=("se", "v2", "8300i", "all"), default="all")
     parser.add_argument("--dpi", type=int, default=0, help="One PPI, or 0 for 1200/1800/7200")
     args = parser.parse_args()
-    keys = ("se", "v2") if args.model == "all" else (args.model,)
+    keys = ("se", "v2", "8300i") if args.model == "all" else (args.model,)
     dpis = _DPIS if not args.dpi else (args.dpi,)
     for key in keys:
         for dpi in dpis:

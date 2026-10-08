@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from pyopticfilm.device.model_7400 import MODEL_8100
+from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
 from pyopticfilm.usb.protocol import (
     REQUEST_BUFFER,
     REQUEST_TYPE_OUT,
@@ -195,6 +196,30 @@ def test_me_exposure_pass_labels():
         classify_capture_pass_label(short, kind="color", capture_has_me=False) == "color"
     )
     assert classify_capture_pass_label(ir, kind="ir", capture_has_me=True) == "ir"
+
+
+def test_me_exposure_pass_labels_8300i_se():
+    """8300i short is 15000; adaptive long (~60000) is any exp above short."""
+    short = _exposure_regs(15000)
+    long = _exposure_regs(60000)
+    se_long = _exposure_regs(ME_EXPOSURE_LONG)
+    assert not is_me_long_pass(short, model=MODEL_8300I_SE)
+    assert is_me_long_pass(long, model=MODEL_8300I_SE)
+    assert is_me_long_pass(se_long, model=MODEL_8300I_SE)
+    assert not is_me_long_pass(short)  # no model: SE equality only
+    assert not is_me_long_pass(long)  # 60000 ≠ SE 42000 without model
+    assert (
+        classify_capture_pass_label(
+            short, kind="color", capture_has_me=True, model=MODEL_8300I_SE
+        )
+        == "color ME-short"
+    )
+    assert (
+        classify_capture_pass_label(
+            long, kind="color", capture_has_me=True, model=MODEL_8300I_SE
+        )
+        == "color ME-long"
+    )
 
 
 def test_keep_bulk_in_payload_skips_unaligned_status():

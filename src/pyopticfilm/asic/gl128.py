@@ -28,11 +28,7 @@ from pyopticfilm.asic.registers import Gl128Registers
 from pyopticfilm.asic.status import ScannerStatus
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.protocol import Gl128Model
-from pyopticfilm.device.tables_8200i_se import (
-    SLOPE_TABLE_FAST,
-    SLOPE_TABLE_SLOW,
-    exposure_table,
-)
+from pyopticfilm.device.tables_8200i_se import exposure_table
 from pyopticfilm.exceptions import AsicError, MotorTimeoutError, ScanError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calib_gl128 import (
@@ -1218,7 +1214,12 @@ class Gl128:
         r = self.registers
         if slope:
             use_slow = bool(shading or getattr(self, "image_slope_slow", False))
-            slope_bytes = _u16_table_bytes(SLOPE_TABLE_SLOW if use_slow else SLOPE_TABLE_FAST)
+            table = (
+                self.model.slope_table_slow()
+                if use_slow
+                else self.model.slope_table_fast()
+            )
+            slope_bytes = _u16_table_bytes(table)
             self.protocol.write_ahb(r.AHB_SLOPE_SCAN, slope_bytes)
             self.protocol.write_ahb(r.AHB_SLOPE_FAST, slope_bytes)
 
@@ -1412,21 +1413,23 @@ class Gl128:
     def _upload_fast_slopes(self, *, use_slow: bool = False) -> None:
         """Upload the motor ramp to both AHB slope windows.
 
-        Positioning feed pairs are capture-faithful and identical on both
-        GL128 models: SilverFast uploads ``SLOPE_TABLE_SLOW`` for the first
-        (reference) feed and ``SLOPE_TABLE_FAST`` for the second (final
-        positioning) feed — confirmed byte-exact, independently, on both the
-        8200i SE (39/39 positioning pairs) and the 8100 V2 (two independent
-        2026-09 capture sessions, cross-checked against REG_FEEDL; see
-        jboneng/pyopticfilm#56). An earlier V2 fix shipped the opposite pair
-        (fast-then-slow) based on since-superseded capture analysis; using
-        fast for both — the original, pre-fix bug — caused a real mechanical
-        fault on V2 hardware, which is why this is not something to
-        change without fresh capture evidence.
+        Positioning feed pairs are capture-faithful on GL128: SilverFast
+        uploads the model's slow ramp for the first (reference) feed and the
+        fast ramp for the second (final positioning) feed — confirmed
+        byte-exact on the 8200i SE (39/39) and 8100 V2 (two 2026-09 sessions;
+        see jboneng/pyopticfilm#56). The 8300i SE uses the same SLOW→FAST
+        *order* with CUSTOM payloads (heads ``0x32BB`` / ``0x846A``). An
+        earlier V2 fix shipped the opposite pair based on superseded analysis;
+        using fast for both caused a real mechanical fault on V2 hardware.
         :meth:`position_for_full_frame_scan` always uploads slow-then-fast.
         ``feed()`` still uploads the fast ramp.
         """
-        slope = _u16_table_bytes(SLOPE_TABLE_SLOW if use_slow else SLOPE_TABLE_FAST)
+        table = (
+            self.model.slope_table_slow()
+            if use_slow
+            else self.model.slope_table_fast()
+        )
+        slope = _u16_table_bytes(table)
         r = self.registers
         self.protocol.write_ahb(r.AHB_SLOPE_SCAN, slope)
         self.protocol.write_ahb(r.AHB_SLOPE_FAST, slope)

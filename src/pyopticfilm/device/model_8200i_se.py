@@ -43,7 +43,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from pyopticfilm.device.gl128_common import LADDER_LINCNT_BY_DPI, LPERIOD_BY_DPI, Gl128Common
+from pyopticfilm.device.gl128_common import (
+    DUMMY_BY_DPI,
+    LADDER_LINCNT_BY_DPI,
+    LPERIOD_BY_DPI,
+    PIXEL_CLOCK_BY_DPI,
+    PIXEL_CLOCK_LONG_BY_DPI,
+    Gl128Common,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,7 @@ class Model8200iSE(Gl128Common):
     model: str = "OpticFilm 8200i SE"
     usb_product_id: int = 0x1825
     supports_infrared: bool = True
+    scan_ready: bool = True
 
     #: Default full-frame colour. Sessions 03/08/09a measured the true scan-window
     #: top at 13128 (matches feed_to_scan_top_steps and the V2's value for this
@@ -88,6 +96,16 @@ class Model8200iSE(Gl128Common):
     ladder_lincnt_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(LADDER_LINCNT_BY_DPI)
     )
+
+    exposure_lperiod: int = 14000
+    exposure_short: int = 14000
+    pixel_clock_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(PIXEL_CLOCK_BY_DPI)
+    )
+    pixel_clock_long_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(PIXEL_CLOCK_LONG_BY_DPI)
+    )
+    dummy_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(DUMMY_BY_DPI))
 
 
 MODEL_8200I_SE = Model8200iSE()

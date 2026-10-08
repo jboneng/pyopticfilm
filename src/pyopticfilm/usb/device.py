@@ -30,6 +30,9 @@ PID_OPTICFILM_8200I_SE = 0x1825
 # OpticFilm 8100 V2 (GL128) — scan-ready in this release (no IR)
 PID_OPTICFILM_8100_V2 = 0x1824
 
+# OpticFilm 8300i SE (GL128) — enumerate / capture-decode; scan_ready=False
+PID_OPTICFILM_8300I_SE = 0x181F
+
 # Other SANE genesys :complete OpticFilm PIDs (probe-only until validated)
 PID_OPTICFILM_7200 = 0x0807
 PID_OPTICFILM_7200I = 0x0C04
@@ -44,7 +47,8 @@ SUPPORTED_IDS: frozenset[tuple[int, int]] = frozenset(
     {
         (VID_PLUSTEK, PID_OPTICFILM_8200I),
         (VID_PLUSTEK, PID_OPTICFILM_8200I_SE),
-    (VID_PLUSTEK, PID_OPTICFILM_8100_V2),
+        (VID_PLUSTEK, PID_OPTICFILM_8100_V2),
+        (VID_PLUSTEK, PID_OPTICFILM_8300I_SE),
         (VID_PLUSTEK, PID_OPTICFILM_7200),
         (VID_PLUSTEK, PID_OPTICFILM_7200I),
         (VID_PLUSTEK, PID_OPTICFILM_7200_V2),
