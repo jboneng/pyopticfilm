@@ -18,7 +18,7 @@ from SANE.
 | OpticFilm 7600i v2 | `07b3:0c3b` bcd `0x0605` | GL845 | alias of 8200i tables | `gl846.cpp` |
 | OpticFilm 7400 v2 | `07b3:0c3a` bcd `0x0605` | GL845 | `CCD_PLUSTEK_OPTICFILM_7400` | `gl846.cpp` |
 | OpticFilm 7500i | `07b3:0c13` | GL843 | `CCD_PLUSTEK_OPTICFILM_7500I` | `gl843.cpp` |
-| OpticFilm 7600i v1 | `07b3:0c3b` bcd `0x0400` | GL843 | same as 7500i | `gl843.cpp` |
+| OpticFilm 7600i v1 | `07b3:0c3b` bcd `0x0400` | GL843 | *(none)* | capture / `Gl843V1` |
 | OpticFilm 7300 | `07b3:0c12` | GL843 | `CCD_PLUSTEK_OPTICFILM_7300` | `gl843.cpp` |
 | OpticFilm 7400 v1 | `07b3:0c3a` bcd `0x0400` | GL843 | 7300 tables | `gl843.cpp` |
 | OpticFilm 7200i | `07b3:0c04` | GL843 | `CCD_PLUSTEK_OPTICFILM_7200I` | `gl843.cpp` |

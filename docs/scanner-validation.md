@@ -13,7 +13,7 @@ successful park.
 
 | Level | Meaning |
 |-------|---------|
-| **Hardware tested** | Live scan + park on physical hardware. Currently the 8200i SE and 8100 (V2). |
+| **Hardware tested** | Live scan + park on physical hardware. Currently the 8200i SE, 8100 (V2) and 7600i v1. |
 | **Protocol validated** | Python USB traffic for a documented setup matches a golden trace, and optical registers match independently computed geometry. A SANE genesys register dump, when present, is an additional oracle. |
 | **Experimental** | Tables and session code exist; `scan()`, `home()`, `park()`, and `calibrate()` stay locked. |
 
@@ -205,6 +205,11 @@ model's files under `tests/model_lock/`, confirm on **that** hardware:
 - Infrared, if the model has an IR channel
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## OpticFilm 7600i v1 (GL843)
+
+Capture-derived: every job is replayed against strict playback of the SilverFast capture
+(`usb/fake_gl843_v1.py`). See [opticfilm-7600i-v1.md](opticfilm-7600i-v1.md).
 
 ## GL128 (8200i SE and 8100 V2)
 

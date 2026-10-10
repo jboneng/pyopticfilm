@@ -238,8 +238,11 @@ def default_frame_crop_norm(model: Any) -> Area:
     """Centered ~35 mm frame crop (session-13 ladder y-extent, full width).
 
     Returned in **TA / scan** space. Convert with :func:`scan_area_to_image_crop`
-    before drawing on the Prescan preview.
+    before drawing on the Prescan preview. Other models (OpticFilm 7600i v1) scan the frame
+    window itself: the whole area.
     """
+    if not is_gl128_opticfilm(model):
+        return (0.0, 0.0, 1.0, 1.0)
     area, _ = ladder_scan_area(model, PRESCAN_DPI)
     return clamp_area(area)
 

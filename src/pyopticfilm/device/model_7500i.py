@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""OpticFilm 7500i / 7600i v1 (GL843) tables from SANE genesys."""
+"""OpticFilm 7500i (GL843) tables from SANE genesys."""
 
 from __future__ import annotations
 
@@ -141,8 +141,3 @@ class Model7500i:
 
 
 MODEL_7500I = Model7500i()
-MODEL_7600I_V1 = Model7500i(
-    name="plustek-opticfilm-7600i-v1",
-    model="OpticFilm 7600i (v1)",
-    usb_product_id=0x0C3B,
-)

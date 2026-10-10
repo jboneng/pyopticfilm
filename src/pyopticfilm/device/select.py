@@ -8,12 +8,14 @@ from typing import Any
 from pyopticfilm.asic.gl128 import Gl128
 from pyopticfilm.asic.gl842 import Gl842
 from pyopticfilm.asic.gl843 import Gl843
+from pyopticfilm.asic.gl843_v1 import Gl843V1
 from pyopticfilm.asic.gl845 import Gl845
 from pyopticfilm.device.model_7200 import MODEL_7200
 from pyopticfilm.device.model_7200i import MODEL_7200_V2, MODEL_7200I
 from pyopticfilm.device.model_7300 import MODEL_7300, MODEL_7400_V1
 from pyopticfilm.device.model_7400 import MODEL_7400, MODEL_8100
-from pyopticfilm.device.model_7500i import MODEL_7500I, MODEL_7600I_V1
+from pyopticfilm.device.model_7500i import MODEL_7500I
+from pyopticfilm.device.model_7600i_v1 import MODEL_7600I_V1, Model7600iV1
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
@@ -101,7 +103,7 @@ def model_for_device(product_id: int, bcd_device: int = 0) -> FilmModel:
             return MODEL_7400_V1
         return MODEL_7400
     if product_id == PID_OPTICFILM_7600I:
-        # bcd 0x0400 → 7600i-v1 (7500i); bcd 0x0605 → 7600i-v2 (8200i)
+        # bcd 0x0400 → 7600i-v1 (captures); bcd 0x0605 → 7600i-v2 (8200i)
         if bcd_device == 0x0400:
             return MODEL_7600I_V1
         return MODEL_7600I_V2
@@ -123,6 +125,8 @@ def create_asic(protocol: GenesysUsbProtocol, model: FilmModel) -> Any:
     if asic == "GL845":
         return Gl845(protocol, model)
     if asic == "GL843":
+        if isinstance(model, Model7600iV1):
+            return Gl843V1(protocol, model)
         return Gl843(protocol, model)
     if asic == "GL842":
         return Gl842(protocol, model)

@@ -10,7 +10,8 @@ from pyopticfilm.device.model_7200 import MODEL_7200
 from pyopticfilm.device.model_7200i import MODEL_7200_V2, MODEL_7200I
 from pyopticfilm.device.model_7300 import MODEL_7300, MODEL_7400_V1
 from pyopticfilm.device.model_7400 import MODEL_7400, MODEL_8100
-from pyopticfilm.device.model_7500i import MODEL_7500I, MODEL_7600I_V1
+from pyopticfilm.device.model_7500i import MODEL_7500I
+from pyopticfilm.device.model_7600i_v1 import MODEL_7600I_V1
 from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.select import (
     KNOWN_MODELS,
@@ -88,9 +89,9 @@ def test_scan_ready_validate_set():
     from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 
     scan_ready_models = {id(m) for m in KNOWN_MODELS if m.scan_ready}
-    assert scan_ready_models == {id(MODEL_8200I_SE), id(MODEL_8100_V2)}
+    assert scan_ready_models == {id(MODEL_8200I_SE), id(MODEL_8100_V2), id(MODEL_7600I_V1)}
     for m in KNOWN_MODELS:
-        if m is MODEL_8200I_SE or m is MODEL_8100_V2:
+        if m in (MODEL_8200I_SE, MODEL_8100_V2, MODEL_7600I_V1):
             assert m.scan_ready is True
             continue
         assert m.scan_ready is False, f"{m.model} must stay locked out"

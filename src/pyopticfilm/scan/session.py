@@ -500,6 +500,7 @@ def create_session(
     """Build the scan session matching ``model``'s ASIC.
 
     * GL128 → :class:`~pyopticfilm.scan.session_gl128.Gl128ScanSession` (captures)
+    * GL843 7600i v1 → :class:`~pyopticfilm.scan.session_7600i_v1.Gl843V1ScanSession` (captures)
     * GL843 → :class:`~pyopticfilm.scan.session_gl843.Gl843ScanSession` (SANE)
     * GL842 → :class:`~pyopticfilm.scan.session_gl842.Gl842ScanSession` (SANE)
     * GL845 → :class:`ScanSession` (SANE ``CommandSetGl846``)
@@ -509,6 +510,12 @@ def create_session(
         from pyopticfilm.scan.session_gl128 import Gl128ScanSession
 
         return Gl128ScanSession(asic, model, calibrator)
+    from pyopticfilm.device.model_7600i_v1 import Model7600iV1
+
+    if isinstance(model, Model7600iV1):
+        from pyopticfilm.scan.session_7600i_v1 import Gl843V1ScanSession
+
+        return Gl843V1ScanSession(asic, model, calibrator)  # type: ignore[return-value]
     if asic_name == "GL843":
         from pyopticfilm.scan.session_gl843 import Gl843ScanSession
 

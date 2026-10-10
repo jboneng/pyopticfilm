@@ -13,6 +13,7 @@ _LOCK_ROOT = Path(__file__).resolve().parent
 _LOCK_FOLDERS = {
     "plustek-opticfilm-8200i-se": "opticfilm_8200i_se",
     "plustek-opticfilm-8100-v2": "opticfilm_8100_v2",
+    "plustek-opticfilm-7600i-v1": "opticfilm_7600i_v1",
 }
 
 

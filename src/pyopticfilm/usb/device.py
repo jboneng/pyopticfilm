@@ -37,7 +37,7 @@ PID_OPTICFILM_7200_V2 = 0x0C07
 PID_OPTICFILM_7300 = 0x0C12
 PID_OPTICFILM_7400 = 0x0C3A  # bcd 0x0400 → 7300 tables; bcd 0x0605 → 7400-v2
 PID_OPTICFILM_7500I = 0x0C13
-PID_OPTICFILM_7600I = 0x0C3B  # bcd 0x0400 → 7500i; bcd 0x0605 → 8200i
+PID_OPTICFILM_7600I = 0x0C3B  # bcd 0x0400 → 7600i v1; bcd 0x0605 → 8200i
 PID_OPTICFILM_8100 = 0x130C
 
 SUPPORTED_IDS: frozenset[tuple[int, int]] = frozenset(
@@ -251,8 +251,8 @@ class UsbDeviceHandle:
         if not info.is_supported:
             raise UnsupportedDeviceError(
                 f"Device {info.device_id} is not a known OpticFilm. "
-                f"This release scans OpticFilm 8200i SE (07b3:1825) and "
-                f"OpticFilm 8100 (V2) (07b3:1824); other PIDs may open for "
+                f"This release scans OpticFilm 8200i SE (07b3:1825), "
+                f"OpticFilm 8100 (V2) (07b3:1824) and OpticFilm 7600i v1 (07b3:0c3b); other PIDs may open for "
                 f"probe/status only."
             )
         self.info = info
@@ -334,10 +334,14 @@ class UsbDeviceHandle:
                 logger.debug("Kernel detach skipped: %s", exc)
 
             try:
-                dev.set_configuration()
-            except usb_core.USBError as exc:
-                # Already configured is common and fine.
-                logger.debug("set_configuration: %s", exc)
+                # Configure only an unconfigured device: setting it again resets the host's bulk
+                # data toggles but not the 7600i's GL843, so the next session lost its first packet.
+                dev.get_active_configuration()
+            except usb_core.USBError:
+                try:
+                    dev.set_configuration()
+                except usb_core.USBError as exc:
+                    logger.debug("set_configuration: %s", exc)
 
             cfg = dev.get_active_configuration()
             intf = cfg[(0, 0)]

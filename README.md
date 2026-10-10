@@ -6,7 +6,7 @@ The library talks directly to the scanner’s Genesys ASIC (GL842, GL843, GL845,
 
 ## Supported hardware
 
-**Only the OpticFilm 8200i SE and OpticFilm 8100 (V2) are hardware-tested for scanning in this release.**
+**Only the OpticFilm 8200i SE, OpticFilm 8100 (V2) and OpticFilm 7600i v1 are hardware-tested for scanning in this release.**
 
 Support is one of:
 
@@ -20,7 +20,8 @@ Support is one of:
 | OpticFilm 8100 (V2) | `07b3:1824` | GL128 | **Hardware tested** (no IR) |
 | OpticFilm 8200i | `07b3:130d` | GL845 | Protocol validated (setup traces; scan locked) |
 | OpticFilm 8100 | `07b3:130c` | GL845 | Experimental |
-| OpticFilm 7600i (v1 / v2) | `07b3:0c3b` | GL845 / GL843 | Experimental |
+| OpticFilm 7600i v1 | `07b3:0c3b` | GL843 | **Hardware tested** ([notes](docs/opticfilm-7600i-v1.md)) |
+| OpticFilm 7600i v2 | `07b3:0c3b` | GL845 | Experimental |
 | OpticFilm 7500i | `07b3:0c13` | GL843 | Experimental |
 | OpticFilm 7400 (v1 / v2) | `07b3:0c3a` | GL845 / GL843 | Experimental |
 | OpticFilm 7300 | `07b3:0c12` | GL843 | Experimental |
@@ -30,7 +31,7 @@ The GL845 **OpticFilm 8100** (`07b3:130c`) is a different product from the GL128
 
 Other OpticFilm models **enumerate and open**: you can read status, turn the lamp on/off (where implemented), and dump registers for bring-up. **`scan()`, `calibrate()`, `home()`, and `park()` stay gated** until a model is hardware-tested—calling them raises `AsicError` rather than risking carriage or lamp damage. Protocol validation does **not** flip that gate. See [docs/scanner-validation.md](docs/scanner-validation.md).
 
-`Scanner.open()` prefers a scan-ready device (8200i SE or 8100 V2) when several Plustek film scanners are connected.
+`Scanner.open()` prefers a scan-ready device (8200i SE, 8100 V2 or 7600i v1) when several Plustek film scanners are connected.
 
 ## Features 
 
@@ -282,7 +283,7 @@ The cache key includes resolution, crop geometry, and scan method (transparency 
 
 Code for additional OpticFilm variants is included so enumeration, model selection, SANE-derived geometry tables, and hardwareless USB traces can be exercised without hardware. These paths are **deliberately locked** for motor moves and image acquisition:
 
-- `model.scan_ready` is `True` only for the 8200i SE and 8100 (V2); all other models stay `False`
+- `model.scan_ready` is `True` only for the 8200i SE, 8100 (V2) and 7600i v1; all other models stay `False`
 - `Scanner._ensure_scan_ready()` blocks scan, calibrate, home, and park on non-scan-ready models
 - GL128 motor moves stay disabled unless the model is scan-ready
 - Protocol-validated (currently OpticFilm 8200i setup traces) is not hardware support

@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **OpticFilm 7600i v1 (GL843)**: scan-ready, capture-derived driver that replays SilverFast's scan sequences (1440 / 3600 / 7200 dpi colour, 3600 / 7200 dpi infrared). See [docs/opticfilm-7600i-v1.md](docs/opticfilm-7600i-v1.md).
+
+### Fixed
+
+- `default_frame_crop_norm` (called by NegPy for every scan-ready model) no longer fails on the OpticFilm 7600i v1 with "no attribute 'feed_to_scan_top_steps'": models other than the GL128 ones get the whole window.
+- USB open no longer sets the configuration of an already configured device. On the OpticFilm 7600i v1 this reset only the host's bulk data toggles, so every second session lost its first packet and timed out.
+
+### Changed
+
+- OpticFilm 7600i v1: the main scan, colour and infrared, by default is sampled once vertically, with no CCD dummy lines, a two-line buffer threshold and no backtracking. 7200 dpi takes ~84 s instead of ~260 s.
+- OpticFilm 7600i v1: shading gains are computed from each scan's white frame; the recorded gains left ~1 % unevenness across the width.
+- OpticFilm 7600i v1: the scan window is the full area, 36.61 mm wide from the first lit sensor pixel (was SilverFast's 36.15 mm).
+- `MODEL_7600I_V1` moved to `device/model_7600i_v1.py` (was a 7500i SANE-table alias).
+
 ## [1.3.4] - 2026-09-25
 
 ### Added

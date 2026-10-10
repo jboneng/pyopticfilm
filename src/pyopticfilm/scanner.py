@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 from pyopticfilm.advanced import AdvancedRegisters
+from pyopticfilm.asic.gl843_v1 import Gl843V1
 from pyopticfilm.asic.status import ScannerStatus
+from pyopticfilm.device.model_7600i_v1 import Model7600iV1
 from pyopticfilm.device.protocol import ScanMethod
 from pyopticfilm.device.select import (
     FilmModel,
@@ -51,7 +53,7 @@ class Scanner:
             getattr(handle.info, "bcd_device", 0),
         )
         self._asic = asic or create_asic(self._protocol, self._model)
-        self._advanced = AdvancedRegisters(self._protocol)
+        self._advanced = AdvancedRegisters(self._asic.usb if isinstance(self._asic, Gl843V1) else self._protocol)
         self._calibrator = Calibrator(
             self._asic,
             cache_path=calib_cache if calib_cache is not None else default_cache_path(),
@@ -98,7 +100,11 @@ class Scanner:
 
         Does not change ``model.scan_ready``. Real :meth:`open` stays gated.
         """
-        inner = transport if transport is not None else MockScannerTransport()
+        inner = transport
+        if inner is None:
+            from pyopticfilm.usb.fake_gl843_v1 import SimulatedGl843V1Transport
+
+            inner = SimulatedGl843V1Transport() if isinstance(model, Model7600iV1) else MockScannerTransport()
         handle = FakeDeviceHandle.for_model(model)
         protocol = GenesysUsbProtocol(inner)
         scanner = cls(handle, protocol, model=model, calib_cache=calib_cache)
@@ -210,6 +216,8 @@ class Scanner:
         """
         self._ensure_scan_ready()
         self._ensure_open()
+        if isinstance(self._model, Model7600iV1):
+            raise NotImplementedError(f"{self._model.model} calibrates within each scan")
         if not self._asic._initialized:
             self._asic.init()
             if not self._asic.is_at_home():
@@ -328,8 +336,8 @@ class Scanner:
         if not model_is_scan_ready(self._model):
             raise AsicError(
                 f"{self._model.model} ({self._model.asic}) is locked out in this "
-                "release: only OpticFilm 8200i SE (07b3:1825) and OpticFilm 8100 "
-                "(V2) (07b3:1824) are validated for scanning. Open, status, lamp "
+                "release: only OpticFilm 8200i SE (07b3:1825), OpticFilm 8100 (V2) "
+                "(07b3:1824) and OpticFilm 7600i v1 (07b3:0c3b) are validated for scanning. Open, status, lamp "
                 "and register dumps still work."
             )
 
