@@ -57,6 +57,8 @@ from tools.scanlab.forensic_tab import ForensicTabPage
 from tools.scanlab.widgets import ImageTabPage
 from tools.scanlab.worker import ScanRequest, ScanWorker
 
+_USB_LOG_MAX_LINES = 200_000
+
 
 class ScanLabWindow(QMainWindow):
     def __init__(self) -> None:
@@ -257,6 +259,8 @@ class ScanLabWindow(QMainWindow):
         )
         self.usb_log = QPlainTextEdit()
         self.usb_log.setReadOnly(True)
+        # Bounded so a long Lab session of high-dpi scans cannot grow without limit.
+        self.usb_log.setMaximumBlockCount(_USB_LOG_MAX_LINES)
         self.usb_log.setPlaceholderText("USB transactions appear here…")
         jump_row = QHBoxLayout()
         jump_row.addWidget(QLabel("Jump"))
@@ -622,7 +626,7 @@ class ScanLabWindow(QMainWindow):
             self._refresh_merged_preview()
             self.tabs.setCurrentWidget(self.merged_view)
         # Status mean is on the raw uint16 (not the 8-bit preview).
-        mean_y = float(rgb.astype("float64").mean() / 65535.0)
+        mean_y = float(rgb.mean(dtype="float64") / 65535.0)
         self.statusBar().showMessage(
             f"Loaded {Path(path).name} — {rgb.shape[1]}×{rgb.shape[0]} @ {dpi} dpi "
             f"(mean Y={mean_y:.3f}, linear preview)"
@@ -930,6 +934,20 @@ class ScanLabWindow(QMainWindow):
         self._update_me_tabs_visible()
         self.tabs.setCurrentWidget(self.prescan_view)
 
+    def _release_previous_scan(self) -> None:
+        """Free the last scan's full-resolution planes before a new Scan.
+
+        At 7200 dpi the previous RGB, IR and ME bracket planes are well over a
+        gigabyte; holding them through the next capture caused OOM on 16 GB
+        machines. Tab previews stay visible until the new result replaces them.
+        """
+        self._last_scan = None
+        self._me_debug = None
+        self._loaded_me_short = None
+        self._loaded_me_long = None
+        for view in (self.scan_view, self.me_long_view, self.merged_view, self.ir_view):
+            view.release_raw()
+
     def _on_prescan(self) -> None:
         target = self._resolved_target()
         if target is None:
@@ -989,6 +1007,7 @@ class ScanLabWindow(QMainWindow):
                 f"between 1 and {MAX_EXPOSURE_REGISTER}.",
             )
             return
+        self._release_previous_scan()
         self._pending_crop_meta = None
         self._pending_crop_norm = crop
         if crop is not None:
@@ -1062,6 +1081,8 @@ class ScanLabWindow(QMainWindow):
         pos = self._usb_sections.get(key)
         if pos is None:
             return
+        # Oldest lines may have been trimmed by the block cap.
+        pos = min(pos, max(0, self.usb_log.document().characterCount() - 1))
         cursor = self.usb_log.textCursor()
         cursor.setPosition(pos)
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)

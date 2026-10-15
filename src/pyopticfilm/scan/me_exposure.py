@@ -18,6 +18,39 @@ _FULL_SCALE = 65535.0
 _EPSILON = 1.0
 #: Soft clip threshold for predicted long-pass saturation fractions.
 _CLIP_DN = 0.95 * _FULL_SCALE
+#: Row slabs for clip counting — no full-frame float64 temps at 7200 dpi.
+_CHUNK_ROWS = 256
+
+
+def _channel_signal(plane: np.ndarray, black_level: float) -> np.ndarray:
+    """``max(DN - black_level, 0)`` for one channel; unsigned DN at black 0 is used as-is."""
+    if float(black_level) == 0.0 and plane.dtype.kind == "u":
+        return plane
+    return np.maximum(plane.astype(np.float64) - float(black_level), 0.0)
+
+
+def _dense_signal_percentiles(
+    arr: np.ndarray, black_level: float, dense_percentile: float
+) -> np.ndarray:
+    """Per-channel percentile of signal above black, one channel plane at a time.
+
+    Matches ``np.percentile(signal.reshape(-1, 3), q, axis=0)`` exactly.
+    """
+    return np.array(
+        [
+            float(np.percentile(_channel_signal(arr[..., c], black_level), float(dense_percentile)))
+            for c in range(3)
+        ],
+        dtype=np.float64,
+    )
+
+
+def _proposal_from_dense(
+    dense: np.ndarray, short_exposure: int, target_dense_dn: float
+) -> float:
+    ratios = float(target_dense_dn) / np.maximum(dense, _EPSILON)
+    proposed_ratio = float(np.max(ratios))
+    return float(short_exposure) * proposed_ratio
 
 
 @dataclass(frozen=True)
@@ -45,21 +78,20 @@ def choose_long_exposure(
     Uses ``signal = max(DN - black_level, 0)`` and the densest channel's
     required ratio to reach ``target_dense_dn`` at ``dense_percentile``.
     """
-    arr = np.asarray(short_rgb, dtype=np.float64)
+    arr = _validated_short(short_rgb, short_exposure)
+    dense = _dense_signal_percentiles(arr, black_level, dense_percentile)
+    return _proposal_from_dense(dense, short_exposure, target_dense_dn)
+
+
+def _validated_short(short_rgb: np.ndarray, short_exposure: int) -> np.ndarray:
+    arr = np.asarray(short_rgb)
     if arr.ndim != 3 or arr.shape[2] < 3:
         raise ValueError("short_rgb must be HxWx3")
     if short_exposure <= 0:
         raise ValueError("short_exposure must be positive")
-
-    signal = np.maximum(arr[..., :3] - float(black_level), 0.0)
-    flat = signal.reshape(-1, 3)
-    if flat.size == 0:
+    if arr.shape[0] * arr.shape[1] == 0:
         raise ValueError("short_rgb is empty")
-
-    dense = np.percentile(flat, float(dense_percentile), axis=0)
-    ratios = float(target_dense_dn) / np.maximum(dense, _EPSILON)
-    proposed_ratio = float(np.max(ratios))
-    return float(short_exposure) * proposed_ratio
+    return arr
 
 
 def predicted_clip_fractions(
@@ -70,19 +102,26 @@ def predicted_clip_fractions(
     black_level: float = 0.0,
 ) -> tuple[float, float, float]:
     """Fraction of pixels predicted at/above soft-clip for each RGB channel."""
-    arr = np.asarray(short_rgb, dtype=np.float64)
+    arr = np.asarray(short_rgb)
     if arr.ndim != 3 or arr.shape[2] < 3 or short_exposure <= 0:
         return (0.0, 0.0, 0.0)
     scale = float(long_exposure) / float(short_exposure)
-    signal = np.maximum(arr[..., :3] - float(black_level), 0.0)
-    predicted = float(black_level) + signal * scale
-    clips: list[float] = []
-    n = predicted.shape[0] * predicted.shape[1]
+    h, w = arr.shape[0], arr.shape[1]
+    n = h * w
     if n <= 0:
         return (0.0, 0.0, 0.0)
+    black = float(black_level)
+    counts = [0, 0, 0]
     for c in range(3):
-        clips.append(float(np.count_nonzero(predicted[..., c] >= _CLIP_DN)) / float(n))
-    return (clips[0], clips[1], clips[2])
+        for y0 in range(0, h, _CHUNK_ROWS):
+            # predicted = black + max(DN - black, 0) * scale, evaluated in place.
+            s = arr[y0 : y0 + _CHUNK_ROWS, :, c].astype(np.float64)
+            np.subtract(s, black, out=s)
+            np.maximum(s, 0.0, out=s)
+            np.multiply(s, scale, out=s)
+            np.add(s, black, out=s)
+            counts[c] += int(np.count_nonzero(s >= _CLIP_DN))
+    return (counts[0] / float(n), counts[1] / float(n), counts[2] / float(n))
 
 
 def dense_percentiles(
@@ -92,14 +131,12 @@ def dense_percentiles(
     dense_percentile: float = 5.0,
 ) -> tuple[float, float, float]:
     """Per-channel dense percentile of signal above black."""
-    arr = np.asarray(short_rgb, dtype=np.float64)
+    arr = np.asarray(short_rgb)
     if arr.ndim != 3 or arr.shape[2] < 3:
         return (0.0, 0.0, 0.0)
-    signal = np.maximum(arr[..., :3] - float(black_level), 0.0)
-    flat = signal.reshape(-1, 3)
-    if flat.size == 0:
+    if arr.shape[0] * arr.shape[1] == 0:
         return (0.0, 0.0, 0.0)
-    p = np.percentile(flat, float(dense_percentile), axis=0)
+    p = _dense_signal_percentiles(arr, black_level, dense_percentile)
     return (float(p[0]), float(p[1]), float(p[2]))
 
 
@@ -155,12 +192,11 @@ def select_long_exposure(
         short_rgb, black_level=black_level, dense_percentile=dense_percentile
     )
     try:
-        proposed_f = choose_long_exposure(
-            short_rgb,
-            short_exposure,
-            black_level=black_level,
-            dense_percentile=dense_percentile,
-            target_dense_dn=target_dense_dn,
+        # Same proposal as choose_long_exposure, reusing p05 instead of a
+        # second full-frame percentile pass.
+        _validated_short(short_rgb, short_exposure)
+        proposed_f = _proposal_from_dense(
+            np.asarray(p05, dtype=np.float64), short_exposure, target_dense_dn
         )
     except (ValueError, FloatingPointError, TypeError):
         selected = int(default_long)

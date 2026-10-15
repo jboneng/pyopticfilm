@@ -173,8 +173,11 @@ class ScanSession:
         planar = getattr(self.asic, "usb_planar_rgb", None)
         if planar is None:
             planar = bool(getattr(self.model, "usb_planar_rgb", False))
+        # Hand assemble the only reference so the USB buffer is freed after decode.
+        raw_box = [raw]
+        del raw
         rgb = self.pipeline.assemble(
-            raw, geometry, dark=dark, white=white, planar=bool(planar)
+            raw_box.pop(), geometry, dark=dark, white=white, planar=bool(planar)
         )
 
         ir_plane = None
@@ -220,7 +223,7 @@ class ScanSession:
         start_motor: bool,
         progress: Callable[[float], None] | None = None,
         cancel: threading.Event | None = None,
-    ) -> bytes:
+    ) -> bytes | bytearray:
         """Configure ASIC, run one capture, return raw optical bytes."""
         self.asic.set_scan_method(method)  # type: ignore[arg-type]
         # Recorded for subclasses that must reflect lamp state in the register
@@ -465,31 +468,36 @@ class ScanSession:
         progress: Callable[[float], None] | None,
         cancel: threading.Event | None,
         wait_feed: bool = True,
-    ) -> bytes:
+    ) -> bytes | bytearray:
         if wait_feed:
             self._wait_feed(cancel)
         self._wait_data(cancel)
 
         total = geometry.total_bytes
         chunk = geometry.line_bytes * BULK_CHUNK_LINES
-        buf = bytearray()
+        buf = bytearray(total)
+        view = memoryview(buf)
+        filled = 0
         proto = self.asic.protocol
 
-        while len(buf) < total:
+        while filled < total:
             if cancel is not None and cancel.is_set():
                 raise ScanCancelled("cancelled during bulk read")
-            need = min(chunk, total - len(buf))
+            need = min(chunk, total - filled)
             data = proto.bulk_read_data(need)
             if not data:
                 raise ScanError("Empty bulk read during scan")
-            buf.extend(data)
+            n = min(len(data), total - filled)
+            view[filled : filled + n] = data[:n]
+            filled += n
             if progress is not None:
-                progress(min(1.0, len(buf) / total))
-            logger.debug("acquired %d / %d", len(buf), total)
+                progress(min(1.0, filled / total))
+            logger.debug("acquired %d / %d", filled, total)
 
+        view.release()
         if progress is not None:
             progress(1.0)
-        return bytes(buf[:total])
+        return buf
 
 
 def create_session(

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Lower peak memory at high resolution** (out-of-memory on 16 GB machines at 7200 dpi, especially with IR, adaptive multi-exposure or Multi-Pass). Host-side only: USB transfers, register programming, timings and output images are unchanged (bit-identical).
+  - The USB bulk buffer is preallocated and handed to the pipeline without extra copies, then freed right after decode.
+  - Decode makes one copy, and Y-oversample averaging runs in uint32 row slabs instead of on a full-resolution uint32 copy.
+  - Film-base makeup and border clamp edit the pipeline's own frame in place; the end-column drop and `mirror_x` share one copy.
+  - Adaptive ME long-exposure selection no longer builds full-frame float64 copies of the short plane, and computes the dense percentile once.
+  - Pass alignment warps all channels in one OpenCV call, drops a no-op float32 round/clip, and builds banded remap maps per row band.
+  - IR flatten runs in slabs, and the full RGB IR capture and unaligned Multi-Pass repeats are released as soon as they are used.
+  - `Scanner.scan()` clears the previous scan's `last_me_debug` bracket planes before capturing.
+- **Scan Lab memory**: starting a Scan releases the previous result's full-resolution planes (tab previews stay visible until replaced), USB transactions are no longer accumulated in memory for the whole session, the USB log is capped, and TIFF load no longer makes a float64 copy for its status line.
+
 ## [1.3.6] - 2026-10-14
 
 ### Fixed

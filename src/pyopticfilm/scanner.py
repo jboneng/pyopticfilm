@@ -301,6 +301,11 @@ class Scanner:
             "me_long_exposure": me_long_exposure,
             "n_passes": n_passes,
         }
+        # Drop the previous ME bracket planes (two full-resolution frames)
+        # before capturing new ones.
+        self._last_me_debug = None
+        self._last_multi_pass_debug = None
+        self._last_align_shift_ir = None
         if on_status is not None:
             on_status("scanning")
         session = create_session(self._asic, self._model, self._calibrator)

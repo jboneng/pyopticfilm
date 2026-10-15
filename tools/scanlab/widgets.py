@@ -121,6 +121,11 @@ class CropImageView(QWidget):
         self._crop = None
         self._refresh()
 
+    def release_raw(self) -> None:
+        """Drop the full-resolution array; the downsampled preview stays visible."""
+        self._raw_rgb = None
+        self._raw_gray = None
+
     def set_rgb(self, rgb: np.ndarray | None, *, auto_level: bool = False) -> None:
         if rgb is None:
             self._raw_rgb = None
@@ -302,6 +307,11 @@ class ImageTabPage(QWidget):
     def set_caption(self, text: str) -> None:
         self._caption.setText(text)
         self._caption.setVisible(bool(text))
+
+    def release_raw(self) -> None:
+        """Free the full-resolution array (Save disabled) but keep the preview."""
+        self._view.release_raw()
+        self._save_btn.setEnabled(False)
 
     def set_rgb(
         self,

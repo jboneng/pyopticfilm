@@ -319,7 +319,17 @@ class GenesysUsbProtocol:
         """Read exactly ``size`` bytes from an in-flight :meth:`bulk_read_begin`."""
         if size <= 0:
             return b""
-        buf = bytearray()
+        if size <= BULK_MAX_SIZE:
+            data = self._transport.bulk_read(size)
+            if len(data) == size:
+                return data
+            if not data:
+                from pyopticfilm.exceptions import UsbError
+
+                raise UsbError(f"bulk_read returned empty after 0 of {size} bytes")
+            buf = bytearray(data)
+        else:
+            buf = bytearray()
         while len(buf) < size:
             data = self._transport.bulk_read(min(size - len(buf), BULK_MAX_SIZE))
             if not data:

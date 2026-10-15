@@ -669,6 +669,37 @@ def _box_smooth_profile(profile, half_window: int):
     return ((c[k:] - c[:-k]) / k).astype(np.float32)
 
 
+#: Slab size for IR flatten passes — avoids full-frame float32 temps at 7200 dpi.
+_IR_FLATTEN_CHUNK = 256
+
+
+def _apply_column_gain(arr, gain):
+    """``clip(rint(arr * gain[x]), 0, 65535)`` as uint16, in row slabs."""
+    import numpy as np
+
+    out = np.empty(arr.shape, dtype=np.uint16)
+    g = gain[np.newaxis, :]
+    for y0 in range(0, arr.shape[0], _IR_FLATTEN_CHUNK):
+        slab = arr[y0 : y0 + _IR_FLATTEN_CHUNK].astype(np.float32) * g
+        np.rint(slab, out=slab)
+        np.clip(slab, 0, 65535, out=slab)
+        out[y0 : y0 + _IR_FLATTEN_CHUNK] = slab
+    return out
+
+
+def _column_percentiles_f32(arr, percentile: float):
+    """Float32 ``np.percentile(arr, q, axis=0)`` in column slabs."""
+    import numpy as np
+
+    width = arr.shape[1]
+    levels = np.empty(width, dtype=np.float32)
+    step = _IR_FLATTEN_CHUNK * 4
+    for x0 in range(0, width, step):
+        cols = arr[:, x0 : x0 + step].astype(np.float32)
+        levels[x0 : x0 + step] = np.percentile(cols, float(percentile), axis=0)
+    return levels
+
+
 def flatten_ir_columns(
     ir,
     white: Sequence[int],
@@ -690,7 +721,7 @@ def flatten_ir_columns(
     """
     import numpy as np
 
-    arr = np.asarray(ir, dtype=np.float32)
+    arr = np.asarray(ir)
     if arr.ndim != 2:
         raise ValueError(f"expected HxW infrared plane, got {arr.shape}")
     width = int(arr.shape[1])
@@ -704,8 +735,7 @@ def flatten_ir_columns(
     tgt = float(np.mean(w)) if target is None else float(target)
     if tgt <= 0:
         tgt = 1.0
-    out = arr * (tgt / w[np.newaxis, :])
-    return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
+    return _apply_column_gain(arr, (tgt / w).astype(np.float32))
 
 
 #: SilverFast 9 IR page median ballpark (see captures/8200i-se/Silverfast_ir_tiff/).
@@ -741,14 +771,14 @@ def flatten_ir_image_columns(
     """
     import numpy as np
 
-    arr = np.asarray(ir, dtype=np.float32)
+    arr = np.asarray(ir)
     if arr.ndim != 2:
         raise ValueError(f"expected HxW infrared plane, got {arr.shape}")
     height, width = int(arr.shape[0]), int(arr.shape[1])
     if height < 1 or width < 1:
         raise ValueError(f"empty infrared plane: {arr.shape}")
     # Robust bright level ignores dark defects / holder edges in the column.
-    levels = np.percentile(arr, float(percentile), axis=0).astype(np.float32)
+    levels = _column_percentiles_f32(arr, percentile)
     inset = min(max(float(border_inset), 0.0), 0.2)
     cut = max(0, round(width * inset)) if width >= 16 else 0
     if cut * 2 < width:
@@ -769,8 +799,7 @@ def flatten_ir_image_columns(
     cap = float(max_gain)
     if cap > 0:
         gain = np.minimum(gain, cap)
-    out = arr * gain[np.newaxis, :]
-    return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
+    return _apply_column_gain(arr, gain)
 
 
 def _box_mean_2d(arr, half_y: int, half_x: int):

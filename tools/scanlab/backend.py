@@ -308,10 +308,17 @@ def open_lab_scanner(
     *,
     on_usb: Callable[[UsbTransaction], None] | None = None,
 ) -> tuple[Scanner, RecordingTransport]:
-    """Open mock USB, or a plugged-in scanner wrapped in a recording transport."""
+    """Open mock USB, or a plugged-in scanner wrapped in a recording transport.
+
+    Transactions stream to ``on_usb`` only; they are not accumulated in
+    ``rec.transactions`` (tens of thousands per high-dpi pass, for the whole
+    Lab session).
+    """
     listener = on_usb
     if target.mock:
-        rec = RecordingTransport(MockScannerTransport(), listener=listener)
+        rec = RecordingTransport(
+            MockScannerTransport(), listener=listener, keep_in_memory=False
+        )
         scanner = Scanner.open_fake(target.model, rec)
         apply_lab_decode_layout(scanner, target)
         apply_lab_motor_acoustic(scanner, target)
@@ -322,7 +329,7 @@ def open_lab_scanner(
     if not target.device_id:
         raise DeviceNotFoundError("No matching scanner is connected")
     handle = UsbDeviceHandle.open(target.device_id)
-    rec = RecordingTransport(handle, listener=listener)
+    rec = RecordingTransport(handle, listener=listener, keep_in_memory=False)
     scanner = Scanner(handle, GenesysUsbProtocol(rec), model=target.model)
     apply_lab_hw_override(scanner, target)
     apply_lab_decode_layout(scanner, target)

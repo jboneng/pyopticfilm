@@ -545,8 +545,11 @@ class Gl128ScanSession(ScanSession):
             if planar is None:
                 planar = bool(getattr(self.model, "usb_planar_rgb", False))
             drop_override = None if locked_usb_end_drop is None else locked_usb_end_drop
+            # Hand assemble the only reference so the USB buffer is freed after decode.
+            raw_box = [raw]
+            del raw
             rgb = self.pipeline.assemble(
-                raw,
+                raw_box.pop(),
                 geometry,
                 dark=dark,
                 white=white,
@@ -589,6 +592,7 @@ class Gl128ScanSession(ScanSession):
             if n_passes == 1:
                 return first, shifts, None
             frames = [first]
+            del first
             for _ in range(n_passes - 1):
                 frame = _acquire_pass(
                     key=key,
@@ -605,7 +609,10 @@ class Gl128ScanSession(ScanSession):
                     shifts.append(shift)
                 else:
                     frames.append(frame)
+                # The unaligned capture must not survive into the next pass.
+                del frame
             stacked = merge_n_passes(frames, alpha=noise_alpha, beta=noise_beta)
+            del frames
             return stacked.rgb, shifts, stacked.fusion_stats
 
         # Short (+ optional IR) first; long exposure is chosen after short RGB.
@@ -628,6 +635,7 @@ class Gl128ScanSession(ScanSession):
                 manual=short_manual,
             )
             ir_plane = self._infrared_plane(ir_raw)
+            del ir_raw
 
         assert rgb_short is not None
 
@@ -786,12 +794,18 @@ class Gl128ScanSession(ScanSession):
         # shape (Single-Pass, ME, IR-combo), so the relaxed gate only applies
         # to the new n_passes>1-without-ME stacking mode.
         preserve_headroom = (multi_exposure and rgb_long is not None) or n_passes == 1
+        # Debug bracket planes must stay linear; anything else is ours to edit.
+        debug = self.last_me_debug
+        owned = debug is None or (
+            primary is not debug.rgb_short and primary is not debug.rgb_long
+        )
         primary = self.pipeline.expose_film_base(
             primary,
             source="me deliverable",
             preserve_headroom=preserve_headroom,
+            inplace=owned,
         )
-        primary = self.pipeline.clamp_border_highlights(primary)
+        primary = self.pipeline.clamp_border_highlights(primary, inplace=owned)
 
         return ScanImage(
             rgb=primary,
@@ -874,7 +888,7 @@ class Gl128ScanSession(ScanSession):
         progress: Callable[[float], None] | None,
         cancel: threading.Event | None,
         wait_feed: bool = True,
-    ) -> bytes:
+    ) -> bytes | bytearray:
         del wait_feed  # GL128 feeds synchronously in _configure
         self._wait_data(cancel)
 
@@ -887,13 +901,15 @@ class Gl128ScanSession(ScanSession):
             else r.BULK_INDEX_IMAGE
         )
 
-        buf = bytearray()
+        buf = bytearray(total)
+        view = memoryview(buf)
+        filled = 0
         pace_on = float(getattr(self.asic, "image_usb_pace_s", IMAGE_USB_PACE_S) or 0.0) > 0
         line_interval = self._line_interval_s(geometry) if pace_on else 0.0
-        while len(buf) < total:
+        while filled < total:
             if cancel is not None and cancel.is_set():
                 raise ScanCancelled("cancelled during bulk read")
-            remaining = total - len(buf)
+            remaining = total - filled
             want = self._chunk_bytes(geometry, remaining)
             t0 = time.monotonic()
             proto.bulk_read_begin(want, index=index)
@@ -904,11 +920,13 @@ class Gl128ScanSession(ScanSession):
                 self._bulk_stream_active = False
             if not chunk:
                 raise ScanError(
-                    f"Bulk stream ended after {len(buf)} of {total} bytes"
+                    f"Bulk stream ended after {filled} of {total} bytes"
                 )
-            buf.extend(chunk)
+            n = min(len(chunk), total - filled)
+            view[filled : filled + n] = chunk[:n]
+            filled += n
             if progress is not None:
-                progress(min(1.0, len(buf) / total))
+                progress(min(1.0, filled / total))
             if pace_on and line_interval > 0:
                 try:
                     line_bytes = max(1, int(geometry.line_bytes))
@@ -921,9 +939,10 @@ class Gl128ScanSession(ScanSession):
                 if throttle > 0:
                     time.sleep(throttle)
 
+        view.release()
         if progress is not None:
             progress(1.0)
-        return bytes(buf[:total])
+        return buf
 
     def _end_scan(self) -> None:
         # Capture end/cancel recipe (lamp strobe + clear SCAN + AGOHOME park)

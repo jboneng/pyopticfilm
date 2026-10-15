@@ -208,6 +208,11 @@ def estimate_pass_shift(reference: np.ndarray, moving: np.ndarray) -> Shift2D:
     return (dx, dy)
 
 
+#: Destination rows per remap call in the banded warp — keeps the float32
+#: coordinate maps small instead of two full-frame maps at 7200 dpi.
+_WARP_BAND_ROWS = 256
+
+
 def _fill_shift_border(out: np.ndarray, dx: float, dy: float) -> np.ndarray:
     """Replace destination strips that came from out-of-bounds / edge replicate.
 
@@ -215,13 +220,15 @@ def _fill_shift_border(out: np.ndarray, dx: float, dy: float) -> np.ndarray:
     into a strip of width ``ceil(|dx|)``. When that column is decode padding,
     IR flatten already blew it up — replicate widens it into a bright band.
     Fill from the first fully valid interior column instead.
+
+    Edits ``out`` in place; callers pass a freshly warped array.
     """
     h, w = out.shape[:2]
     bx = int(np.ceil(abs(float(dx))))
     by = int(np.ceil(abs(float(dy))))
     if bx <= 0 and by <= 0:
         return out
-    result = np.array(out, copy=True)
+    result = out
     if bx > 0 and bx < w:
         if dx > 0:
             # Content shifted right: left strip is invalid.
@@ -240,6 +247,32 @@ def _fill_shift_border(out: np.ndarray, dx: float, dy: float) -> np.ndarray:
     return result
 
 
+def _gather_shift(mov: np.ndarray, idx: int, idy: int) -> np.ndarray:
+    """Integer translate by one fancy-index gather (edge-clamped)."""
+    h, w = mov.shape[:2]
+    x_idx = np.clip(np.arange(w) + idx, 0, w - 1)
+    y_idx = np.clip(np.arange(h) + idy, 0, h - 1)
+    out = mov[y_idx[:, np.newaxis], x_idx[np.newaxis, :]]
+    return _fill_shift_border(out, float(idx), float(idy))
+
+
+def _to_input_dtype(out: np.ndarray, mov: np.ndarray) -> np.ndarray:
+    """Cast an OpenCV result back to ``mov.dtype``.
+
+    OpenCV already returns ``mov.dtype`` for integer input, so the rint/clip
+    path only runs when it did not (it would allocate float32 frame copies).
+    """
+    if out.dtype == mov.dtype:
+        return out
+    if np.issubdtype(mov.dtype, np.integer):
+        return np.clip(np.rint(out), 0, np.iinfo(mov.dtype).max).astype(mov.dtype)
+    return out.astype(mov.dtype, copy=False)
+
+
+def _cv2_multichannel_ok(mov: np.ndarray) -> bool:
+    return mov.ndim == 2 or (mov.ndim == 3 and 1 <= mov.shape[2] <= 4)
+
+
 def _warp_shift(mov: np.ndarray, dx: float, dy: float) -> np.ndarray:
     """Translate ``mov`` by ``(dx, dy)`` with sub-pixel resampling when possible."""
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
@@ -247,57 +280,32 @@ def _warp_shift(mov: np.ndarray, dx: float, dy: float) -> np.ndarray:
     h, w = mov.shape[:2]
     # Integer path: cheap index gather (exact, no OpenCV).
     if abs(dx - round(dx)) < 1e-6 and abs(dy - round(dy)) < 1e-6:
-        idx = round(dx)
-        idy = round(dy)
-        x_idx = np.clip(np.arange(w) + idx, 0, w - 1)
-        y_idx = np.clip(np.arange(h) + idy, 0, h - 1)
-        if mov.ndim == 3:
-            out = mov[y_idx][:, x_idx, :]
-        else:
-            out = mov[y_idx][:, x_idx]
-        return _fill_shift_border(out, float(idx), float(idy))
+        return _gather_shift(mov, round(dx), round(dy))
     try:
         import cv2
     except ImportError:
-        idx = round(dx)
-        idy = round(dy)
-        x_idx = np.clip(np.arange(w) + idx, 0, w - 1)
-        y_idx = np.clip(np.arange(h) + idy, 0, h - 1)
-        if mov.ndim == 3:
-            out = mov[y_idx][:, x_idx, :]
-        else:
-            out = mov[y_idx][:, x_idx]
-        return _fill_shift_border(out, float(idx), float(idy))
+        return _gather_shift(mov, round(dx), round(dy))
     # OpenCV: +x is right, +y is down — same as phaseCorrelate / our index convention.
     # CONSTANT+0 then interior fill avoids replicating a hot/dark padding column.
     matrix = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
-    if mov.ndim == 3:
-        planes = [
-            cv2.warpAffine(
-                mov[:, :, c],
-                matrix,
-                (w, h),
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0,
-            )
-            for c in range(mov.shape[2])
-        ]
-        out = np.stack(planes, axis=2)
+    kwargs = {
+        "flags": cv2.INTER_LINEAR,
+        "borderMode": cv2.BORDER_CONSTANT,
+        "borderValue": 0,
+    }
+    if _cv2_multichannel_ok(mov):
+        out = cv2.warpAffine(np.ascontiguousarray(mov), matrix, (w, h), **kwargs)
+        if mov.ndim == 3 and out.ndim == 2:
+            out = out[:, :, np.newaxis]
     else:
-        out = cv2.warpAffine(
-            mov,
-            matrix,
-            (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
+        out = np.stack(
+            [
+                cv2.warpAffine(np.ascontiguousarray(mov[:, :, c]), matrix, (w, h), **kwargs)
+                for c in range(mov.shape[2])
+            ],
+            axis=2,
         )
-    if np.issubdtype(mov.dtype, np.integer):
-        out = np.clip(np.rint(out), 0, np.iinfo(mov.dtype).max).astype(mov.dtype)
-    else:
-        out = out.astype(mov.dtype, copy=False)
-    return _fill_shift_border(out, dx, dy)
+    return _fill_shift_border(_to_input_dtype(out, mov), dx, dy)
 
 
 def align_pass_to_reference(
@@ -404,9 +412,11 @@ def _fill_row_shift_border(out: np.ndarray, dx: float, dy_per_row: np.ndarray) -
     ``[0, h-1]`` pulled in ``BORDER_CONSTANT`` padding from
     :func:`_warp_row_shifts` — replace it with the nearest valid row's
     content instead, same rationale as the constant-shift version.
+
+    Edits ``out`` in place; callers pass a freshly warped array.
     """
     h, w = out.shape[:2]
-    result = np.array(out, copy=True)
+    result = out
     bx = int(np.ceil(abs(float(dx))))
     if 0 < bx < w:
         if dx > 0:
@@ -431,37 +441,36 @@ def _warp_row_shifts(mov: np.ndarray, dx: float, dy_per_row: np.ndarray) -> np.n
     import cv2
 
     h, w = mov.shape[:2]
-    map_x = np.broadcast_to((np.arange(w, dtype=np.float32) - dx), (h, w)).copy()
-    map_y = np.broadcast_to(
-        (np.arange(h, dtype=np.float32) - dy_per_row.astype(np.float32))[:, np.newaxis], (h, w)
-    ).copy()
-    if mov.ndim == 3:
-        planes = [
-            cv2.remap(
-                mov[:, :, c],
-                map_x,
-                map_y,
-                interpolation=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0,
-            )
-            for c in range(mov.shape[2])
-        ]
-        out = np.stack(planes, axis=2)
+    row_x = np.arange(w, dtype=np.float32) - dx
+    col_y = np.arange(h, dtype=np.float32) - dy_per_row.astype(np.float32)
+    kwargs = {
+        "interpolation": cv2.INTER_LINEAR,
+        "borderMode": cv2.BORDER_CONSTANT,
+        "borderValue": 0,
+    }
+    multichannel = _cv2_multichannel_ok(mov)
+    if multichannel:
+        src = np.ascontiguousarray(mov)
+        planes = None
     else:
-        out = cv2.remap(
-            mov,
-            map_x,
-            map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-    if np.issubdtype(mov.dtype, np.integer):
-        out = np.clip(np.rint(out), 0, np.iinfo(mov.dtype).max).astype(mov.dtype)
-    else:
-        out = out.astype(mov.dtype, copy=False)
-    return _fill_row_shift_border(out, dx, dy_per_row)
+        src = None
+        planes = [np.ascontiguousarray(mov[:, :, c]) for c in range(mov.shape[2])]
+    out: np.ndarray | None = None
+    for y0 in range(0, h, _WARP_BAND_ROWS):
+        y1 = min(h, y0 + _WARP_BAND_ROWS)
+        map_x = np.broadcast_to(row_x, (y1 - y0, w)).copy()
+        map_y = np.broadcast_to(col_y[y0:y1, np.newaxis], (y1 - y0, w)).copy()
+        if multichannel:
+            band = cv2.remap(src, map_x, map_y, **kwargs)
+            if mov.ndim == 3 and band.ndim == 2:
+                band = band[:, :, np.newaxis]
+        else:
+            band = np.stack([cv2.remap(p, map_x, map_y, **kwargs) for p in planes], axis=2)
+        if out is None:
+            out = np.empty((h,) + band.shape[1:], dtype=band.dtype)
+        out[y0:y1] = band
+    assert out is not None
+    return _fill_row_shift_border(_to_input_dtype(out, mov), dx, dy_per_row)
 
 
 def align_pass_to_reference_banded(

@@ -41,6 +41,16 @@ def _edge_column_means(rgb: np.ndarray, n: int = 16) -> tuple[list[float], list[
     return head, tail
 
 
+def _channel_percentiles(sample: np.ndarray, q: float | list[float]) -> np.ndarray:
+    """``np.percentile(sample, q, axis=(0, 1))`` one channel at a time.
+
+    The joint call copies the whole (non-contiguous) inset; a per-channel
+    pass only copies one plane at a time and yields identical values.
+    """
+    cols = [np.percentile(sample[:, :, c], q) for c in range(sample.shape[2])]
+    return np.stack(cols, axis=-1)
+
+
 def _fmt_means(values: list[float], *, n: int = 8) -> str:
     shown = values[:n]
     return "[" + ", ".join(f"{v:.0f}" for v in shown) + "]"
@@ -143,22 +153,26 @@ class ImagePipeline:
         c = geometry.channels
         if planar is None:
             planar = bool(getattr(self.model, "usb_planar_rgb", False))
+        view = memoryview(raw)[:expected]
         if geometry.depth == 8:
-            flat = np.frombuffer(raw[:expected], dtype=np.uint8)
+            flat = np.frombuffer(view, dtype=np.uint8)
             arr = flat.reshape(h, c, w).transpose(0, 2, 1) if planar else flat.reshape(h, w, c)
-            return (arr.astype(np.uint16) * np.uint16(257)).copy()
+            out = np.empty((h, w, c), dtype=np.uint16)
+            np.multiply(arr, np.uint16(257), out=out, dtype=np.uint16)
+            return out
         if geometry.depth != 16:
             raise ValueError(f"Unsupported geometry depth {geometry.depth}")
-        words = np.frombuffer(raw[:expected], dtype="<u2").copy()
-        if bool(getattr(self.model, "swap_16bit_data", False)):
-            # SANE genesys sensor flag: byteswap each 16-bit sample (GL843 7200i).
-            words.byteswap(inplace=True)
+        words = np.frombuffer(view, dtype="<u2")
         arr = (
             words.reshape(h, c, w).transpose(0, 2, 1)
             if planar
             else words.reshape(h, w, c)
         )
-        return np.array(arr, dtype=np.uint16, copy=True)
+        out = np.array(arr, dtype=np.uint16, copy=True)
+        if bool(getattr(self.model, "swap_16bit_data", False)):
+            # SANE genesys sensor flag: byteswap each 16-bit sample (GL843 7200i).
+            out.byteswap(inplace=True)
+        return out
 
     def decode_rgb16(
         self,
@@ -190,12 +204,24 @@ class ImagePipeline:
         groups = height // n
         if groups < 1:
             raise ValueError(f"Buffer of {height} rows is shorter than one {n}-row group")
-        trimmed = rgb[: groups * n].reshape(groups, n, width, channels)
-        # Integer sum avoids a full-resolution float64 mean (OOM at 7200 dpi).
-        sums = trimmed.astype(np.uint32).sum(axis=1, dtype=np.uint32)
-        out = (sums + n // 2) // n
+        # Integer sums in row slabs: no full-resolution uint32/float64 temps
+        # (OOM at 7200 dpi).
+        out = np.empty((groups, width, channels), dtype=np.uint16)
+        half = n // 2
+        acc_buf = np.empty((min(groups, _HOST_CALIB_CHUNK_ROWS), width, channels), dtype=np.uint32)
+        for g0 in range(0, groups, _HOST_CALIB_CHUNK_ROWS):
+            g1 = min(groups, g0 + _HOST_CALIB_CHUNK_ROWS)
+            block = rgb[g0 * n : g1 * n].reshape(g1 - g0, n, width, channels)
+            acc = acc_buf[: g1 - g0]
+            np.copyto(acc, block[:, 0])
+            for k in range(1, n):
+                acc += block[:, k]
+            if half:
+                acc += half
+            acc //= n
+            out[g0:g1] = acc
         logger.debug("averaged %d rows -> %d (oversample=%d)", height, groups, n)
-        return out.astype(np.uint16)
+        return out
 
     def apply_host_downsample(self, rgb: np.ndarray, geometry: ScanGeometry) -> np.ndarray:
         """Block-average when the ASIC ran hotter than the requested PPI (SE <600)."""
@@ -278,6 +304,7 @@ class ImagePipeline:
         *,
         inset: float = HOST_CALIB_BORDER_INSET,
         peak_percentile: float = HOST_CALIB_PEAK_PERCENTILE,
+        inplace: bool = False,
     ) -> np.ndarray:
         """Pull Full-window holder chrome down to the film-window highlight peak.
 
@@ -291,6 +318,8 @@ class ImagePipeline:
         the dimmest channel's own film peak, so auto Dmin meters that channel off
         neutral chrome instead of the orange base and the positive takes the
         complementary cast (green, when a 27.4k joint ceiling met a 19.3k green).
+
+        ``inplace=True`` clamps ``rgb`` directly (the caller must own it).
         """
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError(f"rgb must be HxWx3, got {rgb.shape}")
@@ -299,7 +328,7 @@ class ImagePipeline:
         if region is None:
             return rgb
         ys, xs = region
-        peaks = np.percentile(rgb[ys, xs], float(peak_percentile), axis=(0, 1))
+        peaks = _channel_percentiles(rgb[ys, xs], float(peak_percentile))
         if float(peaks.max()) <= 0:
             return rgb
         peaks = np.maximum(peaks.astype(np.float32), 1.0)
@@ -308,10 +337,14 @@ class ImagePipeline:
         if not border.any():
             return rgb
         peaks_u16 = np.clip(np.rint(peaks), 0, 65535).astype(np.uint16)
-        hot = border & (rgb > peaks_u16).any(axis=2)
+        hot = rgb[:, :, 0] > peaks_u16[0]
+        for c in (1, 2):
+            hot |= rgb[:, :, c] > peaks_u16[c]
+        hot &= border
+        del border
         if not hot.any():
             return rgb
-        out = rgb.copy()
+        out = rgb if inplace else rgb.copy()
         out[hot] = np.minimum(out[hot], peaks_u16)
         logger.info(
             "border highlight clamp inset=%.2f peak_p%.1f=(%.0f,%.0f,%.0f) pixels=%d",
@@ -334,6 +367,7 @@ class ImagePipeline:
         preserve_headroom: bool = False,
         highlight_ceiling: int = HOST_CALIB_HIGHLIGHT_CEILING,
         highlight_percentile: float = HOST_CALIB_HIGHLIGHT_PERCENTILE,
+        inplace: bool = False,
     ) -> np.ndarray:
         """Lift the film window toward sensor white with one scalar gain.
 
@@ -346,6 +380,8 @@ class ImagePipeline:
         When ``preserve_headroom`` is set (ME deliverable), gain is also capped
         so the high highlight percentile does not exceed ``highlight_ceiling`` —
         avoiding a blunt stretch that undoes IVW highlight recovery.
+
+        ``inplace=True`` writes the gain into ``rgb`` (the caller must own it).
         """
         target = int(peak_target)
         if target <= 0:
@@ -353,15 +389,20 @@ class ImagePipeline:
         h, w, _ = rgb.shape
         region = self._inset_slice(h, w, HOST_CALIB_BORDER_INSET)
         sample = rgb[region[0], region[1]] if region is not None else rgb
-        peaks = np.percentile(sample, float(peak_percentile), axis=(0, 1))
+        want_hi = preserve_headroom and highlight_ceiling > 0
+        if want_hi:
+            both = _channel_percentiles(
+                sample, [float(peak_percentile), float(highlight_percentile)]
+            )
+            peaks, hi_peaks = both[0], both[1]
+        else:
+            peaks = _channel_percentiles(sample, float(peak_percentile))
         peak = float(np.max(peaks))
         if peak <= 1.0 or peak >= float(target) * float(HOST_CALIB_PEAK_TRIGGER):
             return rgb
         gain = float(target) / peak
-        if preserve_headroom and highlight_ceiling > 0:
-            hi = float(
-                np.percentile(sample, float(highlight_percentile), axis=(0, 1)).max()
-            )
+        if want_hi:
+            hi = float(hi_peaks.max())
             if hi > 1.0:
                 gain = min(gain, float(highlight_ceiling) / hi)
         if gain <= 1.0 + 1e-6:
@@ -376,7 +417,7 @@ class ImagePipeline:
             " (headroom)" if preserve_headroom else "",
         )
         gain_f = np.float32(gain)
-        out = np.empty_like(rgb)
+        out = rgb if inplace else np.empty_like(rgb)
         for y0 in range(0, h, _HOST_CALIB_CHUNK_ROWS):
             y1 = min(h, y0 + _HOST_CALIB_CHUNK_ROWS)
             slab = rgb[y0:y1].astype(np.float32)
@@ -443,8 +484,11 @@ class ImagePipeline:
             source="host calib",
             peak_target=peak_target,
             peak_percentile=peak_percentile,
+            inplace=True,
         )
-        return self.clamp_border_highlights(exposed, peak_percentile=peak_percentile)
+        return self.clamp_border_highlights(
+            exposed, peak_percentile=peak_percentile, inplace=True
+        )
 
     def assemble(
         self,
@@ -467,8 +511,13 @@ class ImagePipeline:
         the trim is content-aware; pass an ``int`` to reuse a locked drop from
         an earlier plane (ME short → long/IR) so widths match. Pcap 7200 may
         still drop dummy URB columns via :func:`trim_to_optical_span`.
+
+        Callers that hand over their only reference to ``raw`` let the USB
+        buffer be freed right after decode instead of living through the
+        whole chain. Every later step works on frames this method owns.
         """
         rgb = self.decode_rgb(raw, geometry=geometry, planar=planar)
+        del raw
         rgb = self.reduce_y_oversample(rgb, geometry)
         rgb = self.apply_line_shifts(rgb, geometry)
         rgb = self.apply_y_stagger(rgb, geometry)
@@ -481,7 +530,8 @@ class ImagePipeline:
             drop = max(0, min(int(usb_end_drop), cap, max(0, rgb.shape[1] - 8)))
         self.last_usb_end_drop = drop
         if drop > 0:
-            rgb = np.ascontiguousarray(rgb[:, : rgb.shape[1] - drop, :])
+            # View only; the single contiguous copy happens with mirror_x below.
+            rgb = rgb[:, : rgb.shape[1] - drop, :]
             logger.info(
                 "dropped %d USB-end columns (ENDPIXEL dummy, cap %d) → width %d",
                 drop,
@@ -494,11 +544,13 @@ class ImagePipeline:
                 rgb, dark=dark, white=white, expose_base=expose_base
             )
         elif expose_base:
-            rgb = self.expose_film_base(rgb, source="asic shading")
-            rgb = self.clamp_border_highlights(rgb)
+            rgb = self.expose_film_base(rgb, source="asic shading", inplace=True)
+            rgb = self.clamp_border_highlights(rgb, inplace=True)
         pre_head, pre_tail = _edge_column_means(rgb)
         if getattr(self.model, "mirror_x", False):
             rgb = np.ascontiguousarray(rgb[:, ::-1, :])
+        else:
+            rgb = np.ascontiguousarray(rgb)
         post_head, _post_tail = _edge_column_means(rgb)
         logger.info(
             "assemble %ddpi str=%d end=%d pixels=%d optical=%d offset=%d "
