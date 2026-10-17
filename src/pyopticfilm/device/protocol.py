@@ -141,6 +141,9 @@ class Gl128Model(FilmModel, Protocol):
     feed_to_scan_bottom_steps: int
     max_feed_steps: int
     scan_window_end_steps: int
+    home_recovery_enabled: bool
+    home_seek_max_steps: int
+    home_backoff_steps: int
     max_image_lincnt_by_feed2: Mapping[int, int]
     ladder_feed2_steps: int
     ladder_lincnt_by_dpi: Mapping[int, int]

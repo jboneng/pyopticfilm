@@ -125,6 +125,13 @@ _FEED_START_TIMEOUT_S = 2.0
 #: the feed registers or the slope RAM again. A ramp loaded into a moving motor stalls it.
 _MOTOR_IDLE_TIMEOUT_S = 2.0
 _MOTOR_IDLE_POLL_S = 0.015
+#: Status poll interval during a reverse home seek (fast enough to catch
+#: ``HOMESNR`` within a few steps at the slow ramp's top speed).
+_HOME_SEEK_POLL_S = 0.01
+#: How long ``MOTORENB`` may stay set after ``HOMESNR`` trips before the seek
+#: drops motor power itself. Zero: on the 8200i SE the ASIC never stops a
+#: reverse feed on the sensor, and running on toward the end stop ground.
+_HOME_SEEK_SELF_STOP_GRACE_S = 0.0
 
 #: Register block written immediately before every captured fast feed
 #: (session 03 t≈8.98). Values are constants in the captures, not DPI-dependent.
@@ -851,7 +858,7 @@ class Gl128:
         """Refuse to continue if the head is off the home sensor (grind risk)."""
         status = self.read_status()
         if not status.is_at_home:
-            raise ScanError(f"{where}: carriage is not at home - refuse to avoid grind. Park with SilverFast or power-cycle the scanner.")
+            raise ScanError(f"{where}: carriage is not at home - refuse to avoid grind. Run Scanner.recover_carriage() or power-cycle the scanner.")
 
     def acquire_shading_strip(
         self,
@@ -941,7 +948,7 @@ class Gl128:
             except MotorTimeoutError as exc:
                 self._write(r.REG_0x02, 0x00)
                 raise ScanError(
-                    "Shading white strip: AGOHOME did not return the carriage home. Park with SilverFast or power-cycle, then retry."
+                    "Shading white strip: AGOHOME did not return the carriage home. Run Scanner.recover_carriage() or power-cycle, then retry."
                 ) from exc
         self._write(r.REG_0x02, 0x00)
         if len(buf) < size:
@@ -1615,19 +1622,22 @@ class Gl128:
         ``13704``; crop-dependent values from session 09). Requires home.
         """
         self._require_motor_enabled()
-        if not getattr(self, "_park_ok", True):
-            raise AsicError(
-                "GL128 park failed in the previous scan (AGOHOME timed out). "
-                "Power-cycle the scanner or park with SilverFast before "
-                "running another SE scan."
-            )
         start = self.read_status_reliable()
-        if not start.is_at_home:
-            raise AsicError(
-                "SE carriage is not at home. There is no capture-proven "
-                "standalone reverse-home; park with SilverFast or power-cycle, "
-                "then retry from home."
+        if not getattr(self, "_park_ok", True) or not start.is_at_home:
+            if not bool(getattr(self.model, "home_recovery_enabled", False)):
+                raise AsicError(
+                    "GL128 carriage is not at home (or the previous park failed) "
+                    "and home recovery is disabled for this model. Power-cycle, "
+                    "then retry from home."
+                )
+            logger.warning(
+                "GL128 carriage not at home before positioning (status 0x%02x, "
+                "park_ok=%s); recovering",
+                start.raw,
+                getattr(self, "_park_ok", True),
             )
+            self.recover_home(timeout_s=timeout_s)
+            start = self.read_status_reliable()
         self.warm_prepare()
         second = int(self.model.feed_to_scan_steps) if scan_steps is None else int(scan_steps)
         first = int(self.model.feed_to_reference_steps)
@@ -1692,8 +1702,8 @@ class Gl128:
                     self._park_ok = False
                     logger.error(
                         "GL128 did not park at home: %s. Home is the origin "
-                        "for the next scan's feeds, so power-cycle or park "
-                        "with SilverFast before scanning again.",
+                        "for the next scan's feeds; the next scan recovers "
+                        "the carriage first (or run Scanner.recover_carriage()).",
                         exc,
                     )
             else:
@@ -1702,29 +1712,144 @@ class Gl128:
             self._park_ok = False
             logger.error("GL128 stop_motor: %s (carriage position unknown)", exc)
 
-    def home(self, *, timeout_s: float = 30.0, wait: bool = True) -> None:
-        """No-op when already home; otherwise refuse.
+    def _reverse_seek_home(self, *, timeout_s: float) -> None:
+        """Reverse fast feed (``0x02 = 0x1C``) until ``HOMESNR``.
 
-        Captures return home only via ``AGOHOME`` on the image pass
-        (``0x02 = 0x30``). A standalone ``FEEDL=0`` seek is not proven and
-        previously caused grinding when invented.
+        Session-start reverse-feed flags with this driver's feed setup block
+        and the model's slow ramp. ``FEEDL`` is only an upper bound; the seek ends on
+        the home sensor. The ASIC does not stop a reverse feed on ``HOMESNR``
+        by itself, so motor power is dropped here as soon as the sensor reads
+        home instead of running on into the end stop.
         """
-        del timeout_s, wait
-        self._require_motor_enabled()
-        if self.read_status_reliable().is_at_home:
-            logger.debug("GL128 already at home")
-            return
-        raise AsicError(
-            "GL128 has no capture-proven standalone home seek. Park with "
-            "SilverFast or power-cycle so the carriage is at home, then continue. "
-            "See captures/8200i-se/MOTOR.md."
+        r = self.registers
+        self.wait_motor_idle("before a reverse home seek")
+        self._write_many(dict(_FEED_SETUP_REGS))
+        self.protocol.write_u24(r.REG_FEEDL, int(self.model.home_seek_max_steps))
+        self._write(r.REG_0x02, r.MTRPWR | r.FASTFED | r.MTRREV)
+        self._upload_fast_slopes(use_slow=True)
+        before = self.read_status_reliable()
+        self._write(r.REG_START, r.START_GO)
+        started = time.monotonic()
+        deadline = started + float(timeout_s)
+        home_seen_at: float | None = None
+        software_stop = False
+        while True:
+            status = self.read_status_reliable()
+            now = time.monotonic()
+            if status.is_at_home:
+                if not status.is_motor_enabled:
+                    break
+                if home_seen_at is None:
+                    home_seen_at = now
+                if now - home_seen_at >= _HOME_SEEK_SELF_STOP_GRACE_S:
+                    self._write(r.REG_0x02, r.FASTFED)
+                    logger.info(
+                        "GL128 reverse seek: HOMESNR after %.2fs (status 0x%02x); "
+                        "motor power dropped",
+                        now - started,
+                        status.raw,
+                    )
+                    software_stop = True
+                    break
+            if now >= deadline:
+                self._write(r.REG_0x02, r.FASTFED)
+                self.protocol.write_u24(r.REG_FEEDL, 1)
+                raise MotorTimeoutError(
+                    f"Reverse home seek did not reach the home sensor within "
+                    f"{timeout_s:.0f}s (status 0x{status.raw:02x})"
+                )
+            time.sleep(_HOME_SEEK_POLL_S)
+        self._write(r.REG_0x02, r.FASTFED)
+        self.protocol.write_u24(r.REG_FEEDL, 1)
+        after = self.wait_motor_idle("after a reverse home seek")
+        logger.info(
+            "GL128 reverse home seek done in %.2fs (status 0x%02x -> 0x%02x, %s)",
+            time.monotonic() - started,
+            before.raw,
+            after.raw,
+            "software stop" if software_stop else "ASIC stopped on HOMESNR",
         )
+        if not after.is_at_home:
+            raise MotorTimeoutError(
+                f"Reverse home seek stopped off the home sensor (status 0x{after.raw:02x})"
+            )
+
+    def recover_home(self, *, timeout_s: float = 30.0) -> bool:
+        """Drive the carriage back to home from wherever it is.
+
+        Two-move home sequence: reach home with a reverse seek, back off ``home_backoff_steps``, then reverse-seek again so the final
+        approach to the sensor is always the same. The forward back-off only
+        runs once the carriage is near home, so a far-out carriage is never
+        driven toward the end stop.
+
+        Returns ``False`` when the carriage was already home with a good park
+        (no motion), ``True`` after a recovery.
+        """
+        self._require_motor_enabled()
+        if not bool(getattr(self.model, "home_recovery_enabled", False)):
+            raise AsicError(
+                f"{self.model.model}: carriage home recovery is disabled for this "
+                "model. Power-cycle so the carriage returns home, then retry."
+            )
+        if not self._initialized:
+            self.init()
+        r = self.registers
+        status = self.read_status_reliable()
+        settle_deadline = time.monotonic() + _STATIONARY_IDLE_WAIT_S
+        while status.is_motor_enabled and time.monotonic() < settle_deadline:
+            # A park that is still finishing reads MOTORENB for a moment.
+            time.sleep(HOME_POLL_S)
+            status = self.read_status_reliable()
+        if status.is_at_home and not status.is_motor_enabled and self._park_ok:
+            logger.debug("GL128 already at home")
+            return False
+        logger.info(
+            "GL128 recovering carriage (status 0x%02x, park_ok=%s)",
+            status.raw,
+            self._park_ok,
+        )
+        self._park_ok = False
+        self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
+        self._update_bits(r.REG_0x02, clear_bits=r.MTRPWR | r.AGOHOME)
+        self.wait_motor_idle("before carriage recovery")
+        # Image-pass registers left by a scan slow the feeds down and made the
+        # motor sound wrong on the 8200i SE; the moves are clean from boot state.
+        self.init(force=True)
+        # Boot leaves 0x02 = 0x78 (MTRPWR|AGOHOME armed); the feed setup block
+        # clears SCAN, which must not set off an AGOHOME move mid-recovery.
+        self._update_bits(r.REG_0x02, clear_bits=r.MTRPWR | r.AGOHOME)
+        status = self.wait_motor_idle("after re-init for carriage recovery")
+        if not status.is_at_home:
+            self._reverse_seek_home(timeout_s=timeout_s)
+        self._feed_capture(
+            int(self.model.home_backoff_steps),
+            timeout_s=timeout_s,
+            require_motion=True,
+            use_slow_slope=True,
+        )
+        after_backoff = self.read_status_reliable()
+        if after_backoff.is_at_home:
+            # Still inside the sensor zone: a reverse seek from here would
+            # drive at the end stop.
+            logger.warning(
+                "GL128 back-off of %d steps did not clear HOMESNR (status 0x%02x); "
+                "skipping the second reverse seek",
+                int(self.model.home_backoff_steps),
+                after_backoff.raw,
+            )
+        else:
+            self._reverse_seek_home(timeout_s=timeout_s)
+        self._park_ok = True
+        logger.info("GL128 carriage recovered to home")
+        return True
+
+    def home(self, *, timeout_s: float = 30.0, wait: bool = True) -> None:
+        """No-op when already home; otherwise :meth:`recover_home`."""
+        del wait
+        self._require_motor_enabled()
+        self.recover_home(timeout_s=timeout_s)
 
     def park(self, *, timeout_s: float = 30.0) -> None:
-        del timeout_s
         self._require_motor_enabled()
-        if not self.read_status_reliable().is_at_home:
-            raise AsicError(
-                "GL128 park needs the carriage already at home (no reverse-home recipe in captures). Use SilverFast or power-cycle first."
-            )
+        self.recover_home(timeout_s=timeout_s)
         self.lamp_off()

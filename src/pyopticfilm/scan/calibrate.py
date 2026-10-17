@@ -312,8 +312,18 @@ class Calibrator:
         home = getattr(self.asic, "home", None)
         if not callable(home):
             raise CalibrationError("Carriage not at home and home() unavailable")
-        logger.info("GL128 shading: carriage off home — parking before measure/apply")
-        home()
+        logger.info("GL128 shading: carriage off home — recovering before measure/apply")
+        asic = self.asic
+        gated = hasattr(asic, "_motor_moves_enabled")
+        prev = bool(getattr(asic, "_motor_moves_enabled", True))
+        if gated:
+            # Stationary shading disarms the motor; the recovery itself must move.
+            asic._motor_moves_enabled = True  # type: ignore[attr-defined]
+        try:
+            home()
+        finally:
+            if gated:
+                asic._motor_moves_enabled = prev  # type: ignore[attr-defined]
 
     def apply_colour_asic_shading(self, entry: CalibEntry) -> None:
         """Re-upload a cached AHB blob + AFE (no strip re-acquire)."""
@@ -713,14 +723,9 @@ class Calibrator:
             call_search_afe(search, method=method, resolution=resolution, measure=measure)
 
         def _safe_home() -> None:
-            """GL845 repark; SE has no reverse-home — noop only when already home."""
+            """Repark after a strip; GL128 recovers only when off home."""
             if is_gl128:
-                try:
-                    if self.asic.is_at_home():
-                        return
-                except Exception:  # noqa: BLE001, S110
-                    pass
-                logger.debug("SE calib: skip home (no capture-proven reverse-home)")
+                self._ensure_at_home()
                 return
             self.asic.home()
 

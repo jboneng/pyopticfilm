@@ -75,8 +75,12 @@ class ScanWorker(QObject):
     failed = pyqtSignal(str)
     busy_changed = pyqtSignal(bool)
     calib_cleared = pyqtSignal(str)
+    #: True when the carriage had to move, False when it was already home
+    carriage_recovered = pyqtSignal(bool)
     #: target, apply_calib
     request_prescan = pyqtSignal(object, bool)
+    #: target
+    request_recover_carriage = pyqtSignal(object)
     #: :class:`ScanRequest` (geometry already computed from crop_norm)
     request_scan = pyqtSignal(object)
 
@@ -175,6 +179,7 @@ class ScanWorker(QObject):
         dispatch even with an explicit connection type."""
         self.request_prescan.connect(self.run_prescan, type=Qt.ConnectionType.QueuedConnection)
         self.request_scan.connect(self.run_scan, type=Qt.ConnectionType.QueuedConnection)
+        self.request_recover_carriage.connect(self.recover_carriage, type=Qt.ConnectionType.QueuedConnection)
         self.request_forensic_connect.connect(self._forensic_connect, type=Qt.ConnectionType.QueuedConnection)
         self.request_forensic_disconnect.connect(self._forensic_disconnect, type=Qt.ConnectionType.QueuedConnection)
         self.request_forensic_poll.connect(self._forensic_set_poll, type=Qt.ConnectionType.QueuedConnection)
@@ -319,6 +324,23 @@ class ScanWorker(QObject):
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def recover_carriage(self, target: LabTarget) -> None:
+        """Drive a GL128 carriage back home (reverse seek, back-off, reverse seek)."""
+        self.busy_changed.emit(True)
+        self._is_busy = True
+        self._forensic_apply_poll(False, 0)
+        try:
+            scanner = self.ensure_open(target)
+            self._usb_divider("RECOVER CARRIAGE")
+            moved = scanner.recover_carriage()
+            self.carriage_recovered.emit(bool(moved))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            self._is_busy = False
+            self.busy_changed.emit(False)
+            self._forensic_apply_poll(*self._forensic_poll_wanted)
 
     def run_prescan(
         self,

@@ -238,6 +238,9 @@ is reported as matching 135i in that analysis (84/116).
 | Feed arm (before START) | `0x18` seen on feed 2 | `0x18` (MTRPWR \| FASTFED) | `0x18` | same |
 | Image pass | `0x30` (MTRPWR \| AGOHOME) | `0x30` | `0x30` | same |
 | Image-pass FEEDL | 1 | 1 | 1 | same |
+| Carriage recovery reverse seek (driver) | `0x1C` (MTRPWR \| FASTFED \| MTRREV) | `0x1C` | unknown | same (driver; not hardware-validated on V2) |
+
+The reverse seek is `Gl128.recover_home()`. It uses the fast-feed setup block, `FEEDL = home_seek_max_steps` (70000, an upper bound only) and the model's slow ramp, and ends on `HOMESNR`. On the 8200i SE the ASIC keeps driving a reverse feed past `HOMESNR`, so the driver drops `MTRPWR` on the first poll (about 10 ms) that reads home. The sequence is reverse seek, forward back-off of `home_backoff_steps` (4450), then a second reverse seek, so the final approach to the sensor is always the same.
 
 ### FEEDL map
 

@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **GL128 AFE field probe** (`tools/probe_afe_fields.py`): stationary lab tool (carriage at home, motor off, calibration cache untouched) that sweeps FE indices (default `0x02` and `0x05`, any of `0x02`–`0x07` via `--fields`) with the lamp on and off and reports whether each behaves as a gain (AD9826 / 6-bit wrap at `0x40`) or an offset. `--layout planar|chunky` overrides the strip decode. Writes a CSV under `tools/scanlab/runs/afe-probe/`.
+- **GL128 carriage recovery** (`Scanner.recover_carriage()`, Scan Lab **Recover carriage** button): drives a carriage left out by an interrupted scan or failed park back to the home sensor. It runs a reverse seek, backs off 4450 steps, then reverse-seeks again so the next frame starts from the same place. The ASIC does not stop a reverse feed on the home sensor by itself, so the driver drops motor power as soon as the sensor reads home. If the sensor is not reached within 30 s, the motor is stopped and scans stay blocked. Before moving, the recovery re-runs the register boot (no motion) so a scan's leftover image-pass settings cannot change how the motor runs. Tested on the 8200i SE: after a recovery from the scan start position, the next frame landed 2.3 rows from the previous one at 600 dpi, against 3.3 rows between two scans with a normal park. A hard crash mid-pass is not covered: the abandoned pass ground and the scanner dropped off USB until power-cycled, after which the carriage was back at home.
+- **Home recovery probe** (`tools/probe_home_recovery.py`): staged hardware test for the recovery (`backoff`, `reference`, `recover`, `repeat`, `baseline`). Logs the status walk to a CSV under `tools/scanlab/runs/home-recovery/`. `repeat` and `baseline` measure the frame shift between two scans with and without a recovery in between.
 
 ### Fixed
 
@@ -19,11 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **GL128 scans no longer refuse when the carriage is away from home** (8200i SE, 8100 V2, 8300i SE). `home()`, `park()`, scan positioning and calibration now recover the carriage first instead of asking you to park with SilverFast or power-cycle. This also applies after a failed park.
 - **Calibration cache v10**: GL128 entries saved under the old swapped AFE names are dropped, so the first scan after upgrading recalibrates once.
 
 ### Notes for integrators
 
 - `AfeFrontend.gains` / `.offsets` and the cache's `afe_gains` / `afe_offsets` now mean the same registers on GL128 as on GL845: gains are `0x02`–`0x04` and offsets are `0x05`–`0x07`. `FE_GAIN_*` / `FE_OFFSET_*`, `coarse_gains_from_wide_means`, `adaptive_afe_white_target`, `AFE_OFFSET_MIN`, `COLOR_AFE_SESSION04_OFFSETS` and `AFE_WHITE_TARGET_*` replace the old names. `encode_afe_offset` / `decode_afe_offset` convert signed offsets to and from the FE code. `AFE_GAIN_MAX` (and the `AfeSearchConfig.gain_max` default) is now `0x3F`, which also applies to GL845's forced dichotomy.
+- GL128 models have new fields `home_recovery_enabled` (default `True`), `home_seek_max_steps` (70000, an upper bound for the reverse seek) and `home_backoff_steps` (4450). Carriage recovery has been tested on the mock for all three models and on 8200i SE hardware; if recovery misbehaves on an 8100 V2 or 8300i SE, set `home_recovery_enabled=False` on that model to restore the old refusal. `MockScannerTransport` now ends reverse feeds on the home sensor (`reverse_seek_self_stops`, `reverse_seek_reaches_home` simulate the failure cases).
 
 ## [1.3.6] - 2026-10-14
 

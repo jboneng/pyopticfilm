@@ -923,14 +923,25 @@ BEHAVIORAL_NOTES: tuple[BehavioralNote, ...] = (
         asic=AsicFamily.GL128,
         scope=(SCOPE_ALL_GL128,),
         meaning=(
-            "GL128's home()/park() refuse to run a standalone seek — "
-            "captures only ever show the carriage returning home via "
-            "AGOHOME on the image pass (0x02=0x30). A standalone FEEDL=0 "
-            "seek is not proven by any capture."
+            "Normal scans return home via AGOHOME on the image pass "
+            "(0x02=0x30). When the carriage is away from home (interrupted "
+            "scan, failed park), home()/park()/recover_home() run a reverse "
+            "fast feed (0x02=0x1C, MTRPWR|FASTFED|MTRREV, bounded FEEDL, "
+            "model slow ramp) until HOMESNR, back off home_backoff_steps "
+            "forward, then reverse-seek again. Taken from a SilverFast "
+            "session-start sequence; not a FEEDL=0 seek."
         ),
-        confidence=Confidence.UNKNOWN,
-        citations=_c("gl128.py:1695-1719 (home()/park())"),
-        safety_note="A standalone home-seek recipe previously caused grinding when invented. Do not add one without new capture evidence.",
+        confidence=Confidence.SUSPECTED,
+        citations=_c(
+            "gl128.py Gl128._reverse_seek_home() / recover_home() / home() / park()",
+            "tools/probe_home_recovery.py",
+        ),
+        safety_note=(
+            "An invented FEEDL=0 home seek previously caused grinding. The "
+            "ASIC does not stop a reverse feed on HOMESNR, so the driver "
+            "drops MTRPWR on the first poll that reads home, and stops with "
+            "an error if the sensor is not reached. Disable per model with home_recovery_enabled=False."
+        ),
     ),
     BehavioralNote(
         topic="Cancel-during-preview park recipe (V2, matches SE shape)",
