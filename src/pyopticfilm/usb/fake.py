@@ -254,8 +254,15 @@ class MockScannerTransport(FakeUsbTransport):
     buffer_empty: bool = True
     motor_enabled: bool = False
     feed_finished: bool = False
+    #: GL128 reverse feeds (``0x02 & MTRREV``) end on the home sensor. When
+    #: ``False`` the motor keeps running after ``HOMESNR`` until ``MTRPWR``
+    #: is dropped (exercises the driver's software stop).
+    reverse_seek_self_stops: bool = True
+    #: When ``False`` a reverse feed never reaches the home sensor.
+    reverse_seek_reaches_home: bool = True
     _motion_reads: int = 0
     _bulk_offset: int = 0
+    _reverse_feed: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -300,6 +307,16 @@ class MockScannerTransport(FakeUsbTransport):
         if not self.motor_enabled:
             return
         self._motion_reads += 1
+        if self._reverse_feed:
+            if not self.reverse_seek_reaches_home:
+                return
+            if self._motion_reads >= 4:
+                self.at_home = True
+                if self.reverse_seek_self_stops:
+                    self.motor_enabled = False
+                    self.feed_finished = True
+                self._sync_status()
+            return
         # First status sample shows motor on (GL128 require_motion); then finish.
         if self._motion_reads >= 4:
             self.motor_enabled = False
@@ -318,7 +335,9 @@ class MockScannerTransport(FakeUsbTransport):
             self._sync_status()
             return
         if addr == 0x0F and value == 0x01:
-            self.at_home = False
+            self._reverse_feed = bool(self.registers.get(0x02, 0) & _R.MTRREV)
+            if not self._reverse_feed:
+                self.at_home = False
             self.motor_enabled = True
             self.feed_finished = False
             self._motion_reads = 0

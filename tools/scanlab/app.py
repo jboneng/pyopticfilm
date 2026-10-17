@@ -117,6 +117,15 @@ class ScanLabWindow(QMainWindow):
         self.btn_clear_calib.clicked.connect(self._on_clear_calib_cache)
         form.addWidget(self.btn_clear_calib)
 
+        self.btn_recover_carriage = QPushButton("Recover carriage")
+        self.btn_recover_carriage.setToolTip(
+            "GL128: drive the carriage back home after an interrupted scan "
+            "(reverse seek, short back-off, reverse seek). Scans also do this "
+            "automatically when they start away from home."
+        )
+        self.btn_recover_carriage.clicked.connect(self._on_recover_carriage)
+        form.addWidget(self.btn_recover_carriage)
+
         self.usb_planar = QCheckBox("USB planar RGB")
         self.usb_planar.setChecked(False)
         self.usb_planar.toggled.connect(self._on_usb_planar)
@@ -317,6 +326,7 @@ class ScanLabWindow(QMainWindow):
         self._worker.failed.connect(self._on_failed)
         self._worker.busy_changed.connect(self._on_busy)
         self._worker.calib_cleared.connect(self._on_calib_cleared)
+        self._worker.carriage_recovered.connect(self._on_carriage_recovered)
 
         self._worker.forensic_line.connect(self.forensic_tab.append_timeline_line)
         self._worker.forensic_status_ready.connect(self.forensic_tab.set_status)
@@ -1186,6 +1196,26 @@ class ScanLabWindow(QMainWindow):
             return
         self._worker.clear_calib_cache()
 
+    def _on_recover_carriage(self) -> None:
+        target = self._resolved_target()
+        if target is None:
+            return
+        if getattr(target.model, "asic", "") != "GL128":
+            self.statusBar().showMessage("Carriage recovery is GL128 only")
+            return
+        self.statusBar().showMessage("Recovering carriage…")
+        self._worker.request_forensic_mark_phase.emit(
+            "BUTTON: Recover carriage clicked",
+            {"model": target.model.model, "mock": target.mock},
+        )
+        self._worker.request_recover_carriage.emit(target)
+
+    def _on_carriage_recovered(self, moved: bool) -> None:
+        if moved:
+            self.statusBar().showMessage("Carriage recovered to home")
+        else:
+            self.statusBar().showMessage("Carriage already at home — nothing to do")
+
     def _on_calib_cleared(self, path: str) -> None:
         if path:
             self.statusBar().showMessage(f"Cleared calibration cache ({path})")
@@ -1240,6 +1270,7 @@ class ScanLabWindow(QMainWindow):
         self.override_hw_gate.setEnabled(not busy)
         self.apply_calib.setEnabled(not busy)
         self.btn_clear_calib.setEnabled(not busy)
+        self.btn_recover_carriage.setEnabled(not busy)
         self.usb_planar.setEnabled(not busy)
         self.quiet_usb_pace.setEnabled(not busy)
         self.slow_image_slope.setEnabled(not busy)

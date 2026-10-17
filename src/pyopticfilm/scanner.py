@@ -200,6 +200,22 @@ class Scanner:
         self._ensure_open()
         self._asic.park(timeout_s=timeout_s)
 
+    def recover_carriage(self, *, timeout_s: float = 30.0) -> bool:
+        """Drive a GL128 carriage back home after an interrupted scan.
+
+        Returns ``False`` when the carriage was already home (no motion) and
+        ``True`` after a recovery. Scans also run this automatically when they
+        start away from home.
+        """
+        self._ensure_scan_ready()
+        self._ensure_open()
+        recover = getattr(self._asic, "recover_home", None)
+        if recover is None:
+            raise NotImplementedError(f"{self._model.model} has no carriage recovery; use home()")
+        if not self._asic._initialized:
+            self._asic.init()
+        return bool(recover(timeout_s=timeout_s))
+
     def calibrate(
         self,
         *,

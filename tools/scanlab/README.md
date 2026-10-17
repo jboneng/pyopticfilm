@@ -89,6 +89,7 @@ scan-ready GL128 **8100 (V2)** (`07b3:1824`).
 | **Override safety HW gate** | Off (default). On: after a warning, unlock scan/home/park on real USB for models with `scan_ready=False`. Does not flip `scan_ready`. |
 | **Apply calib** | **On** (default). ASIC shading before colour prescan/scan; first run at each PPI/geometry measures once, then reuses `~/.cache/pyopticfilm/calib_v2.json`. Forced off when **Override safety HW gate** is on. |
 | **Clear calib cache** | Deletes cached shading entries; next scan re-measures at home. |
+| **Recover carriage** | GL128: drives the carriage back home after an interrupted scan (reverse seek to the home sensor, short back-off, reverse seek again). Scans also do this automatically when they start away from home. |
 | **USB planar RGB** | Off = chunky `RGBRGB…` (default). On = planar planes — try this if Prescan is rainbow-striped. |
 | **Adaptive quiet drain** | On (default). Rate-limits host bulk reads to the ASIC `LPERIOD` line rate (including 7200 dpi, ~3.55 ms/line) so motor creep stays continuous. Uncheck for fastest drain (louder). |
 | **Slow image slope** | Off (default). On: shading/slow motor ramp on the image pass (feeds stay fast). |
@@ -269,14 +270,28 @@ Calibration is controlled by **Apply calib** (default on) and **Clear calib cach
 
 ## Motor grind recovery
 
+If a GL128 scan stopped with the carriage left out (failed park, scan aborted
+between passes) and the scanner still answers on USB, click **Recover
+carriage** or start a new scan:
+pyopticfilm drives it back to the home sensor with a reverse seek, backs off a
+little, and approaches the sensor again so the next frame starts from the same
+place. From Python, call `Scanner.recover_carriage()`. If the seek does not
+reach the sensor within 30 s it stops the motor and refuses further scans.
+
+If the host process dies during an image pass, the scanner keeps driving the
+abandoned pass, grinds, and drops off USB (8200i SE, 2026-10-17). Power it off
+straight away; recovery cannot reach it until it has been power-cycled. After
+the power cycle the carriage was back on the home sensor and scanning worked
+without a recovery.
+
 If the carriage grinds, chatters against a stop, or stops mid-travel during Lab
-bring-up:
+bring-up, do not retry the recovery:
 
 1. **Power off** the scanner (front/power switch).
 2. **Unplug the power cord** from the scanner (or wall), wait a few seconds.
 3. **Reconnect** power and turn the scanner back on.
-4. **Home** the head with a known-good tool (for example **VueScan** or
-   **SilverFast**) before using Scan Lab or pyopticfilm again.
+4. **Home** the head with **Recover carriage** (GL128) or a known-good tool
+   (for example **VueScan** or **SilverFast**) before scanning again.
 
 This recovery sequence has only been **tested on the OpticFilm 8200i SE**. Treat
 it as a starting point on 8100 V2 and other models; keep a hand near power and

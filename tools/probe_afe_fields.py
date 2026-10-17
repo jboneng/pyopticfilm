@@ -2,7 +2,7 @@
 """Stationary GL128 probe: are AFE indices 0x02-0x04 gains or offsets?
 
 pyopticfilm names ``0x02``-``0x04`` offsets and ``0x05``-``0x07`` gains. The
-AD9826 register map (and cschalle's 8200i SE backend) say the reverse, with a
+AD9826 register map (and another 8200i SE backend) say the reverse, with a
 6-bit PGA gain at ``0x02``-``0x04``. This probe sweeps the red code of each
 field with the lamp on (white) and off (dark) and classifies the response:
 

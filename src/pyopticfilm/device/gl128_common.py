@@ -334,6 +334,9 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "feed_to_scan_bottom_steps",
         "max_feed_steps",
         "scan_window_end_steps",
+        "home_recovery_enabled",
+        "home_seek_max_steps",
+        "home_backoff_steps",
         "motor_profile",
         "init_regs",
         "sensor_custom_regs",
@@ -439,6 +442,14 @@ class Gl128Common:
     feed_to_scan_bottom_steps: int = 20232
     max_feed_steps: int = 28292
     scan_window_end_steps: int = 27636
+    #: Allow :meth:`~pyopticfilm.asic.gl128.Gl128.recover_home` to drive the
+    #: carriage back with a reverse seek, back-off, reverse seek.
+    home_recovery_enabled: bool = True
+    #: ``FEEDL`` for the reverse home seek: reference + scan feed + window end
+    #: plus margin. The seek ends on ``HOMESNR`` long before this runs out.
+    home_seek_max_steps: int = 70000
+    #: Forward back-off before the final reverse approach.
+    home_backoff_steps: int = 4450
     motor_profile: MotorProfile = DEFAULT_GL845_MOTOR
     init_regs: Mapping[int, int] = field(default_factory=lambda: dict(INIT_REGS))
     sensor_custom_regs: Mapping[int, int] = field(default_factory=lambda: dict(SCAN_REGS))
