@@ -10,7 +10,7 @@ All divergent knobs below come from SilverFast 9 USBPcap full-frame captures
 (``docs/gl128-model-comparison.md`` §10).  Summary:
 
 **Geometry (V2-like)**
-    Full-frame STR/END = 242/10610.  Settled colour-short feed2 is
+    Full-frame STR/END = 242/10610, all columns kept.  Settled colour-short feed2 is
     PPI-dependent (13040…13128); :meth:`feed_to_scan_steps_for_dpi` programs
     that map (ME-long → 13128).  ``feed_to_scan_steps`` stays 13128 as a
     dpi-less fallback.  Image ``LINCNT`` is SilverFast's: one unit and one

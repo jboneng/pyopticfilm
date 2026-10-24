@@ -45,8 +45,9 @@ def test_full_window_1800_stays_2592_even():
     assert geometry.pixels == 2592
     assert geometry.pixels % 2 == 0
     assert geometry.pixel_endx - geometry.pixel_startx == geometry.optical_pixels
-    assert geometry.pixel_startx == 242 + MODEL_8200I_SE.optical_end_inactive_native
-    assert geometry.usb_end_drop == 24
+    assert geometry.pixel_startx == 242
+    assert geometry.pixel_endx == 10610
+    assert geometry.usb_end_drop == 0
 
 
 def test_crop_widths_at_1800_are_even():

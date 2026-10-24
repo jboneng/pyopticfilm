@@ -15,7 +15,7 @@ def test_8300i_identity_and_scan_flags():
     assert MODEL_8300I_SE.supports_infrared is True
     assert MODEL_8300I_SE.mirror_x is True
     assert MODEL_8300I_SE.strpixel_native_units is True
-    assert MODEL_8300I_SE.optical_end_inactive_native == 96
+    assert MODEL_8300I_SE.optical_end_inactive_native == 0
     assert MODEL_8300I_SE.feed_to_scan_steps == 13128
     assert MODEL_8300I_SE.ladder_feed2_steps == 13128
     assert MODEL_8300I_SE.exposure_short == 15000
@@ -35,11 +35,11 @@ def test_8300i_ta_window_and_full_frame_fallback():
     assert MODEL_8300I_SE.feed_to_scan_steps == MODEL_8300I_SE.feed_to_scan_top_steps
 
 
-def test_full_window_str_is_338_at_1200_and_1800():
+def test_full_window_str_is_242_at_1200_and_1800():
     g1200, _ = bringup_scan_geometry(MODEL_8300I_SE, 1200, profile="preview_safe")
     g1800, _ = bringup_scan_geometry(MODEL_8300I_SE, 1800, profile="preview_safe")
-    assert g1200.pixel_startx == 338
-    assert g1800.pixel_startx == 338
+    assert g1200.pixel_startx == 242
+    assert g1800.pixel_startx == 242
     assert g1200.pixel_startx == g1800.pixel_startx
 
 

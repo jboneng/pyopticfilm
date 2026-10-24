@@ -69,12 +69,16 @@ def test_assemble_expose_base_false_preserves_me_ratio():
 
 def test_locked_usb_end_drop_allows_me_merge_when_edges_differ():
     """ME short/long with unequal dark END columns merge when drop is locked."""
+    from dataclasses import replace
+
     from pyopticfilm.scan.geometry import compute_geometry
     from pyopticfilm.scan.pipeline import ImagePipeline
 
     pipe = ImagePipeline(MODEL_8200I_SE)
-    geometry = compute_geometry(3600, model=MODEL_8200I_SE, area=(0.15, 0.2, 0.7, 0.6))
-    assert geometry.usb_end_drop == 48
+    geometry = replace(
+        compute_geometry(3600, model=MODEL_8200I_SE, area=(0.15, 0.2, 0.7, 0.6)),
+        usb_end_drop=48,
+    )
     h = max(4, geometry.lines)
     w = geometry.pixels
     short = np.full((h, w, 3), 12_000, dtype=np.uint16)

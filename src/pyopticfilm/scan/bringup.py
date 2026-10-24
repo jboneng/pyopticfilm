@@ -169,7 +169,6 @@ def bringup_scan_geometry(
     # Do not shrink X to fit a shading table. SF Full window at 1800 is 2592 px;
     # clamping it made USB line length disagree with the ASIC and sheared the
     # frame into a diamond. The shading table covers the acquired columns instead.
-    # Dummy on the ENDPIXEL side is dropped after decode (``usb_end_drop``).
     geometry = compute_geometry(dpi, model=model, area=area)
     geometry = apply_target_lincnt(geometry, int(meta["target_lincnt"]))
 

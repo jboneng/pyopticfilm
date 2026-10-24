@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Frozen 8100 V2 USB ENDPIXEL dummy trim — do not retarget to match new code."""
+"""Frozen 8100 V2 USB ENDPIXEL handling — do not retarget to match new code.
+
+No ENDPIXEL dummy trim: SilverFast's USB lines carry no dummy suffix (#102).
+"""
 
 from __future__ import annotations
 
@@ -27,12 +30,11 @@ def _assemble_passthrough(monkeypatch, geo, rgb):
     return pipe.assemble(b"", geo, dark=None, white=None, expose_base=False)
 
 
-def test_assemble_drops_fixed_usb_end_dummy(monkeypatch):
+def test_assemble_keeps_dark_end_columns(monkeypatch):
     geo = compute_geometry(1800, model=MODEL_8100_V2, area=(0.15, 0.2, 0.7, 0.6))
-    assert geo.usb_end_drop == 24
+    assert geo.usb_end_drop == 0
     h = max(4, geo.lines)
     rgb = np.full((h, geo.pixels, 3), 18_000, dtype=np.uint16)
     rgb[:, -24:, :] = 200
     out = _assemble_passthrough(monkeypatch, geo, rgb)
-    assert out.shape[1] == geo.pixels - 24
-    assert int(out[:, 0, 0].mean()) > 10_000
+    assert out.shape[1] == geo.pixels

@@ -472,6 +472,9 @@ class ImagePipeline:
         rgb = self.reduce_y_oversample(rgb, geometry)
         rgb = self.apply_line_shifts(rgb, geometry)
         rgb = self.apply_y_stagger(rgb, geometry)
+        frame_lines = int(getattr(geometry, "frame_lines", 0) or 0)
+        if 0 < frame_lines < rgb.shape[0]:
+            rgb = rgb[:frame_lines]
         rgb = self.apply_host_downsample(rgb, geometry)
         rgb = trim_to_optical_span(rgb, geometry)
         cap = 0 if geometry.disable_buffer_full_move else int(getattr(geometry, "usb_end_drop", 0) or 0)

@@ -236,7 +236,8 @@ class ScanLabWindow(QMainWindow):
         form.addStretch(1)
 
         tabs = QTabWidget()
-        self.prescan_view = ImageTabPage(default_stem="prescan", allow_crop=True)
+        # Light grey so the dark holder edge stands out against the canvas.
+        self.prescan_view = ImageTabPage(default_stem="prescan", allow_crop=True, background="#c8c8c8")
         self.scan_view = ImageTabPage(default_stem="color_short", allow_load=True)
         self.me_long_view = ImageTabPage(default_stem="color_long", allow_load=True)
         self.merged_view = ImageTabPage(default_stem="merged")

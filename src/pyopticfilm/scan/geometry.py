@@ -58,10 +58,14 @@ class ScanGeometry:
     #: (SE: 150/300 share 600 dpi programming). Integer factors only in practice.
     host_downsample: int = 1
     #: Cap on content-aware trim of USB ENDPIXEL dummy columns after decode
-    #: (image left after ``mirror_x``). The ASIC still returns a per-line
-    #: suffix; shrinking ``ENDPIXEL`` does not remove it. Assemble drops only
-    #: columns that look like dummy, never more than this width.
+    #: (image left after ``mirror_x``), from ``optical_end_inactive_native``.
+    #: 0 on every GL128 model: the holder edge reads dark there too, so any
+    #: cap would cut real columns. Assemble never drops more than this width.
     usb_end_drop: int = 0
+    #: When > 0, assembled rows (at ``asic_dpi``) are cut to this height after
+    #: line shift and unstagger. Default full frames only, from the model's
+    #: ``full_frame_output_inches``.
+    frame_lines: int = 0
 
     @property
     def max_color_shift(self) -> int:
@@ -212,6 +216,12 @@ def _geometry_from_mm(
     lines = int((height_mm * asic_dpi) / MM_PER_INCH)
     if lines < 1:
         raise ValueError("Scan height too small")
+    frame_inches = float(getattr(model, "full_frame_output_inches", 0) or 0)
+    frame_lines = (
+        round(frame_inches * asic_dpi)
+        if is_default_full_frame and not disable_buffer_full_move and frame_inches > 0
+        else 0
+    )
 
     startx = int((tl_x_mm * asic_dpi) / MM_PER_INCH)
     starty = (
@@ -235,9 +245,9 @@ def _geometry_from_mm(
         # ``int(mm×dpi/25.4)`` then × factor undershoots that origin by 2.
         origin_native = offset * optical_res // asic_dpi
         end_inactive = int(getattr(model, "optical_end_inactive_native", 0) or 0)
-        # Dummy clocks sit on USB ENDPIXEL (displayed left after mirror_x).
-        # Shift the programmed window by that width so the remaining optical
-        # span is not STR-heavy (gate clipped left, extra holder on the right).
+        # Models with ENDPIXEL dummy clocks (displayed left after mirror_x)
+        # shift the programmed window by that width so the remaining optical
+        # span is not STR-heavy. GL128 has none: STR/END match SilverFast.
         frame_shift = 0 if disable_buffer_full_move or end_inactive <= 0 else end_inactive
         pixel_startx = (
             origin_native + frame_shift + round(tl_x_mm * optical_res / MM_PER_INCH)
@@ -373,4 +383,5 @@ def _geometry_from_mm(
         area=area,
         host_downsample=host_downsample,
         usb_end_drop=max(0, min(int(usb_end_drop), max(0, pixels - 16))),
+        frame_lines=frame_lines,
     )

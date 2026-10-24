@@ -6,17 +6,14 @@ from __future__ import annotations
 from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
 from pyopticfilm.scan.bringup import bringup_scan_geometry, crop_scan_geometry
 
-NATIVE = 7200
+# SilverFast full-frame STR/END at every captured PPI (docs §10.2). No ENDPIXEL
+# dummy trim or frame shift: SilverFast's USB lines carry no dummy suffix (#102).
 PREVIEW_STR = 242
-FRAME_SHIFT = MODEL_8300I_SE.optical_end_inactive_native
+PREVIEW_END = 10610
 
 
-def test_endpixel_dummy_scales_as_native_clocks():
-    n = MODEL_8300I_SE.optical_end_inactive_native
-    assert n == 96
-    assert n * 1200 // NATIVE == 16
-    assert n * 1800 // NATIVE == 24
-    assert n * 3600 // NATIVE == 48
+def test_no_endpixel_dummy_trim():
+    assert MODEL_8300I_SE.optical_end_inactive_native == 0
 
 
 def test_full_window_str_is_dpi_independent():
@@ -27,9 +24,15 @@ def test_full_window_str_is_dpi_independent():
         assert g.pixels % 2 == 0
         assert g.pixel_endx - g.pixel_startx == g.optical_pixels
         assert g.line_bytes == g.pixels * 3 * (g.depth // 8)
-        assert g.usb_end_drop == 96 * dpi // NATIVE
+        assert g.usb_end_drop == 0
     assert len(set(starts)) == 1
-    assert starts[0] == PREVIEW_STR + FRAME_SHIFT
+    assert starts[0] == PREVIEW_STR
+
+
+def test_full_window_matches_sf_str_end_at_1800():
+    g, _ = bringup_scan_geometry(MODEL_8300I_SE, 1800, profile="preview_safe")
+    assert (g.pixel_startx, g.pixel_endx) == (PREVIEW_STR, PREVIEW_END)
+    assert g.pixels == 2592
 
 
 def test_same_crop_str_matches_at_1800_and_3600():
@@ -38,7 +41,7 @@ def test_same_crop_str_matches_at_1800_and_3600():
     g3600, _ = crop_scan_geometry(MODEL_8300I_SE, 3600, area)
     assert g1800.pixel_startx == g3600.pixel_startx
     assert abs(g1800.pixel_endx - g3600.pixel_endx) < 8
-    assert g3600.usb_end_drop == g1800.usb_end_drop * 2
+    assert g1800.usb_end_drop == g3600.usb_end_drop == 0
 
 
 def test_calib_geometry_does_not_drop_usb_end():

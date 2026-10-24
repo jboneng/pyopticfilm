@@ -396,7 +396,7 @@ notes used here.
 | Parameter | 8100 V2 | 8200i SE | 135i | Verdict |
 |-----------|---------|----------|------|---------|
 | `strpixel_native_units` | yes | yes | unknown | inconclusive |
-| `optical_end_inactive_native` | 96 | 96 | unknown | inconclusive |
+| `optical_end_inactive_native` | 0 | 0 | unknown | same (8300i SE: 0; SilverFast USB lines carry no ENDPIXEL dummy, [#102](https://github.com/jboneng/pyopticfilm/issues/102)) |
 | `image_lincnt_per_line` | 4 | 4 | unknown | inconclusive (8300i SE: 1, see §10.1) |
 | TA window X | 36.58 mm (offset 0.43 mm) | 36.58 mm (offset 0.43 mm) | unknown | inconclusive |
 | TA window Y | 25.59 mm | 25.59 mm | unknown (datasheet strip to 226 mm) | inconclusive |
@@ -793,7 +793,7 @@ differ per unit (SE session 05: 6/16/12; 8300i capture: 28/35/33).
 | Symptom | Capture-backed cause |
 |---------|----------------------|
 | Missing bottom of frame | SE ladder `LINCNT` too short vs V2/8300i full-frame height (~1.35 mm at 7200); SE ladder feed2 13560 vs 8300i ~13128 shifts Y |
-| Missing right of frame | **Not** a STR/END mismatch (242/10610 on both). Remaining candidates: host dummy trim (`optical_end_inactive_native=96`) or crop, not a different USB window |
+| Missing right of frame | **Not** a STR/END mismatch (242/10610 on both). Resolved: the host ENDPIXEL dummy trim and 96-clock window shift (`optical_end_inactive_native=96`) are gone on all GL128 models, so the image is SilverFast's 2592 px at 1800 ([#102](https://github.com/jboneng/pyopticfilm/issues/102)) |
 | Slower than SilverFast | Image `0xA5`/`0xAB` and dummy **differ** from SE; CUSTOM slope ROM. Larger `0xA5` is not proven to mean a faster clock |
 | Colour ASIC shading white clip (≥65000) | SE per-scan sensor timing (§10.7); also SF shading/image exposure **15000** and different white-strip clocks/dummies vs SE 14000 + SE `shading_strip_clocks` |
 

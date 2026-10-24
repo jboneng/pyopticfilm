@@ -313,6 +313,7 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "ld_shift_g",
         "ld_shift_b",
         "lincnt_includes_line_shift",
+        "full_frame_output_inches",
         "y_oversampled",
         "stagger_y_by_dpi",
         "register_dpiset_by_dpi",
@@ -378,7 +379,10 @@ class Gl128Common:
     pixel_alignment: int = 1
     optical_span_alignment: int = 4
     strpixel_native_units: bool = True
-    optical_end_inactive_native: int = 96
+    #: Native clocks trimmed from the USB ENDPIXEL side (and shifted into the
+    #: window). SilverFast reads the full STR/END span and its USB lines carry
+    #: no ENDPIXEL dummy on any GL128 model, so nothing is trimmed (#102).
+    optical_end_inactive_native: int = 0
     min_asic_dpi: int = MIN_ASIC_DPI
 
     x_size_mm: float = 36.0
@@ -396,6 +400,10 @@ class Gl128Common:
     ld_shift_g: int = 24
     ld_shift_b: int = 48
     lincnt_includes_line_shift: bool = False
+    #: Output height of the default full frame. SilverFast's full-frame
+    #: ``LINCNT`` is one inch + ``ld_shift_b`` + 1 at every PPI and it returns
+    #: the inch (1813 → 1800 rows at 1800 ppi, #102).
+    full_frame_output_inches: float = 1.0
     y_oversampled: bool = True
 
     stagger_y_by_dpi: Mapping[int, tuple[int, ...]] = field(

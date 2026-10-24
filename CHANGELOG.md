@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **GL128 frames were 24 px narrower than SilverFast at 1800 dpi and lost holder/film on the left** (8200i SE, 8100 V2, 8300i SE) ([#102](https://github.com/jboneng/pyopticfilm/issues/102)): pyopticfilm shifted the image window by 96 native clocks (STR/END 338/10706 instead of SilverFast's 242/10610) and trimmed up to 24 dark columns from the USB ENDPIXEL side, which is the image left after mirroring. The trim was added for a near-zero band that pyopticfilm, not SilverFast, produced at that edge. SilverFast's raw USB lines from the 8200i SE and 8300i SE have no such band, and a live 8200i SE scan with the current driver now shows the holder edge there instead. The trim was cutting real holder and film columns. All three models now program SilverFast's window and keep every column: 2592 px at 1800 dpi for a full frame, the same as SilverFast.
+
+### Changed
+
+- **GL128 default full frames are exactly one inch tall, like SilverFast: 1800 rows at 1800 ppi** instead of 1801 ([#102](https://github.com/jboneng/pyopticfilm/issues/102)). SilverFast reads one inch plus the colour line shift plus one row, and returns the inch. pyopticfilm returned whatever was left after the line shift, so from 1800 ppi upwards the frame came out 1 to 5 rows too tall (for example 1801 at 1800 ppi and 3602 at 3600 ppi). On the 8200i SE, 8100 V2 and 8300i SE, a full-frame scan with no `area` is now cut to the inch after line shift and unstagger. Scanner registers and travel are unchanged. Crops and Scan Lab's Full window keep their current height.
+- **Scan Lab prescan background** is light grey instead of near-black, so dark film-holder edges stand out against the canvas. The other image tabs keep the dark background.
+
+### Notes for integrators
+
+- GL128 images are wider by `96 × dpi / 7200` px (16 / 24 / 48 at 1200 / 1800 / 3600 dpi) and show slightly more of the frame on the left. Colour shading cached for the old window is re-measured automatically on the first scan, because the cache is keyed by window start and width.
+
 ## [1.3.7] - 2026-10-23
 
 ### Added

@@ -84,14 +84,21 @@ def gray16_to_qimage(gray: np.ndarray) -> QImage:
 class CropImageView(QWidget):
     """Scales a scan preview and optionally lets the user drag a crop rectangle (0..1)."""
 
-    def __init__(self, parent: QWidget | None = None, *, allow_crop: bool = True) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        allow_crop: bool = True,
+        background: str = "#1a1a1a",
+    ) -> None:
         super().__init__(parent)
         self._allow_crop = allow_crop
+        self._background = QColor(background)
         self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._label.setMinimumSize(240, 180)
-        self._label.setStyleSheet("background: #1a1a1a; color: #888;")
+        self._label.setStyleSheet(f"background: {background}; color: #888;")
         self._label.setText("No image")
         self._pixmap = QPixmap()
         self._raw_rgb: np.ndarray | None = None
@@ -233,7 +240,7 @@ class CropImageView(QWidget):
             Qt.TransformationMode.FastTransformation,
         )
         canvas = QPixmap(self._label.size())
-        canvas.fill(QColor("#1a1a1a"))
+        canvas.fill(self._background)
         painter = QPainter(canvas)
         painter.drawPixmap(ir.topLeft(), scaled)
         if self._allow_crop:
@@ -265,13 +272,14 @@ class ImageTabPage(QWidget):
         default_stem: str = "scan",
         allow_load: bool = False,
         allow_crop: bool = False,
+        background: str = "#1a1a1a",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._default_stem = default_stem
         self._dpi: int | None = None
         self._is_gray = False
-        self._view = CropImageView(self, allow_crop=allow_crop)
+        self._view = CropImageView(self, allow_crop=allow_crop, background=background)
         self._caption = QLabel("")
         self._caption.setWordWrap(True)
         self._caption.setStyleSheet("color: #aaa; padding: 2px 6px;")
