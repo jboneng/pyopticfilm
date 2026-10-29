@@ -37,9 +37,11 @@ CACHE_IDENT = "pyopticfilm"
 #: v17: GL128 shading-strip clocks follow the strip width (SE / V2 dark and white strips).
 #: v18: GL128 shading strips use SilverFast's ``0x1D`` and white-strip motor table.
 #: v19: GL128 AFE probes after a throwaway strip (#124); older gains depended on idle time.
-CACHE_VERSION = 19
+CACHE_VERSION = 20
 DARK_SETTLE_S = 0.2
 WHITE_SETTLE_S = 0.5
+#: Reject host calib when dark is this bright relative to white (lamp leak).
+DARK_WHITE_MAX_RATIO = 0.5
 
 
 def colour_shading_failure_message(reason: str) -> str:
@@ -855,7 +857,8 @@ class Calibrator:
                 return
             self.asic.home()
 
-        if mode == "infrared":
+        ir_dark = getattr(self.model, "asic", "") == "GL845"
+        if mode == "infrared" and not ir_dark:
             dark = np.zeros((scan_geo.pixels, 3), dtype=np.uint16)
             logger.info("IR calib: skipping dark (genesys behaviour)")
         else:
@@ -881,6 +884,15 @@ class Calibrator:
             label="white",
         )
         _safe_home()
+
+        if (mode != "infrared" or ir_dark) and not is_gl128:
+            dark_mean = float(dark.mean())
+            white_mean = float(white.mean())
+            if dark_mean > DARK_WHITE_MAX_RATIO * white_mean:
+                raise CalibrationError(
+                    f"Dark capture is not dark (dark mean {dark_mean:.0f} vs white "
+                    f"{white_mean:.0f}); the lamp stayed on during the dark capture"
+                )
 
         afe_offsets = getattr(self.asic, "last_afe_offsets", None)
         afe_gains = getattr(self.asic, "last_afe_gains", None)
@@ -944,7 +956,8 @@ class Calibrator:
             lamp_on=lamp_on,
             start_motor=start_motor,
         )
-        rgb = self.pipeline.assemble(raw, geometry)
+        # Raw linear columns: the film-base stretch would lift dark to white's peak.
+        rgb = self.pipeline.assemble(raw, geometry, expose_base=False)
         avg = np.median(rgb.astype(np.float32), axis=0)
         out = np.clip(np.rint(avg), 0, 65535).astype(np.uint16)
         logger.info(

@@ -29,13 +29,18 @@ logger = get_logger(__name__)
 # Home/park must never run unbounded.
 DEFAULT_HOME_TIMEOUT_S = 30.0
 HOME_POLL_S = 0.1
+MOTOR_STOP_TIMEOUT_S = 1.0
 FE_BUSY_TIMEOUT_S = 5.0
-# Large feed length used while seeking home (genesys reverse-home uses ~40000).
+# SANE GL846 reverse-home scan starts at this motor position.
 HOME_FEED_STEPS = 40000
 
 
 class Gl845:
     """High-level ASIC ops: boot, lamp, home/park, status."""
+
+    #: SANE-style reverse mini-scan home and verified stop (hardware-validated
+    #: on GL845 only; GL843/GL842 subclasses keep the AGOHOME/FEEDL path).
+    REVERSE_SCAN_HOME: bool = True
 
     def __init__(
         self,
@@ -64,6 +69,19 @@ class Gl845:
 
     def is_at_home(self) -> bool:
         return self.read_status_reliable().is_at_home
+
+    @property
+    def is_initialized(self) -> bool:
+        return self._initialized
+
+    def is_motor_stopped(self) -> bool:
+        """Match SANE's GL845 stop check across status and data/motor flags."""
+        status = self.read_status()
+        flags = self.protocol.read_register(self.registers.REG_0x40)
+        return (
+            not status.is_motor_enabled
+            and not flags & (self.registers.MOTMFLG | self.registers.DATAENB)
+        )
 
     def is_cold_boot(self) -> bool:
         """True when PWRBIT in 0x06 is clear (fresh power-up)."""
@@ -287,10 +305,35 @@ class Gl845:
             logger.debug("USB speed probe failed (continuing): %s", exc)
 
         cold = self.is_cold_boot()
+        # Only a warm (already powered) ASIC can hold a scan left by a dead process.
+        if not cold and self.REVERSE_SCAN_HOME and self._stop_abandoned_scan():
+            cold = True
         self.asic_boot(cold=cold)
         self.set_frontend_init()
         self._initialized = True
         logger.info("ASIC init complete")
+
+    def _stop_abandoned_scan(self) -> bool:
+        """Stop a scan a previous process left running; True when one was found.
+
+        A host that dies mid-scan leaves SCAN set and image data in the buffer.
+        Sending motor commands into that state hung a 7600i v2 until power-cycled,
+        so clear SCAN, drain the bulk stream, and let ``init`` soft-reset.
+        """
+        reg01 = self.protocol.read_register(self.registers.REG_0x01)
+        status = self.read_status()
+        if not (reg01 & self.registers.SCAN) and status.is_buffer_empty and not status.is_motor_enabled:
+            return False
+        logger.warning(
+            "Stopping a scan left running by an earlier session (reg01=0x%02x status=0x%02x)",
+            reg01,
+            status.raw,
+        )
+        self.protocol.write_register(self.registers.REG_0x01, reg01 & ~self.registers.SCAN)
+        self.protocol.write_register(self.registers.REG_0x0F, 0x00)
+        drained = self.protocol.abort_bulk_stream()
+        logger.info("abandoned scan: drained %d bytes; soft-resetting", drained)
+        return True
 
     # --- lamp -----------------------------------------------------------
 
@@ -341,8 +384,36 @@ class Gl845:
         self.protocol.write_register(self.registers.REG_0x6C, val)
         self._reg_cache[0x6C] = val
 
-    def stop_motor(self) -> None:
-        """Stop scan/motor action with a short settle (genesys stop_action subset)."""
+    def stop_motor(self, *, timeout_s: float = MOTOR_STOP_TIMEOUT_S) -> None:
+        """Stop scan/motor action and verify the ASIC reports the motor idle."""
+        if not self.REVERSE_SCAN_HOME:
+            self._stop_motor_legacy()
+            return
+        if timeout_s < 0:
+            raise ValueError("timeout_s must be non-negative")
+
+        self.update_home_sensor_gpio()
+        if self.is_motor_stopped():
+            return
+
+        reg01 = self.protocol.read_register(self.registers.REG_0x01)
+        reg01 &= ~self.registers.SCAN
+        self.protocol.write_register(self.registers.REG_0x01, reg01)
+        self._reg_cache[0x01] = reg01
+
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if self.is_motor_stopped():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(HOME_POLL_S, remaining))
+
+        raise MotorTimeoutError(f"Could not stop GL845 motor within {timeout_s:.1f}s")
+
+    def _stop_motor_legacy(self) -> None:
+        """Unverified stop kept for GL843/GL842 until their home path is re-validated."""
         self.update_home_sensor_gpio()
         reg01 = self.protocol.read_register(self.registers.REG_0x01)
         reg01 &= ~self.registers.SCAN
@@ -364,7 +435,7 @@ class Gl845:
                 return
             time.sleep(HOME_POLL_S)
         raise MotorTimeoutError(
-            f"Head did not reach home within {timeout_s:.0f}s — motor stopped for safety."
+            f"Head did not reach home within {timeout_s:.0f}s"
         )
 
     def home(self, *, timeout_s: float = DEFAULT_HOME_TIMEOUT_S, wait: bool = True) -> None:
@@ -398,6 +469,15 @@ class Gl845:
             )
 
     def _start_home_seek(self) -> None:
+        if not self.REVERSE_SCAN_HOME:
+            self._start_home_seek_legacy()
+            return
+        # The mini-scan register block lives with the GL845 scan configure.
+        from pyopticfilm.scan.session import ScanSession
+
+        ScanSession(self, self.model, None).start_home_seek(starty=HOME_FEED_STEPS)
+
+    def _start_home_seek_legacy(self) -> None:
         r = self.registers
         # Motor: power on, auto-go-home, reverse, not-home flag; clear fastfed
         reg02 = r.MTRPWR | r.AGOHOME | r.NOTHOME | r.MTRREV
@@ -418,5 +498,5 @@ class Gl845:
         logger.info("home seek started (feed=%d)", HOME_FEED_STEPS)
 
     def park(self, *, timeout_s: float = DEFAULT_HOME_TIMEOUT_S) -> None:
-        """Park is home for the OpticFilm 8200i (no separate rest position)."""
+        """Park GL845 OpticFilm carriages at home."""
         self.home(timeout_s=timeout_s, wait=True)
