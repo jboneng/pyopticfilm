@@ -362,10 +362,12 @@ class MockScannerTransport(FakeUsbTransport):
     def _bulk_in_bytes(self, size: int) -> bytes:
         """Chunky RGB16 LE: R=x, G=y, B=x XOR y (visible layout/channel bugs).
 
-        Values drop to near-black with neither the lamp nor the IR LED on.
+        Values scale with LPERIOD (0x38) relative to 14000 so exposure brackets differ,
+        and drop to near-black with neither the lamp nor the IR LED on.
         """
         width = self._line_width()
-        gain_num, gain_den = 1, 1
+        lperiod = ((self.registers.get(0x38, 0) & 0xFF) << 8) | (self.registers.get(0x39, 0) & 0xFF)
+        gain_num, gain_den = (lperiod, 14000) if lperiod else (1, 1)
         lit = self.registers.get(0x03, 0) & _R.LAMPPWR or self.registers.get(0xA8, 0) & _R.IR_LAMP_A8_MASK
         if not lit:
             gain_den *= 64  # dark frame: no light source on

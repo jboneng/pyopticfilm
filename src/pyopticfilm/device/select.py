@@ -43,6 +43,28 @@ MODEL_7600I_V2 = MODEL_8200I.__class__(
     name="plustek-opticfilm-7600i-v2",
     model="OpticFilm 7600i (v2)",
     usb_product_id=PID_OPTICFILM_7600I,
+    # Y profile (900 dpi): open light path 0.5-5 mm from home,
+    # holder plastic 6.6-28.5 mm, film window from 29 mm. The SANE TA offset
+    # (28.5 mm) puts the white strip on the holder edge.
+    calib_white_home_y_mm=1.5,
+    # Bright white columns land here after the PGA search (headroom for ~5% column ripple).
+    afe_white_target=60000,
+    # B read noise (~72 DN) over the 2 mm strip (~141 lines @1800) left ~0.4%
+    # offset-type column banding in dense blue; average the dark over more lines.
+    calib_dark_lines=1024,
+    # Feed to the film at low-res speed first; the image pass feeds the last 400 steps.
+    prefeed_margin_steps=400,
+    # The 900-dpi pre-feed scan coasts ~5.9 steps past its nominal stop
+    # (two runs at 3600 dpi: +5.90/+5.91 px vs a direct feed).
+    prefeed_offset_steps=6,
+    # Read noise is pre-PGA (same input-referred floor at gain 1.5x and 6x),
+    # so a prescan raises LPERIOD to bring the film peak up to this level.
+    # The 900-dpi prescan reads ~9% below 1800 dpi, hence the margin.
+    auto_exposure_target=48000,
+    # LPERIOD 42000/56000/65000 ran clean at 1800, 3600 and 7200 dpi (feed
+    # stall-checked, parked, linear levels where unclipped).
+    me_long_clamp_max=65000,
+    me_max_exposure_ratio=4.6,
 )
 
 KNOWN_MODELS: tuple[FilmModel, ...] = (

@@ -158,6 +158,7 @@ def compute_calib_geometry(
     resolution: int,
     *,
     model: FilmModel = MODEL_8200I,
+    height_mm: float | None = None,
 ) -> ScanGeometry:
     """Geometry for dark/white shading strip (genesys ``init_regs_for_shading``).
 
@@ -171,16 +172,22 @@ def compute_calib_geometry(
     if resolution not in model.resolutions_dpi:
         raise ValueError(f"Unsupported resolution {resolution}")
 
-    # After move-to-TA, white-calib Y offset is relative to TA sensor position.
-    move_mm = model.y_offset_calib_white_ta_mm - model.y_offset_sensor_to_ta_mm
-    starty = int((move_mm * model.motor_base_ydpi) / MM_PER_INCH)
-    # Head is already at TA for white; dark uses same regs but motor off.
-    # Absolute TA feed from home for our simplified path:
-    ta_starty = int((model.y_offset_ta_mm * model.motor_base_ydpi) / MM_PER_INCH)
-    starty = ta_starty + starty
+    home_white_mm = getattr(model, "calib_white_home_y_mm", None)
+    if home_white_mm is not None:
+        # Measured open light path between home and the holder (no plastic, no film).
+        starty = int((float(home_white_mm) * model.motor_base_ydpi) / MM_PER_INCH)
+    else:
+        # After move-to-TA, white-calib Y offset is relative to TA sensor position.
+        move_mm = model.y_offset_calib_white_ta_mm - model.y_offset_sensor_to_ta_mm
+        starty = int((move_mm * model.motor_base_ydpi) / MM_PER_INCH)
+        # Head is already at TA for white; dark uses same regs but motor off.
+        # Absolute TA feed from home for our simplified path:
+        ta_starty = int((model.y_offset_ta_mm * model.motor_base_ydpi) / MM_PER_INCH)
+        starty = ta_starty + starty
 
     width_mm = model.x_size_calib_mm
-    height_mm = model.y_size_calib_ta_mm
+    if height_mm is None:
+        height_mm = model.y_size_calib_ta_mm
     # Calib uses startx=0 in SANE; optical STR still gets output_pixel_offset.
     return _geometry_from_mm(
         resolution,

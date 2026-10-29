@@ -135,6 +135,7 @@ def test_geometry_for_each_canonical_model():
 
 def test_infrared_caps():
     assert MODEL_8200I.supports_infrared is True
+    assert MODEL_7600I_V2.supports_infrared is True
     assert MODEL_7400.supports_infrared is False
     assert MODEL_7200I.supports_infrared is True
     assert MODEL_7200_V2.supports_infrared is False

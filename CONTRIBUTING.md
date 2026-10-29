@@ -44,8 +44,9 @@ asks. Every `scan_ready` model must have a lock folder.
 
 CI has no scanner. Protocol goldens and lock tests do not prove motors, AFE, or
 USB races. Before flipping `scan_ready` or changing a model's lock oracles,
-confirm on that hardware: park, full-frame 1200 / 1800 / 7200, a crop, ME, and
-IR if the model has an IR channel. See
+confirm on that hardware: park; full-frame scans at representative low, middle,
+and maximum supported resolutions; a crop; multi-exposure if implemented for
+that model; and IR if the model supports it. See
 [docs/scanner-validation.md](docs/scanner-validation.md).
 
 ## Development

@@ -144,6 +144,11 @@ def align_pass_to_reference_banded(reference: np.ndarray, moving: np.ndarray) ->
 
 def align_ir_to_rgb(rgb: np.ndarray, ir: np.ndarray) -> np.ndarray:
     """IR→RGB alignment via structural / luminance registration."""
+    return align_ir_to_rgb_result(rgb, ir)[0]
+
+
+def align_ir_to_rgb_result(rgb: np.ndarray, ir: np.ndarray) -> tuple[np.ndarray, Shift2D]:
+    """Like :func:`align_ir_to_rgb` but also returns the shift actually applied."""
     result = estimate_translation(
         rgb,
         ir,
@@ -152,6 +157,5 @@ def align_ir_to_rgb(rgb: np.ndarray, ir: np.ndarray) -> np.ndarray:
     )
     if not result.accepted:
         # Fall back to plain luminance translation (historical path).
-        aligned, _ = align_pass_to_reference(rgb, ir)
-        return aligned
-    return apply_transform(ir, result.transform, method="linear")
+        return align_pass_to_reference(rgb, ir)
+    return apply_transform(ir, result.transform, method="linear"), result.shift

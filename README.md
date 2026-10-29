@@ -22,7 +22,7 @@ Support is one of:
 | OpticFilm 8200i | `07b3:130d` | GL845 | Protocol validated (setup traces; scan locked) |
 | OpticFilm 8100 | `07b3:130c` | GL845 | Experimental |
 | OpticFilm 7600i v1 | `07b3:0c3b` | GL843 | **Hardware tested** ([notes](docs/opticfilm-7600i-v1.md)) |
-| OpticFilm 7600i v2 | `07b3:0c3b` | GL845 | Experimental |
+| OpticFilm 7600i v2 | `07b3:0c3b` | GL845 | Experimental ([notes](docs/opticfilm-7600i-v2.md)) |
 | OpticFilm 7500i | `07b3:0c13` | GL843 | Experimental |
 | OpticFilm 7400 (v1 / v2) | `07b3:0c3a` | GL845 / GL843 | Experimental |
 | OpticFilm 7300 | `07b3:0c12` | GL843 | Experimental |

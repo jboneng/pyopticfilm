@@ -10,6 +10,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Fixed multi-exposure** (GL128: 8200i SE, 8100 V2, 8300i SE). `scan(multi_exposure=True, me_long_mode="fixed")` scans the long pass at one exposure per model on every frame, as SilverFast does, instead of metering the short pass: 42000 (3× short) on the 8200i SE and 8100 V2, 60000 (4× short) on the 8300i SE, the value in that model's SilverFast ME captures. The value is the new model field `me_fixed_long_exposure` and still goes through the normal long clamp (14000–85000). Everything after the long pass is unchanged, and `last_me_debug.exposure_reason` reads `"fixed"`. The default stays `"adaptive"`; a manual `me_long_exposure` still wins. Scan Lab has a **Fixed ME long (SilverFast-style)** toggle, and its CLI takes `--me-long-mode fixed`.
   - **Hardware.** Not yet run on hardware in this mode. 42000 is the long exposure the adaptive path already uses as its floor on the 8200i SE and 8100 V2; 60000 on the 8300i SE comes from its SilverFast captures and is inside the clamp the adaptive path already scans with.
+- Add an experimental sequential color + infrared scan path for IR-capable
+  GL845 models (8200i, 7600i v2). Covered by mock-scanner tests and supervised
+  full-frame colour + IR runs on a 7600i v2 at 900, 1800 and 3600 dpi.
+- Add experimental GL845 multi-exposure (`multi_exposure=True`): a short pass
+  at the model LPERIOD, an adaptive long pass at a higher LPERIOD (clamped to
+  the hardware-verified envelope), and the shared SNR/IVW merge. It can be
+  combined with `infrared=True`. Bracket planes are exposed through
+  `Scanner.last_me_debug`. On the 7600i v2 the LPERIOD envelope (up to 65000)
+  is hardware-validated at 1800/3600/7200 dpi, and long/short is linear to
+  ~2%.
+- 7600i v2 per-channel AFE gain search on the open-light white strip
+  (`afe_white_target`): table gains saturated blue.
+- 7600i v2 single-pass auto exposure (`auto_exposure_target`): a 900-dpi
+  prescan raises LPERIOD so the film peak nears the target, and the flat-field
+  white scales by the same ratio. Read noise is pre-PGA (the input-referred
+  floor is identical at 1.5× and 6× gain), so exposure, not gain, is the SNR
+  lever. Densest-blue noise dropped 36%. `single_pass_exposure` now works on
+  GL845 as a manual LPERIOD, clamped to the validated envelope.
+- 7600i v2 low-resolution pre-feed (`prefeed_margin_steps`). The feed to the
+  film ran at scan speed (time ∝ dpi × LPERIOD: 274 s at 7200 dpi/65000). A
+  few-line 900-dpi scan now covers it, stopping 400 steps short, and a measured
+  `prefeed_offset_steps=6` corrects its coast. A 3600-dpi crop at LPERIOD 14000
+  landed +0.01 px (1800 dpi) and −0.42 px (7200 dpi) from a direct feed.
+  Feed + crop time: 50.5 → 10.4 s at 1800 and 132.5 → 19.8 s at 7200.
+- `ScanImage.ir_tracks_image` (and `pyopticfilm.image.infrared_tracks_image`)
+  flags an IR plane that records the picture instead of just dust. Silver
+  black-and-white film (HP5, Tri-X, ...) blocks IR, so dust removal on it
+  would erase image detail. The check uses block-averaged IR-vs-visible
+  correlation (>0.8) together with IR spread (>0.2) or, for low-contrast
+  frames, IR spread at least half the visible spread. On a 7600i v2, HP5 Plus
+  measured 0.76 spread / 0.999 corr / 0.995 ratio, Tri-X 400
+  1.36 / 0.999 / 1.047, and a colour negative 0.036 / 0.60 / 0.053. GL845 colour + IR scans
+  log a warning when it trips; `ir` is still returned.
 
 ### Fixed
 
@@ -97,6 +130,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   calibration frames are assembled linearly, and a dark frame brighter than
   half the white is rejected. The calibration cache version is bumped, so
   stale entries are ignored.
+- **7600i v2 white strip sat on the holder edge.** The SANE TA offset
+  (28.5 mm) puts it on the black holder plastic. A Y light profile located the
+  open light path 0.5–5 mm from home, and calibration now uses
+  `calib_white_home_y_mm=1.5`. Calibrated scans no longer show column banding
+  or colour casts.
 - **GL845 IR calibration assumed a zero dark level.** At high IR PGA gains the
   real offset reached 3.2–5.4k on a 7600i v2, about 8% of white. Leaving it in
   flattened the dust contrast. IR calibration now captures a lamp-off/IR-off
@@ -110,6 +148,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so long LPERIODs legitimately take longer (68.7 s at 1800 dpi/65000). The
   timeout now scales with LPERIOD, and a stall (10 s without step progress)
   fails early.
+- **7600i v2 column banding from a noisy dark reference.** The dark was a
+  median over the 2 mm strip (~141 lines at 1800 dpi), which left 5–8 DN of
+  per-column error (blue 7.7 DN). That repeats on every image line. The dark is
+  now a mean over 1024 lines (`calib_dark_lines`): per-column error is 1.5–2.4 DN,
+  and single-column blue banding on an NC400 sky went from 0.24% to below
+  measurement. Calibration takes ~5 s longer.
 
 ### Changed
 
@@ -130,6 +174,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   settle after it turns on. Stop failures no longer hide the original capture
   error, and single-pass GL845 scans park the head after a failure.
   GL843/GL842 keep their previous home/stop path.
+- GL845 multi-pass scans (colour + IR, multi-exposure) park the head after a
+  cancel or failure. GL843/GL842 still reject them with `NotImplementedError`.
 
 ### Notes for integrators
 

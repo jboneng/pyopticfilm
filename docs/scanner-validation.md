@@ -176,15 +176,55 @@ fixture drift is explainable.
 Parser coverage is exercised in CI against
 `tests/data/sane_debug_sample.log` (a canned snippet, not a full scan).
 
-### Lab bring-up (GL845 8200i, does not flip `scan_ready`)
+### Lab bring-up (GL845 8200i / 7600i v2, does not flip `scan_ready`)
 
 ```bash
 uv run python tools/bringup_gl845_8200i.py --dry-run
-uv run python tools/bringup_gl845_8200i.py --allow-unvalidated \
-    --steps open,status,lamp,home,tiny,park,calib,ir
+uv run python tools/bringup_gl845_8200i.py --model 7600i-v2 --steps open,status
+uv run python tools/bringup_gl845_8200i.py --model 7600i-v2 \
+    --allow-unvalidated --steps init,home,tiny,park
 ```
 
-Flip `MODEL_8200I.scan_ready` only after a successful image + park on hardware.
+The 7600i v2 shares the GL845 8200i session/tables in this release. The tool
+checks the selected model identity before issuing commands. Use `--device-id`
+when multiple Plustek scanners are connected. ASIC init and motor/image steps
+require the explicit lab override and do not change `scan_ready`.
+
+Flip only the tested model's `scan_ready` flag after its hardware sign-off
+checklist below passes; a tiny scan alone is not sufficient.
+
+### USB Device Identification (7600i v1 vs v2)
+
+Both the OpticFilm 7600i v1 and 7600i v2 share the same USB Vendor ID (`0x07b3`)
+and Product ID (`0x0c3b`). The hardware revision is distinguished by the USB
+device release number (`bcdDevice`):
+
+- **7600i v1**: `bcdDevice == 0x0400`, powered by the Genesys Logic **GL843** ASIC.
+- **7600i v2**: `bcdDevice == 0x0605` (1541 decimal), powered by the Genesys Logic **GL845** ASIC.
+
+`pyopticfilm.device.select.model_for_device(product_id, bcd_device)` inspects
+`bcdDevice` to disambiguate: `0x0400` resolves to `MODEL_7600I_V1`, while
+`0x0605` resolves to `MODEL_7600I_V2`. To verify `bcdDevice` on an attached
+scanner, use `tools/inspect_bcddevice.py` or inspect PyUSB device descriptors.
+
+### 7600i v2 bring-up status
+
+Hardware findings, settings and open work for this model are in [opticfilm-7600i-v2.md](opticfilm-7600i-v2.md).
+
+Tested on physical OpticFilm 7600i v2 hardware (`07b3:0c3b`, `bcdDevice=0x0605`):
+
+- **Open & Status**: Successful (device detected, status registers read).
+- **Init**: Successful (GL845 registers configured). Note: `init()` must be called before `home()`.
+- **Lamp**: Successful (white LED toggles on/off).
+- **Home / Park**: The old direct AGOHOME/FEEDL seek timed out after a full-area 3600-dpi scan; status reported `is_at_home=False` and `is_motor_enabled=True`. A SilverFast prescan recovered the carriage. The replacement SANE-style reverse mini-scan and stop verification passed supervised tests from a replugged/not-home state, after a 900-dpi crop, and after full-area 900-, 3600-, and 7200-dpi scans. Each ended at home with motor idle and lamp off.
+- **Tiny scan**: Successful at 900 dpi (88x193 RGB16), 1800 dpi, and 3600 dpi (354x768 RGB16).
+- **Full-area scans**: Successful at 900 dpi (1287x885 RGB16), 3600 dpi (5136x3543 RGB16), and 7200 dpi (10288x7086 RGB16). The 3600-dpi TIFF and raw NumPy capture were verified locally. Large captures are bring-up artifacts, not CI fixtures.
+- **Calibration**: The earlier 900/1800-dpi "passes" were invalid: the dark strip was captured with the lamp on, so dark ≈ white. After the fix, dark reads about 1.6–1.8k against a white near 55k. White is now taken on the open light path 1.5 mm from home (`calib_white_home_y_mm`), not on the holder edge at the SANE TA offset. A per-channel PGA search puts the white p99 near 60k (gains ≈ 38/24/27). Full-frame 1800- and 3600-dpi calibrated scans show no column banding or colour cast.
+- **Exposure**: The input-referred read noise is the same at 1.5× and 6× PGA gain, so exposure is the SNR lever. Single-pass auto exposure (900-dpi prescan) raised LPERIOD to about 3.2× on a dense negative and cut densest-blue noise by 36%. LPERIOD up to 65000 ran clean at 1800, 3600 and 7200 dpi (stall-checked feed, parked).
+- **IR testing**: Full-area combined color + IR succeeded at 900 dpi; RGB and IR planes were both uint16 and 1287x885. Home between passes and final park succeeded. The hardware IR LED switches via GPIO 0xA8 (`IR_LAMP_A8_MASK`).
+- **Sign-off matrix (Wolfen NC400, auto exposure, pre-feed)**: Full-frame calibrated colour at 900 dpi (1287x885, 75 s) and 7200 dpi (10288x7086, 239 s). Multi-exposure full frame at 900, 1800 and 3600 dpi, plus a 7200-dpi 50% crop. The ME long pass was 64400 (4.6x), and measured long/short ratios ran 4.55–4.76 per channel. Clipping was at most 0.024%. Every scan ended at home with the motor idle.
+- **Pre-feed**: The feed to the film runs at scan speed, so its time scales with dpi x LPERIOD. A few-line 900-dpi pre-feed covers it and stops 400 steps short. With a measured 6-step coast correction, it lands within +0.01 px (1800 dpi) and -0.42 px (7200 dpi) of a direct feed. At 7200 dpi, feed plus crop time drops from 132 s to 20 s.
+- **Multi-exposure**: At 1800 dpi, long/short measured 4.69/4.72/4.66 against a nominal 4.60 (LPERIOD 14000/64400), with a sub-pixel pass shift. Full-frame 3600-dpi colour + IR with auto exposure: IR shift 0.05 px, the head parked, and the IR plane shows dust on a flat field.
 
 ## What protocol validation can establish
 
@@ -208,10 +248,12 @@ CI cannot run a physical scanner. Before flipping `scan_ready` or changing that
 model's files under `tests/model_lock/`, confirm on **that** hardware:
 
 - Park / AGOHOME return to home
-- Full-frame colour at 1200, 1800, and 7200 dpi
+- Full-frame colour at the model's supported low, middle, and maximum resolutions
 - A cropped window
-- Multi-exposure colour
+- Multi-exposure colour only where implemented for that ASIC/model
 - Infrared, if the model has an IR channel
+
+For the 7600i v2, the supported resolution ladder is 900, 1800, 3600, and 7200 dpi. GL845 multi-exposure is experimental. Before ME is listed as supported, record a supervised ME scan at each validated resolution that confirms the long LPERIOD envelope (`me_long_clamp_max`).
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
