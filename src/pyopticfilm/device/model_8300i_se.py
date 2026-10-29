@@ -39,8 +39,8 @@ All divergent knobs below come from SilverFast 9 USBPcap full-frame captures
 
 **IR / ME**
     Infrared is present (``0x37`` → ``0xB4`` on most IR passes; ``0xF4``
-    seen at 150/2400).  Adaptive ME long exposure 60000 observed at 1200
-    and 3600.
+    seen at 150/2400).  ME long exposure 60000 observed at 1200 and 3600
+    (``me_fixed_long_exposure``).
 
 **scan_ready**
     ``True`` after hardware sign-off (see ``docs/scanner-validation.md``).
@@ -215,6 +215,9 @@ class Model8300iSE(Gl128Common):
 
     exposure_lperiod: int = 15000
     exposure_short: int = 15000
+    #: ME long pass for ``me_long_mode="fixed"``: 4x the short. SilverFast's ME
+    #: captures program 60000 at both 1200 and 3600 ppi.
+    me_fixed_long_exposure: int = 60000
     pixel_clock_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(_PIXEL_CLOCK_BY_DPI_8300I)
     )

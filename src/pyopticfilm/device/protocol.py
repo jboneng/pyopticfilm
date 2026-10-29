@@ -125,6 +125,7 @@ class Gl128Model(FilmModel, Protocol):
     pixel_clock_long_by_dpi: Mapping[int, int]
     exposure_short: int
     exposure_long: int
+    me_fixed_long_exposure: int
     me_adaptive_min_exposure: int
     me_adaptive_max_exposure: int
     me_hardware_max_exposure: int
@@ -146,7 +147,7 @@ class Gl128Model(FilmModel, Protocol):
     asic_clock_boot_0x8c: int
     asic_clock_scan_0x8c: int
     asic_boot_0x0b: int
-    #: Multiplier on the per-channel exposure table for a single-pass image at
+    #: Multiplier on the scan motor table period for a single-pass image at
     #: native optical resolution (oversample 1). ``REG_EXPOSURE`` is unchanged.
     native_image_exposure_factor: int
     #: Max bytes per image ``VALUE_BUFFER`` announce and per bulk IN request

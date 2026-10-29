@@ -17,7 +17,7 @@ Differences from :class:`~pyopticfilm.asic.gl845.Gl845` that matter here:
   transparency operation and ``AVEENB`` (``0x40``) is never set;
 * positioning is two capture-constant feeds from home, then the image pass
   runs with ``FEEDL=1`` and ``AGOHOME`` so the carriage parks afterwards —
-  see ``captures/8200i-se/MOTOR.md``.
+  see ``docs/gl128-model-comparison.md`` section 4.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from pyopticfilm.asic.status import ScannerStatus
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.protocol import Gl128Model
 from pyopticfilm.device.tables_8200i_se import exposure_table
-from pyopticfilm.exceptions import AsicError, MotorTimeoutError, ScanError
+from pyopticfilm.exceptions import AsicError, MotorTimeoutError, ScanError, ScannerStuckError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calib_gl128 import (
     AFE_BLACK_TARGET_COLOR,
@@ -275,6 +275,11 @@ class Gl128:
         #: Last successful :meth:`search_afe` result; image configure re-applies
         #: it so scan setup does not wipe calibrated FE gains back to boot zero.
         self.last_afe: AfeFrontend | None = None
+        #: ASIC dpi whose AFE strip timing :attr:`last_afe` was measured under.
+        self.last_afe_dpi: int | None = None
+        #: An image pass ran since the last boot: the next stationary strip block
+        #: must re-initialise the ASIC first (see :meth:`reinit_before_stationary_strips`).
+        self.image_pass_since_init: bool = False
         #: ``LPERIOD`` written by the last shading strip setup (for its log line).
         self._strip_lperiod = 0
         #: USB line layout learned from AFE strip means (True=planar RRR…GGG…BBB…).
@@ -440,6 +445,7 @@ class Gl128:
         self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
         deadline = time.monotonic() + _STATIONARY_IDLE_WAIT_S
         last01 = last02 = last_st = -1
+        status = None
         while time.monotonic() < deadline:
             last01 = int(self.protocol.read_register(r.REG_0x01)) & 0xFF
             last02 = int(self.protocol.read_register(r.REG_0x02)) & 0xFF
@@ -462,6 +468,23 @@ class Gl128:
             if last02 & motor_mask:
                 self._write(r.REG_0x02, 0x00)
             time.sleep(0.02)
+        # Motor power off and the carriage at home, yet MOTORENB stays set for
+        # the whole wait (a healthy settle takes ~20 ms). Seen on an 8200i SE
+        # after a colour pass: every later strip START hangs and only a
+        # power-cycle clears it. Retrying, feeding or waiting for a park cannot
+        # help, so stop here instead of driving the motor.
+        if (
+            status is not None
+            and (last02 & motor_mask) == 0
+            and status.is_at_home
+            and status.is_motor_enabled
+        ):
+            raise ScannerStuckError(
+                f"GL128 {where}: the scanner reports its motor running (status "
+                f"0x{last_st:02x}) with motor power off, and it did not clear in "
+                f"{_STATIONARY_IDLE_WAIT_S:.0f} s. Switch the scanner off and on, "
+                "then retry the scan."
+            )
         logger.warning(
             "GL128 %s: scan engine not idle (0x01=%#04x 0x02=%#04x status=0x%02x)",
             where,
@@ -584,7 +607,7 @@ class Gl128:
         if last_exc is not None:
             raise last_exc
 
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_CHANNEL_R)
+        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
         buf = bytearray()
         while len(buf) < size:
             chunk = self.protocol.bulk_read_chunk(min(size - len(buf), size))
@@ -619,6 +642,7 @@ class Gl128:
         """
         if not self._initialized:
             self.init()
+        self.reinit_before_stationary_strips()
         if method is not None:
             self.set_scan_method(method)
         infrared = self._scan_method == "infrared"
@@ -660,6 +684,7 @@ class Gl128:
         result = AfeFrontend(gains=gains, offsets=_encode_offsets(offsets))
         self.apply_frontend(result)
         self.last_afe = result
+        self.last_afe_dpi = scan_dpi
         logger.info(
             "GL128 AFE %s dpi=%d pre_offsets=%s wide_means=(%.0f,%.0f,%.0f) gains=%s offsets=%s",
             "infrared" if infrared else "colour",
@@ -896,7 +921,7 @@ class Gl128:
                 self._write(r.REG_0x02, 0x00)
             raise
 
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_CHANNEL_R)
+        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
         buf = bytearray()
         while len(buf) < size:
             chunk = self.protocol.bulk_read_chunk(min(65536, size - len(buf)))
@@ -962,6 +987,7 @@ class Gl128:
             self.init()
         if self._motor_moves_enabled:
             raise ScanError("ASIC shading requires motor disarmed — call disarm_bringup_motor before run_asic_shading")
+        self.reinit_before_stationary_strips()
         if method is not None:
             self.set_scan_method(method)
         infrared = self._scan_method == "infrared"
@@ -1172,6 +1198,32 @@ class Gl128:
                 )
         return measured
 
+    def reinit_before_stationary_strips(self) -> None:
+        """Re-initialise the ASIC before stationary strips that follow an image pass.
+
+        SilverFast rewrites the full register table (and the AFE defaults)
+        before every block of stationary strips that follows an image pass:
+        at the next scan, and inside a colour + IR scan before the IR
+        calibration. Without it, a stationary strip after a long-exposure pass
+        (ME long pass at 85000, or a manual 20000) could hang with ``MOTORENB``
+        stuck until a power-cycle (8200i SE, B8). Hardware, 2026-10-28: without
+        it, ME then a new resolution stuck 3 of 3 times; with it, 0 of 10
+        (5 of those, and 5 colour + IR scans at 20000).
+
+        Keeps what is still valid on the host (AFE codes, IR profile); clears
+        the ASIC shading flag, since the boot DRAM toggle may wipe that RAM.
+        Re-enters the scan clock last: boot leaves the boot clock, which runs
+        the 8300i SE motor too fast.
+        """
+        if not self.image_pass_since_init:
+            return
+        logger.info("GL128 re-initialising the ASIC before stationary strips (after an image pass)")
+        self.asic_boot()
+        self.upload_tables(resolution=max(self.model.resolutions_dpi))
+        self.asic_shading_ready = False
+        self.image_pass_since_init = False
+        self.enter_scan_clock()
+
     def upload_tables(
         self,
         *,
@@ -1180,7 +1232,7 @@ class Gl128:
         slope: bool = True,
         channel_exposure: int | None = None,
     ) -> None:
-        """Upload motor slope and/or per-channel exposure tables to scanner RAM.
+        """Upload motor slope and/or scan motor tables to scanner RAM.
 
         ``shading=True`` loads the slow ramp (session 03 feeds); otherwise the
         fast ramp used for feeds and image. Pass ``slope=False`` for the
@@ -1211,7 +1263,7 @@ class Gl128:
             else exposure_table(int(channel_exposure))
         )
         exposure = _u16_table_bytes(words)
-        for addr in (r.AHB_CHANNEL_R, r.AHB_CHANNEL_G, r.AHB_CHANNEL_B):
+        for addr in (r.AHB_SCAN_MOTOR_0, r.AHB_SCAN_MOTOR_1, r.AHB_SCAN_MOTOR_2):
             self.protocol.write_ahb(addr, exposure)
         logger.debug(
             "GL128 uploaded %s for %d dpi",
@@ -1280,6 +1332,8 @@ class Gl128:
         self.asic_boot()
         self.upload_tables(resolution=max(self.model.resolutions_dpi))
         self.last_afe = None
+        self.last_afe_dpi = None
+        self.image_pass_since_init = False
         self.asic_shading_ready = False
         self.last_ir_host_white = None
         self.ir_host_flatten_ready = False
@@ -1500,7 +1554,7 @@ class Gl128:
         ignore_probe: bool = False,
         scan_regs: Mapping[int, int] | None = None,
     ) -> None:
-        """Replay the captured fast-feed recipe (see MOTOR.md).
+        """Replay the captured fast-feed recipe (``docs/gl128-model-comparison.md`` section 4).
 
         Does **not** write ``0x0d`` before ``0x0f`` — feeds in the capture start
         with ``0x0f = 0x01`` alone. Completion is either the vendor probe
@@ -1525,7 +1579,7 @@ class Gl128:
             return
         max_steps = int(self.model.max_feed_steps)
         if steps > max_steps:
-            raise AsicError(f"Refusing FEEDL={steps}: larger than any captured feed ({max_steps}). See captures/8200i-se/MOTOR.md.")
+            raise AsicError(f"Refusing FEEDL={steps}: larger than any captured feed ({max_steps}). See docs/gl128-model-comparison.md, section 4.")
 
         r = self.registers
         self.wait_motor_idle(f"before arming a {steps}-step feed")
@@ -1794,7 +1848,7 @@ class Gl128:
         raise AsicError(
             "GL128 has no capture-proven standalone home seek. Park with "
             "SilverFast or power-cycle so the carriage is at home, then continue. "
-            "See captures/8200i-se/MOTOR.md."
+            "See docs/gl128-model-comparison.md, section 4."
         )
 
     def park(self, *, timeout_s: float = 30.0) -> None:

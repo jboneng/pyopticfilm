@@ -28,6 +28,10 @@ class ScanError(PlustekError):
     """Scan sequencing or image assembly failed."""
 
 
+class ScannerStuckError(ScanError):
+    """The scanner is in a state only a power-cycle clears; do not keep driving it."""
+
+
 class ScanCancelled(PlustekError):
     """Scan aborted because a cancel flag was set."""
 

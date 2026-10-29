@@ -84,23 +84,57 @@ def test_measure_disarms_motor_and_persists_blob(tmp_path: Path):
     assert cal.prefer_asic_shading is True
 
 
-def test_measure_reuses_colour_afe_when_dpi_changes(tmp_path: Path):
-    """1800→3600 remesures shading but must not re-run AFE search (0xcd hang)."""
+def _afe_reuse_asic(searched_dpi):
     asic = _asic(motor=True)
     asic.last_afe = MagicMock(gains=(38, 30, 36), offsets=(19, 31, 23))
+    asic.last_afe_dpi = searched_dpi
     asic._scan_method = "transparency"
-    asic.search_afe.side_effect = AssertionError("must not re-search")
 
     def run_asic_shading(**_kw):
         asic.asic_shading_ready = True
-        return b"DPI3600"
+        return b"TABLE"
 
     asic.run_asic_shading.side_effect = run_asic_shading
+    return asic
+
+
+def test_measure_reuses_colour_afe_within_the_same_strip_timing(tmp_path: Path):
+    """1800→2400 runs the AFE strips under the same timing: remeasure shading only."""
+    asic = _afe_reuse_asic(1800)
+    asic.search_afe.side_effect = AssertionError("must not re-search")
     cal = Calibrator(asic, cache_path=tmp_path / "calib.json", model=MODEL_8200I_SE)
-    entry = cal.measure_colour_asic_shading(_geometry(3600))
+    entry = cal.measure_colour_asic_shading(_geometry(2400))
     asic.search_afe.assert_not_called()
     asic.run_asic_shading.assert_called_once()
-    assert entry.shading_blob == b"DPI3600"
+    assert entry.shading_blob == b"TABLE"
+
+
+@pytest.mark.parametrize("searched_dpi", [1800, None])
+def test_measure_researches_afe_when_strip_timing_differs(tmp_path: Path, searched_dpi):
+    """3600 ppi strips run a different line period from 1800's; codes of unknown origin are not trusted."""
+    asic = _afe_reuse_asic(searched_dpi)
+    cal = Calibrator(asic, cache_path=tmp_path / "calib.json", model=MODEL_8200I_SE)
+    cal.measure_colour_asic_shading(_geometry(3600))
+    asic.search_afe.assert_called_once_with(method="transparency", resolution=3600)
+
+
+def test_forced_calibration_researches_afe(tmp_path: Path):
+    """``calibrate(force=True)`` runs a new AFE search even at the same dpi."""
+    asic = _afe_reuse_asic(1800)
+    cal = Calibrator(asic, cache_path=tmp_path / "calib.json", model=MODEL_8200I_SE)
+    cal.measure_colour_asic_shading(_geometry(1800), research_afe=True)
+    asic.search_afe.assert_called_once_with(method="transparency", resolution=1800)
+
+
+def test_calibrate_force_passes_research_afe(tmp_path: Path, monkeypatch):
+    asic = _asic(motor=True)
+    cal = Calibrator(asic, cache_path=tmp_path / "calib.json", model=MODEL_8200I_SE)
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        cal, "measure_colour_asic_shading", lambda _geo, *, research_afe=False: seen.append(research_afe)
+    )
+    cal.run(resolution=1800, force=True)
+    assert seen == [True]
 
 
 def test_apply_cached_blob_skips_strip_acquire(tmp_path: Path):
@@ -157,7 +191,12 @@ def test_cache_roundtrip_blob(tmp_path: Path):
     cal.cache.upsert(_blob_entry(geometry, blob=b"XYZ"))
     cal.cache.save()
 
-    cal2 = Calibrator(_asic(), cache_path=path, model=MODEL_8200I_SE)
+    # A new session measures again by default; the saved entry is only kept in the file.
+    fresh = Calibrator(_asic(), cache_path=path, model=MODEL_8200I_SE)
+    assert fresh.find_for_scan(method="transparency", geometry=geometry) is None
+    assert len(fresh.cache.entries) == 1
+
+    cal2 = Calibrator(_asic(), cache_path=path, model=MODEL_8200I_SE, reuse_saved=True)
     hit = cal2.find_for_scan(method="transparency", geometry=geometry)
     assert hit is not None
     assert hit.has_asic_blob
@@ -828,9 +867,9 @@ def test_upload_tables_slope_false_skips_slope_ahb():
     addrs = [int(c.args[0]) for c in proto.write_ahb.call_args_list]
     assert r.AHB_SLOPE_SCAN not in addrs
     assert r.AHB_SLOPE_FAST not in addrs
-    assert r.AHB_CHANNEL_R in addrs
-    assert r.AHB_CHANNEL_G in addrs
-    assert r.AHB_CHANNEL_B in addrs
+    assert r.AHB_SCAN_MOTOR_0 in addrs
+    assert r.AHB_SCAN_MOTOR_1 in addrs
+    assert r.AHB_SCAN_MOTOR_2 in addrs
 
 
 def test_run_asic_shading_calls_exposure_only_after_unity(monkeypatch):

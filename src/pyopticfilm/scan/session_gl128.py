@@ -35,6 +35,7 @@ from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
 from pyopticfilm.scan.exposure_override import validate_manual_exposure, validate_n_passes
 from pyopticfilm.scan.geometry import ScanGeometry
+from pyopticfilm.scan.me_exposure import validate_me_long_mode
 from pyopticfilm.scan.session import DATA_TIMEOUT_S, ScanSession
 from pyopticfilm.usb.device import BULK_MAX_SIZE
 
@@ -56,7 +57,7 @@ _IMAGE_REG_1D_LOW_BY_DPI: dict[int, int] = {7200: 0x01}
 _REG_1D = 0x1D
 _REG_1D_LOW_MASK = 0x1F
 
-#: AHB per-channel exposure words are 16-bit. At oversample == 1 (native
+#: AHB scan motor table words are 16-bit. At oversample == 1 (native
 #: optical resolution, 7200 dpi) ``channel_exposure_for`` copies
 #: ``REG_EXPOSURE`` into that table unmasked. A value at or above 65536 wraps
 #: there while the 24-bit exposure register does not, desyncing line timing
@@ -72,7 +73,7 @@ def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
     ``me_long_clamp_min`` / ``me_long_clamp_max`` are shared by both GL128
     models (14000–85000). The ceiling is also
     ``min(model max, 64000 * oversample(resolution))`` so a native 7200 dpi
-    pass cannot overflow the 16-bit per-channel exposure table.
+    pass cannot overflow the 16-bit scan motor table.
     """
     lo = int(model.me_long_clamp_min)
     hi = int(model.me_long_clamp_max)
@@ -82,7 +83,7 @@ def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
 
 
 def native_line_floor(model: Gl128Model) -> int:
-    """Lowest per-channel table word for a driver-derived image pass at oversample 1.
+    """Lowest scan motor table word for a driver-derived image pass at oversample 1.
 
     Below ``exposure_short * native_image_exposure_factor`` (28000 on the
     8200i SE / 8100 V2, 15000 on the 8300i SE) a full-width 7200 dpi line comes
@@ -167,8 +168,6 @@ class Gl128ScanSession(ScanSession):
     ) -> None:
         super().__init__(asic, model, calibrator)
         self.se_regs = Gl128Registers()
-        #: Set when the image pass armed ``AGOHOME`` — wait for park in ``_end_scan``.
-        self._await_agohome_park = False
         #: True after :meth:`bulk_read_begin` until :meth:`_end_scan` aborts/finishes.
         self._bulk_stream_active = False
         #: Image ``REG_EXPOSURE`` for the current pass (``None`` → short / 14000).
@@ -185,6 +184,10 @@ class Gl128ScanSession(ScanSession):
         self.last_multi_pass_debug = None
         #: IR→short alignment shift from the last multi-pass scan (ME or IR-only).
         self.last_align_shift_ir: tuple[float, float] | None = None
+        #: True when this scan runs colour calibration, which loads the ASIC
+        #: shading table for its window. Without it the table in RAM is from an
+        #: earlier scan (any resolution / width), so DVDSET must stay off.
+        self._use_asic_shading: bool = False
 
     def run(
         self,
@@ -195,17 +198,20 @@ class Gl128ScanSession(ScanSession):
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_long_mode: str = "adaptive",
         n_passes: int = 1,
         **kwargs,
     ):  # type: ignore[no-untyped-def]
         """Refuse unless the ASIC explicitly arms motor moves."""
         if not getattr(self.asic, "_motor_moves_enabled", False):
             raise AsicError(_MOTOR_GATED_HINT)
+        validate_me_long_mode(me_long_mode)
         # Fail fast on bad manual-exposure input before any register write.
         validate_manual_exposure(single_pass_exposure, label="single_pass_exposure")
         validate_manual_exposure(me_short_exposure, label="me_short_exposure")
         validate_manual_exposure(me_long_exposure, label="me_long_exposure")
         validate_n_passes(n_passes)
+        self._use_asic_shading = bool(kwargs.get("apply_calib", True)) and self.calibrator is not None
         geometry = kwargs.get("geometry")
         resolution = getattr(geometry, "resolution", None) or kwargs.get("resolution", 1800)
         check_gl128_multi_pass(
@@ -226,6 +232,7 @@ class Gl128ScanSession(ScanSession):
                 single_pass_exposure=single_pass_exposure,
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
+                me_long_mode=me_long_mode,
                 n_passes=n_passes,
                 **kwargs,
             )
@@ -285,9 +292,12 @@ class Gl128ScanSession(ScanSession):
         # Infrared must never keep DVDSET: a colour table after a colour+IR pair
         # makes the IR frame magenta, uneven, and low-contrast for dust, and an
         # IR table streaks it (Gl128.run_asic_shading); the host flattens IR.
+        # An uncalibrated scan (apply_calib=False) must not reuse the table an
+        # earlier scan left in RAM: it fits that scan's window, not this one.
         reg01 = (cache.get(r.REG_0x01, 0x22) | r.SHDAREA) & ~r.SCAN & ~r.STAGGER
         infrared = getattr(self.asic, "_scan_method", None) == "infrared"
-        if shading or infrared or not getattr(self.asic, "asic_shading_ready", False):
+        ready = self._use_asic_shading and getattr(self.asic, "asic_shading_ready", False)
+        if shading or infrared or not ready:
             reg01 &= ~r.DVDSET
         cache[r.REG_0x01] = reg01
 
@@ -353,8 +363,6 @@ class Gl128ScanSession(ScanSession):
         cache.pop(r.REG_CLRCNT, None)
         cache.pop(r.REG_START, None)
 
-        self._await_agohome_park = not shading and bool(motor & r.AGOHOME)
-
         ch_exp_fn = getattr(model, "channel_exposure_for", None)
         if callable(ch_exp_fn):
             try:
@@ -399,7 +407,7 @@ class Gl128ScanSession(ScanSession):
                     f"{scan_steps} ({start_mm:.1f} mm), past the "
                     f"{model.max_travel_end_steps * 25.4 / model.feed_steps_per_inch:.1f} mm "
                     f"travel limit. Max LINCNT here is {max_lc} "
-                    "(see captures/8200i-se/MOTOR.md)."
+                    "(see docs/gl128-model-comparison.md, section 4)."
                 )
             # Feeds run under the image registers, like SilverFast's. SF does
             # not rewrite 0x2B before them, so they keep its white shading
@@ -422,6 +430,9 @@ class Gl128ScanSession(ScanSession):
 
         self.asic.protocol.write_registers_batched(sorted(cache.items()))
         self.asic._reg_cache.update(cache)
+        if not shading:
+            # The next stationary strip block re-initialises the ASIC first (B8).
+            self.asic.image_pass_since_init = True
 
         if self._lamp_requested:
             self.asic.lamp_on()
@@ -462,6 +473,7 @@ class Gl128ScanSession(ScanSession):
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_long_mode: str = "adaptive",
         n_passes: int = 1,
     ):
         from pyopticfilm.image import ScanImage
@@ -475,6 +487,7 @@ class Gl128ScanSession(ScanSession):
         from pyopticfilm.scan.geometry import compute_geometry
         from pyopticfilm.scan.me_debug import MeScanDebug, MultiPassDebug, SlotStackDebug
         from pyopticfilm.scan.me_exposure import select_long_exposure
+        from pyopticfilm.scan.pipeline import HOST_CALIB_BORDER_INSET
 
         if mode == "infrared":
             raise ValueError("Use mode='color' with infrared=True for colour+IR scans")
@@ -486,15 +499,14 @@ class Gl128ScanSession(ScanSession):
             )
 
         model = self.model
-        # me_short_exposure (ME's own override key) always wins. single_pass_exposure
-        # is a fallback consulted only when n_passes>1 and multi_exposure is off —
-        # ME calls (n_passes==1 or multi_exposure=True) never look at it here, so
-        # every pre-Multi-Pass call shape (ME, IR-combo, or plain) is byte-identical
-        # to before this parameter existed.
+        # me_short_exposure (ME's own override key) always wins. Without ME the
+        # short slot *is* the single pass, so single_pass_exposure sets it for
+        # Multi-Pass and for colour+IR alike (the IR pass follows the short, as
+        # with me_short_exposure). Calls without an override are unchanged.
         if me_short_exposure is not None:
             short_manual = True
             exp_short = int(me_short_exposure)
-        elif n_passes > 1 and not multi_exposure and single_pass_exposure is not None:
+        elif not multi_exposure and single_pass_exposure is not None:
             short_manual = True
             exp_short = int(single_pass_exposure)
         else:
@@ -530,6 +542,7 @@ class Gl128ScanSession(ScanSession):
 
         ir_plane = None
         exposure_decision = None
+        fixed_reason: str | None = None
         # Content-aware ENDPIXEL drop, discovered on the very first capture of
         # the whole scan and reused by every later capture — including
         # Multi-Pass repeats of the same slot — so merge/align see matching
@@ -706,6 +719,17 @@ class Gl128ScanSession(ScanSession):
                     "ME long exposure: manual-override selected=%d",
                     exp_long,
                 )
+            elif me_long_mode == "fixed":
+                # SilverFast-style: the model's fixed long exposure on every
+                # frame, no metering, still inside the driver's safety clamp.
+                requested = int(getattr(model, "me_fixed_long_exposure", exp_long))
+                exp_long = clamp_me_long(model, geometry.resolution, requested)
+                fixed_reason = "fixed" if exp_long == requested else "fixed (clamped)"
+                logger.info(
+                    "ME long exposure: fixed requested=%d selected=%d",
+                    requested,
+                    exp_long,
+                )
             else:
                 adaptive_max = clamp_me_long(
                     model,
@@ -717,8 +741,15 @@ class Gl128ScanSession(ScanSession):
                     geometry.resolution,
                     int(getattr(model, "me_hardware_max_exposure", exp_long)),
                 )
+                # Meter the film, not the holder: the default frame carries ~5 %
+                # near-black holder rows/columns, right at the 5th percentile,
+                # which drove the proposal to the cap. Same inset as the makeup.
+                region = self.pipeline._inset_slice(
+                    rgb_short.shape[0], rgb_short.shape[1], HOST_CALIB_BORDER_INSET
+                )
+                metered = rgb_short[region] if region is not None else rgb_short
                 exposure_decision = select_long_exposure(
-                    rgb_short,
+                    metered,
                     exp_short,
                     black_level=float(getattr(model, "me_black_level", 0.0)),
                     dense_percentile=float(getattr(model, "me_dense_percentile", 5.0)),
@@ -836,7 +867,8 @@ class Gl128ScanSession(ScanSession):
                 exposure_reason=(
                     "manual-override"
                     if long_manual
-                    else (None if exposure_decision is None else exposure_decision.reason)
+                    else fixed_reason
+                    or (None if exposure_decision is None else exposure_decision.reason)
                 ),
             )
 
@@ -1063,4 +1095,3 @@ class Gl128ScanSession(ScanSession):
                     logger.info("GL128 bulk abort after end_scan drained=%d", drained)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("GL128 bulk abort after end_scan: %s", exc)
-            self._await_agohome_park = False

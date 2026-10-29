@@ -783,7 +783,7 @@ Before any of this, pyopticfilm never sent `0x8C`, so the clock kept whatever
 the scanner powered up with (or whatever SilverFast last set). On a failing 8300i unit, SilverFast's first AFE probe (gain 0,
 offset `0x80`) read 24326 / 32312 / 27550, and pyopticfilm's read 1.54x higher with
 every register, frontend value and RAM upload equal apart from `0x37`, `0xA3`,
-the `0x28`–`0x2B` SDRAM block and the per-channel exposure tables at
+the `0x28`–`0x2B` SDRAM block and the scan motor tables at
 `0x10000000`/`0x10004000`/`0x10008000` (both about 15000). `0x8C` was the only
 vendor boot write pyopticfilm skipped. Sending any of the three values cured the
 clipping on the reporter's unit.

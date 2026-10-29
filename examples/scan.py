@@ -2,10 +2,10 @@
 """Minimal interactive OpticFilm scan example.
 
 Enumerate connected scanners, pick one, choose PPI, optionally enable
-multi-exposure (ME) and infrared (IR) on scan-ready GL128 hardware
-(ME on the 8200i SE, 8100 V2 and 8300i SE except at 7200 dpi; IR on the
-8200i SE and 8300i SE — 8100 V2 has no IR), and write 16-bit TIFF files
-to a folder.
+multi-exposure (ME) and infrared (IR) where the model offers them (ME on the
+8200i SE, 8100 V2 and 8300i SE except at 7200 dpi; IR on the 8200i SE and
+8300i SE, and on the 7600i v1 at 3600/7200 dpi), scan the default full frame,
+and write 16-bit TIFF files to a folder.
 
 Requires WinUSB/libusb binding and ``pip install tifffile`` for TIFF output::
 
@@ -22,7 +22,6 @@ from pathlib import Path
 from pyopticfilm import Scanner
 from pyopticfilm.device.select import model_for_device, model_is_scan_ready
 from pyopticfilm.image import save_gray16_tiff
-from pyopticfilm.scan.bringup import bringup_scan_geometry
 from pyopticfilm.usb.device import find_devices
 
 
@@ -111,13 +110,18 @@ def main() -> int:
 
     multi_exposure = False
     infrared = False
-    if model.asic == "GL128":
-        if dpi in getattr(model, "multi_exposure_resolutions_dpi", ()):
+    me_dpis = getattr(model, "multi_exposure_resolutions_dpi", None)
+    if me_dpis is not None:
+        if dpi in me_dpis:
             multi_exposure = _prompt_yes_no("Enable multi-exposure (ME)?")
         else:
             print(f"Multi-exposure is not available at {dpi} dpi.")
-        if getattr(model, "supports_infrared", False):
+    if getattr(model, "supports_infrared", False):
+        # Models without the attribute (GL128) take IR at every resolution.
+        if dpi in getattr(model, "infrared_resolutions_dpi", model.resolutions_dpi):
             infrared = _prompt_yes_no("Enable infrared dust plane (IR)?")
+        else:
+            print(f"Infrared is not available at {dpi} dpi.")
 
     if args.out is not None:
         out = args.out
@@ -129,14 +133,12 @@ def main() -> int:
     with Scanner.open(picked.device_id) as scanner:
         print(f"Opened {scanner.model.model}")
         scanner.warmup()
-
-        geometry, _meta = bringup_scan_geometry(scanner.model, dpi, profile="preview_safe")
         print(f"Scanning at {dpi} dpi…")
 
+        # Default full frame: no area or geometry, as in the README quick start.
         image = scanner.scan(
             resolution=dpi,
             mode="color",
-            geometry=geometry,
             multi_exposure=multi_exposure,
             infrared=infrared,
             progress=_progress,

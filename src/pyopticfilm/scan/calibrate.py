@@ -18,7 +18,7 @@ import numpy as np
 
 from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.protocol import AsicDriver, FilmModel
-from pyopticfilm.exceptions import AsicError, CalibrationError, ScanError
+from pyopticfilm.exceptions import AsicError, CalibrationError, ScanError, ScannerStuckError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.geometry import ScanGeometry, compute_calib_geometry, compute_geometry
 from pyopticfilm.scan.pipeline import ImagePipeline
@@ -201,15 +201,33 @@ class CalibCache:
 
     With a ``fingerprint``, lookups only see entries stamped with it and
     :meth:`upsert` stamps new entries; other models' entries stay in the file.
+
+    Unless ``reuse_saved`` is set, entries loaded from the file (earlier
+    sessions) are kept for the file but never returned by :meth:`find`: the
+    lamp, sensor temperature, or even the scanner itself may have changed
+    since, and GL128 units all report the same USB serial, so nothing on the
+    wire tells one unit from another. Each session measures once per window.
     """
 
-    def __init__(self, path: Path | None = None, *, fingerprint: str | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        fingerprint: str | None = None,
+        reuse_saved: bool = False,
+    ) -> None:
         self.path = path or default_cache_path()
         self.fingerprint = fingerprint
+        self.reuse_saved = reuse_saved
         self.entries: list[CalibEntry] = []
+        #: ``id()`` of entries that came from the file rather than this session.
+        self._saved: set[int] = set()
+
+    def _same_model(self, entry: CalibEntry) -> bool:
+        return self.fingerprint is None or entry.fingerprint == self.fingerprint
 
     def _visible(self, entry: CalibEntry) -> bool:
-        return self.fingerprint is None or entry.fingerprint == self.fingerprint
+        return self._same_model(entry) and (self.reuse_saved or id(entry) not in self._saved)
 
     def load(self) -> bool:
         if not self.path.exists():
@@ -221,12 +239,30 @@ class CalibCache:
             logger.warning("Ignoring unreadable calib cache at %s: %s", self.path, exc)
             self.entries = []
             return False
-        if raw.get("ident") != CACHE_IDENT or int(raw.get("version", 0)) != CACHE_VERSION:
+        if not isinstance(raw, dict) or raw.get("ident") != CACHE_IDENT or raw.get("version") != CACHE_VERSION:
             logger.warning("Ignoring incompatible calib cache at %s", self.path)
             self.entries = []
             return False
-        self.entries = [CalibEntry.from_dict(e) for e in raw.get("entries", [])]
-        logger.info("Loaded %d calib entr(y/ies) from %s", len(self.entries), self.path)
+        entries = raw.get("entries", [])
+        if not isinstance(entries, list):
+            logger.warning("Ignoring calib cache at %s: 'entries' is not a list", self.path)
+            self.entries = []
+            return False
+        # One damaged entry must not stop the scanner from opening: skip it (the
+        # next save drops it) and remeasure that window when it is scanned.
+        self.entries = []
+        for index, data in enumerate(entries):
+            try:
+                self.entries.append(CalibEntry.from_dict(data))
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Skipping damaged calib cache entry %d in %s: %s", index, self.path, exc)
+        self._saved = {id(e) for e in self.entries}
+        logger.info(
+            "Loaded %d calib entr(y/ies) from %s%s",
+            len(self.entries),
+            self.path,
+            "" if self.reuse_saved else " (earlier sessions: not reused)",
+        )
         return True
 
     def save(self) -> None:
@@ -259,10 +295,12 @@ class CalibCache:
     def upsert(self, entry: CalibEntry) -> None:
         if self.fingerprint is not None:
             entry.fingerprint = self.fingerprint
+        # Replace this model's entry for the window, saved or not, so the file
+        # keeps one entry per window instead of one per session.
         self.entries = [
             e
             for e in self.entries
-            if not self._visible(e)
+            if not self._same_model(e)
             or not e.matches(
                 method=entry.method,
                 resolution=entry.resolution,
@@ -270,10 +308,12 @@ class CalibCache:
                 pixels=entry.pixels,
             )
         ]
+        self._saved &= {id(e) for e in self.entries}
         self.entries.append(entry)
 
     def clear(self) -> None:
         self.entries = []
+        self._saved = set()
         if self.path.exists():
             self.path.unlink()
             logger.info("Cleared calibration cache %s", self.path)
@@ -288,10 +328,13 @@ class Calibrator:
         *,
         cache_path: Path | None = None,
         model: FilmModel = MODEL_8200I,
+        reuse_saved: bool = False,
     ) -> None:
         self.asic = asic
         self.model = model
-        self.cache = CalibCache(cache_path, fingerprint=calib_fingerprint(model))
+        self.cache = CalibCache(
+            cache_path, fingerprint=calib_fingerprint(model), reuse_saved=reuse_saved
+        )
         self.cache.load()
         self.pipeline = ImagePipeline(model)
         self._active: CalibEntry | None = None
@@ -358,6 +401,11 @@ class Calibrator:
         finally:
             asic._motor_moves_enabled = prev
 
+    def _asic_dpi(self, resolution: int) -> int:
+        """ASIC dpi for ``resolution`` (GL128 floors at 600)."""
+        asic_dpi_for = getattr(self.model, "asic_dpi_for", None)
+        return int(asic_dpi_for(resolution)) if callable(asic_dpi_for) else int(resolution)
+
     def _ensure_at_home(self) -> None:
         assert self.asic is not None
         if getattr(self.asic, "is_at_home", lambda: True)():
@@ -385,6 +433,7 @@ class Calibrator:
             if callable(apply):
                 apply(fe)
             self.asic.last_afe = fe  # type: ignore[attr-defined]
+            self.asic.last_afe_dpi = self._asic_dpi(entry.resolution)  # type: ignore[attr-defined]
             upload = getattr(self.asic, "upload_shading_table", None)
             if not callable(upload):
                 raise CalibrationError("ASIC has no upload_shading_table")
@@ -399,23 +448,33 @@ class Calibrator:
             len(entry.shading_blob),
         )
 
-    def measure_colour_asic_shading(self, geometry: ScanGeometry) -> CalibEntry:
-        """AFE + dark/white at home; save blob. Retries once after re-home on film-like fail."""
+    def measure_colour_asic_shading(self, geometry: ScanGeometry, *, research_afe: bool = False) -> CalibEntry:
+        """AFE + dark/white at home; save blob. Retries once after re-home on film-like fail.
+
+        Colour AFE codes from earlier in the session are reused when they were
+        measured under this resolution's AFE strip timing (ME long-pass
+        remeasure, a dpi change within the same timing regime).
+        ``research_afe`` always runs a new search (``calibrate(force=True)``).
+        """
         if self.asic is None:
             raise CalibrationError("Calibrator has no ASIC handle")
         search = getattr(self.asic, "search_afe", None)
         shade = getattr(self.asic, "run_asic_shading", None)
         if not callable(shade):
             raise CalibrationError("ASIC has no run_asic_shading")
+        from pyopticfilm.scan.calib_gl128 import afe_timing_matches
 
+        scan_dpi = self._asic_dpi(geometry.resolution)
         last_reason = "unknown"
         for attempt in range(2):
             with self._stationary_motor():
                 self._ensure_at_home()
                 last_afe = getattr(self.asic, "last_afe", None)
                 reuse_afe = (
-                    last_afe is not None
+                    not (research_afe and attempt == 0)
+                    and last_afe is not None
                     and getattr(self.asic, "_scan_method", None) == "transparency"
+                    and afe_timing_matches(getattr(self.asic, "last_afe_dpi", None), scan_dpi)
                 )
                 if callable(search) and not reuse_afe:
                     logger.info("GL128 running stationary AFE search (attempt %d)", attempt + 1)
@@ -572,6 +631,7 @@ class Calibrator:
                 if callable(apply):
                     apply(fe)
                 self.asic.last_afe = fe  # type: ignore[attr-defined]
+                self.asic.last_afe_dpi = self._asic_dpi(hit.resolution)  # type: ignore[attr-defined]
                 self.asic.asic_shading_ready = False  # type: ignore[attr-defined]
             self.prefer_asic_shading = False
             self._active = hit
@@ -599,6 +659,7 @@ class Calibrator:
         if not callable(search) or not callable(shade):
             return False
         colour_afe = getattr(asic, "last_afe", None)
+        colour_afe_dpi = getattr(asic, "last_afe_dpi", None)
         reason = None
         try:
             with self._stationary_motor():
@@ -612,6 +673,10 @@ class Calibrator:
                     endpixel=geometry.pixel_endx,
                     dpiset=geometry.register_dpiset,
                 )
+        except ScannerStuckError:
+            # Not an IR-calibration problem: the scanner needs a power-cycle, and
+            # carrying on would start feeding with the motor stuck.
+            raise
         except (AsicError, CalibrationError, ScanError) as exc:
             reason = str(exc)
         ready = reason is None and bool(getattr(asic, "ir_host_flatten_ready", False))
@@ -623,6 +688,7 @@ class Calibrator:
                 if callable(apply):
                     apply(colour_afe)
                 asic.last_afe = colour_afe  # type: ignore[attr-defined]
+                asic.last_afe_dpi = colour_afe_dpi  # type: ignore[attr-defined]
             logger.warning(
                 "GL128 IR calibration unavailable (%s); IR pass uses colour AFE codes "
                 "and the per-image flatten",
@@ -815,7 +881,7 @@ class Calibrator:
         # SE colour: measure (or force re-measure) at home; persist blob+AFE.
         if is_gl128 and method == "transparency":
             if force:
-                return self.measure_colour_asic_shading(scan_geo)
+                return self.measure_colour_asic_shading(scan_geo, research_afe=True)
             return self.ensure_colour_asic_shading(scan_geo)
 
         # Genesys / non-GL128: AFE search before dark/white strips.

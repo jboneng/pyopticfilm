@@ -18,6 +18,7 @@ from pyopticfilm.exceptions import (
     PlustekError,
     ScanCancelled,
     ScanError,
+    ScannerStuckError,
     UnsupportedDeviceError,
     UsbError,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "ScanImage",
     "ScanStatus",
     "Scanner",
+    "ScannerStuckError",
     "UnsupportedDeviceError",
     "UsbError",
     "__version__",

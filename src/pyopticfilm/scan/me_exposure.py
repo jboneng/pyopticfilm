@@ -19,6 +19,17 @@ _EPSILON = 1.0
 #: Soft clip threshold for predicted long-pass saturation fractions.
 _CLIP_DN = 0.95 * _FULL_SCALE
 
+#: ``me_long_mode`` values. ``"adaptive"`` meters the short pass;
+#: ``"fixed"`` uses the model's ``me_fixed_long_exposure`` for every frame.
+ME_LONG_MODES: tuple[str, ...] = ("adaptive", "fixed")
+
+
+def validate_me_long_mode(value: object) -> str:
+    """Return ``value`` if it is a valid ``me_long_mode``, else raise ``ValueError``."""
+    if value not in ME_LONG_MODES:
+        raise ValueError(f"me_long_mode must be one of {ME_LONG_MODES}, got {value!r}")
+    return str(value)
+
 
 @dataclass(frozen=True)
 class MeExposureDecision:

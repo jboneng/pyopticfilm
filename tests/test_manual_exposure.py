@@ -194,7 +194,7 @@ def test_me_long_manual_skips_adaptive_clamp_and_reaches_register():
 
 
 def test_me_long_manual_above_16bit_table_raises():
-    """A manual override whose AHB per-channel table word (exposure / oversample)
+    """A manual override whose AHB scan motor table word (exposure / oversample)
     exceeds 16 bits fails loudly instead of silently uploading a wrapped table
     value inconsistent with REG_EXPOSURE."""
     session, _usb = _mock_gl128_session_armed()
@@ -254,5 +254,96 @@ def test_scanner_scan_single_pass_exposure_not_implemented_for_non_gl128():
     try:
         with pytest.raises(NotImplementedError):
             scanner.scan(resolution=900, area=_TINY, apply_calib=False, single_pass_exposure=5000)
+    finally:
+        scanner.close()
+
+
+def test_me_adaptive_long_meters_film_not_holder_border():
+    """A near-black holder border (~5 % of the default frame) must not set the long exposure."""
+    import numpy as np
+
+    session, _usb = _mock_gl128_session_armed()
+    frame = np.zeros((200, 200, 3), dtype=np.uint16)
+    frame[:, :] = (20000, 8000, 2500)  # film: blue p05 2500 -> 14000 * 10000 / 2500 = 56000
+    frame[:5], frame[-5:], frame[:, :5], frame[:, -5:] = 100, 100, 100, 100  # holder
+    session.pipeline.assemble = lambda *_a, **_k: frame.copy()  # type: ignore[method-assign]
+    session.run(resolution=1800, area=_TINY, apply_calib=False, multi_exposure=True)
+    debug = session.last_me_debug
+    assert debug.exposure_reason == "adaptive"
+    assert debug.exposure_long == 56000
+
+
+def test_single_pass_exposure_applies_to_colour_plus_ir():
+    """``infrared=True`` routes through the multi-pass path; the override must not be dropped."""
+    session, _usb = _mock_gl128_session_armed()
+    passes: list[tuple[str, int | None, bool]] = []
+    configure = session._configure
+
+    def spy(geometry):
+        if not geometry.disable_buffer_full_move:
+            passes.append((session.asic._scan_method, session._pass_exposure, session._pass_manual))
+        return configure(geometry)
+
+    session._configure = spy  # type: ignore[method-assign]
+    session.run(resolution=150, area=_TINY, apply_calib=False, infrared=True, single_pass_exposure=20000)
+    assert passes == [("transparency", 20000, True), ("infrared", 20000, True)]
+
+
+# --- input types: NumPy integers in, bool out -------------------------------
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_validate_manual_exposure_rejects_bool(value):
+    """``True`` used to pass as exposure 1."""
+    with pytest.raises(TypeError, match="must be an int or None, got bool"):
+        validate_manual_exposure(value, label="x")
+
+
+@pytest.mark.parametrize("value", [1.0, 20000.0, "20000"])
+def test_validate_manual_exposure_still_rejects_non_integers(value):
+    with pytest.raises(TypeError):
+        validate_manual_exposure(value, label="x")
+
+
+def test_validate_manual_exposure_accepts_numpy_integers():
+    import numpy as np
+
+    for dtype in (np.int32, np.int64, np.uint32):
+        result = validate_manual_exposure(dtype(20000), label="x")
+        assert result == 20000 and type(result) is int
+    with pytest.raises(ValueError, match="exceeds the 24-bit"):
+        validate_manual_exposure(np.int64(MAX_EXPOSURE_REGISTER + 1), label="x")
+
+
+def test_validate_n_passes_accepts_numpy_integers_and_rejects_bool():
+    import numpy as np
+
+    from pyopticfilm.scan.exposure_override import validate_n_passes
+
+    result = validate_n_passes(np.int64(3))
+    assert result == 3 and type(result) is int
+    with pytest.raises(TypeError):
+        validate_n_passes(True)
+
+
+def test_scanner_scan_numpy_exposure_reaches_register():
+    import numpy as np
+
+    usb = MockScannerTransport()
+    scanner = Scanner.open_fake(MODEL_8200I_SE, usb)
+    try:
+        scanner.scan(resolution=150, area=_TINY, apply_calib=False, single_pass_exposure=np.int64(20000))
+    finally:
+        scanner.close()
+    assert _reg_exposure(usb) == 20000
+
+
+def test_scanner_scan_rejects_bool_exposure_before_usb():
+    usb = MockScannerTransport()
+    scanner = Scanner.open_fake(MODEL_8200I_SE, usb)
+    try:
+        with pytest.raises(TypeError, match="single_pass_exposure must be an int or None, got bool"):
+            scanner.scan(resolution=150, area=_TINY, apply_calib=False, single_pass_exposure=True)
+        assert usb.transactions == []
     finally:
         scanner.close()

@@ -677,7 +677,7 @@ REGISTERS: tuple[RegisterEntry, ...] = (
             "immediately followed by a motor jam requiring a hard power-off "
             "mid-scan. The experimental_reg1d_7200 flag was removed. #98 "
             "later shipped 0x81 for the 7200dpi image pass together with "
-            "SilverFast's doubled per-channel exposure table, and that "
+            "SilverFast's doubled scan motor table, and that "
             "combination scans cleanly on all three models. The 0x81 7200dpi "
             "positioning feeds (#122) and the shading-strip values with "
             "SilverFast's white-strip motor table ran cleanly on the 8200i SE "
@@ -944,15 +944,17 @@ REGISTERS: tuple[RegisterEntry, ...] = (
     ),
     RegisterEntry(
         addr="0x10000000/0x10004000/0x10008000/0x1000C000/0x10010000/0x10014000",
-        name="AHB memory windows (per-channel exposure, motor slopes, shading table)",
+        name="AHB memory windows (scan motor tables, motor slopes, shading table)",
         asic=AsicFamily.GL128,
         scope=(SCOPE_ALL_GL128,),
         meaning=(
-            "AHB_CHANNEL_R/G/B (per-channel RAM exposure; 256 16-bit words that "
-            "are the scan motor's step periods: flat on the 8200i SE and 8100 V2, "
+            "AHB_SCAN_MOTOR_0/1/2 (256 16-bit words that are the scan motor's "
+            "step periods: flat on the 8200i SE and 8100 V2, "
             "SilverFast's acceleration ramp clamped at REG_EXPOSURE × ((0x1D & 0x1F) + 1) "
             "× asic_dpi / 14400 on the 8300i SE since 1.3.7; the white shading "
-            "strip uses REG_EXPOSURE × (LINESEL + 1) / 4 on every model), AHB_SLOPE_SCAN/"
+            "strip uses REG_EXPOSURE × (LINESEL + 1) / 4 on every model. All "
+            "three windows get the same table; they are not per-colour, although "
+            "1.3.8 and earlier named them AHB_CHANNEL_R/G/B), AHB_SLOPE_SCAN/"
             "AHB_SLOPE_FAST (motor ramp tables), AHB_SHADING (shading "
             "correction table) — bulk-upload memory windows, distinct from "
             "the ordinary 1-byte register address space."

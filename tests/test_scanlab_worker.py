@@ -77,3 +77,13 @@ def test_run_keyword_only_args_include_align_passes():
     _positional, keyword_only = _method_args("_run")
     assert "align_passes" in keyword_only
     assert "n_passes" in keyword_only
+
+
+def test_scan_request_me_long_mode_defaults_adaptive():
+    defaults = _dataclass_field_defaults("ScanRequest")
+    assert defaults.get("me_long_mode") == "adaptive"
+
+
+def test_run_keyword_only_args_include_me_long_mode():
+    _positional, keyword_only = _method_args("_run")
+    assert "me_long_mode" in keyword_only

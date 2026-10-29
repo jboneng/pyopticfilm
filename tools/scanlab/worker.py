@@ -58,6 +58,7 @@ class ScanRequest:
     single_pass_exposure: int | None = None
     me_short_exposure: int | None = None
     me_long_exposure: int | None = None
+    me_long_mode: str = "adaptive"
     n_passes: int = 1
     align_passes: bool = True
     crop_norm: tuple[float, float, float, float] | None = None
@@ -347,6 +348,7 @@ class ScanWorker(QObject):
             single_pass_exposure=request.single_pass_exposure,
             me_short_exposure=request.me_short_exposure,
             me_long_exposure=request.me_long_exposure,
+            me_long_mode=request.me_long_mode,
             n_passes=request.n_passes,
             align_passes=request.align_passes,
             scan_kw=request.scan_kw,
@@ -365,6 +367,7 @@ class ScanWorker(QObject):
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_long_mode: str = "adaptive",
         n_passes: int = 1,
         align_passes: bool = True,
         scan_kw: dict[str, Any] | None = None,
@@ -396,7 +399,7 @@ class ScanWorker(QObject):
                 self.usb_line.emit(format_scan_window_log(crop, scan_kw))
                 if me:
                     self._usb_divider(
-                        "ME multi-pass"
+                        f"ME multi-pass ({me_long_mode} long)"
                         + (f" x{n_passes} Multi-Pass" if n_passes > 1 else "")
                     )
                 elif n_passes > 1:
@@ -414,6 +417,7 @@ class ScanWorker(QObject):
                     single_pass_exposure=single_pass_exposure,
                     me_short_exposure=me_short_exposure,
                     me_long_exposure=me_long_exposure,
+                    me_long_mode=me_long_mode,
                     n_passes=n_passes,
                     align_passes=align_passes,
                     **scan_kw,

@@ -99,3 +99,19 @@ def test_merge_n_passes_all_frames_black_stays_black():
     assert np.all(result.rgb == 0)
     assert result.fusion_stats is not None
     assert result.fusion_stats.zero_weight_fraction == 1.0
+
+
+def test_merge_n_passes_all_frames_clipped_keep_clip_level():
+    """Clipped in every repeat: no confident frame, but the pixel stays bright."""
+    frames = [np.full((4, 4, 3), 65535, dtype=np.uint16) for _ in range(3)]
+    frames[1][:, :, 0] = 63000
+    result = merge_n_passes(frames)
+    assert np.all(result.rgb[:, :, 1:] == 65535)
+    assert np.all(result.rgb[:, :, 0] == round((65535 * 2 + 63000) / 3))
+
+
+def test_merge_n_passes_just_below_clip_end_is_not_black():
+    """Confidence is already ~0 a few DN below the clip end; 62256 must keep its level."""
+    frames = [np.full((4, 4, 3), 62256, dtype=np.uint16) for _ in range(3)]
+    result = merge_n_passes(frames)
+    assert np.all(result.rgb == 62256)

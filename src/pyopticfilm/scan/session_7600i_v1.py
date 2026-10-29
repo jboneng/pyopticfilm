@@ -110,6 +110,7 @@ class Gl843V1ScanSession:
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_long_mode: str = "adaptive",
         n_passes: int = 1,
         dummy_lines: str | None = None,
     ) -> ScanImage:

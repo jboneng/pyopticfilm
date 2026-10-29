@@ -80,6 +80,7 @@ class ScanSession:
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,  # GL128 ME only; ignored here
         me_long_exposure: int | None = None,  # GL128 ME only; ignored here
+        me_long_mode: str = "adaptive",  # GL128 ME only; ignored here
         n_passes: int = 1,  # GL128 Multi-Pass only; ignored here
     ) -> ScanImage:
         if multi_exposure or infrared:
@@ -205,6 +206,11 @@ class ScanSession:
         plane = np.ascontiguousarray(rgb[:, :, 1])
         white = getattr(self.asic, "last_ir_host_white", None)
         if getattr(self.asic, "ir_host_flatten_ready", False) and white:
+            # The strip profile is in USB column order (starting at STRPIXEL);
+            # ``rgb`` has already been mirrored by ``assemble`` on mirror_x models.
+            white = list(white)
+            if getattr(self.model, "mirror_x", False):
+                white = white[: plane.shape[1]][::-1]
             try:
                 plane = flatten_ir_columns(plane, white)
             except ValueError as exc:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Per-channel exposure table for GL128 image passes at native 7200 dpi."""
+"""Scan motor table for GL128 image passes at native 7200 dpi."""
 
 from __future__ import annotations
 

@@ -168,6 +168,25 @@ def test_merge_snr_both_zero_stays_black():
     assert result.fusion_stats.zero_weight_fraction == 1.0
 
 
+def test_merge_snr_clipped_in_both_keeps_short_level():
+    """Clipped short and long: no confident input, but the pixel is bright, not black."""
+    short = np.full((4, 4, 3), 65535, dtype=np.uint16)
+    long = np.full((4, 4, 3), 65535, dtype=np.uint16)
+    result = merge_exposures_result(short, long, align_shift=(0, 0))
+    assert np.all(result.rgb == 65535)
+
+
+def test_merge_snr_one_clipped_channel_keeps_its_level():
+    """Red clipped in both passes must not drop to 0 while G/B merge normally."""
+    short = np.full((8, 8, 3), 8000, dtype=np.uint16)
+    long = np.full((8, 8, 3), 24000, dtype=np.uint16)
+    short[:, :, 0] = 63000
+    long[:, :, 0] = 65535
+    result = merge_exposures_result(short, long, align_shift=(0, 0))
+    assert np.all(result.rgb[:, :, 0] == 63000)
+    assert abs(float(result.rgb[:, :, 1:].mean()) - 8000.0) < 50.0
+
+
 def test_merge_snr_scale_mismatch_does_not_black_out():
     """USB ratio ≠ effective gain: image-fit ratio; residual must not zero the frame."""
     short = np.full((32, 32, 3), 8000, dtype=np.uint16)
@@ -438,3 +457,13 @@ def test_band_shift_profile_refit_excludes_two_outlier_bands(monkeypatch):
     # line's range across the frame well past the 8px outlier threshold;
     # excluding both should collapse the fit back to ~0 everywhere.
     assert float(np.max(dy_per_row) - np.min(dy_per_row)) < 8.0
+
+
+def test_merge_snr_just_below_clip_end_is_not_black():
+    """Confidence is already ~0 a few DN below clip_end (62258.25); 62256 must keep its level."""
+    short = np.full((8, 8, 3), 8000, dtype=np.uint16)
+    long = np.full((8, 8, 3), 24000, dtype=np.uint16)
+    short[:, :, 0] = 62256
+    long[:, :, 0] = 65535
+    result = merge_exposures_result(short, long, align_shift=(0, 0))
+    assert np.all(result.rgb[:, :, 0] == 62256)

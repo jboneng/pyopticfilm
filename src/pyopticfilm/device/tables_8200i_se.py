@@ -11,9 +11,10 @@ These are the exact payloads the Windows driver loaded into scanner RAM
 
 * Fast ramp (``SLOPE_TABLE_FAST`` / ``SLOPE_TABLE``): feeds, positioning, image
 * Slow ramp (``SLOPE_TABLE_SLOW``): shading / calibration acquires
-* Per-channel exposure windows are identical and flat apart from entry 0
+* Scan motor table windows (``0x10000000``/``0x10004000``/``0x10008000``) are
+  identical and flat apart from entry 0
 
-The per-channel exposure value tracks ``14000 / oversample`` -- 3500 at 1800
+The scan motor period tracks ``14000 / oversample`` -- 3500 at 1800
 dpi, 7000 at 3600, 2333 at 1200 -- keeping physical exposure constant as the
 motor speed changes (``captures/8200i-se/06_color_high_dpi/NOTES.md``).
 """
@@ -96,7 +97,7 @@ SLOPE_TABLE_SLOW: tuple[int, ...] = (
     0x0419, 0x0418, 0x0417, 0x0416, 0x0415, 0x0414, 0x0412, 0x0411,
 )
 
-#: Entries per per-channel exposure table (512-byte window of 16-bit words).
+#: Entries per scan motor table (512-byte window of 16-bit words).
 EXPOSURE_TABLE_LENGTH = 256
 
 #: Entry 0 of each exposure table sits this much above the flat body.
@@ -104,7 +105,7 @@ EXPOSURE_FIRST_DELTA = 16
 
 
 def exposure_table(line_period: int) -> tuple[int, ...]:
-    """Build a per-channel exposure table for ``line_period``.
+    """Build a scan motor table for ``line_period``.
 
     Mirrors the captured shape: a flat body at ``line_period`` with entry 0
     raised by :data:`EXPOSURE_FIRST_DELTA`.
@@ -118,7 +119,7 @@ def exposure_table(line_period: int) -> tuple[int, ...]:
     body = int(line_period)
     if not 0 <= body <= 0xFFFF:
         raise ValueError(
-            f"channel exposure {body} does not fit the AHB per-channel exposure "
+            f"channel exposure {body} does not fit the AHB scan motor "
             "table's 16-bit words (0-65535) — check the caller's oversample-aware clamp"
         )
     first = (body + EXPOSURE_FIRST_DELTA) & 0xFFFF

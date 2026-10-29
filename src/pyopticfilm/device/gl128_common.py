@@ -292,6 +292,7 @@ GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
         "ladder_lincnt_by_dpi",
         "exposure_lperiod",
         "exposure_short",
+        "me_fixed_long_exposure",
         "pixel_clock_by_dpi",
         "pixel_clock_long_by_dpi",
         "dummy_by_dpi",
@@ -598,7 +599,7 @@ class Gl128Common:
         return int(self.exposure_lperiod) * (self.shading_linesel_for(resolution) + 1) // 4
 
     def channel_exposure_for(self, resolution: int, *, exposure: int | None = None) -> int:
-        """Per-channel RAM exposure, ``exposure // oversample`` in the captures."""
+        """Scan motor table period, ``exposure // oversample`` in the captures."""
         base = int(exposure if exposure is not None else self.exposure_lperiod)
         return base // self.oversample_for(resolution)
 

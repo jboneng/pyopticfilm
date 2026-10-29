@@ -115,3 +115,23 @@ def test_new_flags_reach_scanner_scan(monkeypatch):
     assert kwargs["single_pass_exposure"] == 30000
     assert kwargs["me_short_exposure"] == 14000
     assert kwargs["me_long_exposure"] == 42000
+
+
+def test_me_long_mode_defaults_to_adaptive():
+    assert _parse(_BASE).me_long_mode == "adaptive"
+
+
+def test_me_long_mode_fixed_reaches_scanner_scan(monkeypatch):
+    fake_scanner = _FakeScanner()
+    _patch_scan_pipeline(monkeypatch, fake_scanner)
+    rc = cli.main(["scanlab", *_BASE, "--multi-exposure", "--me-long-mode", "fixed"])
+    assert rc == 0
+    assert fake_scanner.scan.call_args.kwargs["me_long_mode"] == "fixed"
+
+
+def test_me_long_mode_fixed_requires_multi_exposure(monkeypatch):
+    fake_scanner = _FakeScanner()
+    _patch_scan_pipeline(monkeypatch, fake_scanner)
+    with pytest.raises(SystemExit):
+        cli.main(["scanlab", *_BASE, "--me-long-mode", "fixed"])
+    fake_scanner.scan.assert_not_called()

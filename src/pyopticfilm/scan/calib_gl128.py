@@ -7,7 +7,8 @@ Step 3: build/upload ASIC shading at ``0x10014000`` (unity then measured).
 Pure functions only — hardware I/O lives on :class:`Gl128`. The dichotomy
 helpers further down serve GL845.
 
-See ``captures/8200i-se/CALIB.md`` and ``decoded/afe_shading_fixture.json``.
+See ``docs/gl128-model-comparison.md`` section 8, and ``8200i-se/decoded/afe_shading_fixture.json``
+in the capture dataset (jboneng/pyopticfilm_captures).
 """
 
 from __future__ import annotations
@@ -176,6 +177,24 @@ def afe_strip_timing(scan_dpi: int, *, wide: bool, pre_offset: bool = False) -> 
     if pre_offset:
         return AfeStripTiming(lperiod=lperiod_for_line(AFE_STRIP_PIXELS, scan_dpi), dummy=AFE_STRIP_DUMMY_PRE)
     return AfeStripTiming(lperiod=lperiod_for_line(AFE_WIDE_PIXELS, scan_dpi), dummy=AFE_STRIP_DUMMY_WIDE)
+
+
+def afe_timing_matches(searched_dpi: int | None, scan_dpi: int) -> bool:
+    """Whether AFE codes searched at ``searched_dpi`` were measured under ``scan_dpi``'s strip timing.
+
+    The search result depends on the dpi only through :func:`afe_strip_timing`
+    (two regimes: below and from 3600 ppi, ~19 % longer wide-strip line period).
+    On an 8200i SE the codes differed by at most one between 1800 and 3600 ppi,
+    but matching the regime keeps them independent of scan history.
+    ``None`` (codes of unknown origin) never matches.
+    """
+    if searched_dpi is None:
+        return False
+    return all(
+        afe_strip_timing(int(searched_dpi), wide=wide, pre_offset=pre)
+        == afe_strip_timing(int(scan_dpi), wide=wide, pre_offset=pre)
+        for wide, pre in ((False, True), (True, False))
+    )
 
 
 def _u16_plane(strip: bytes, *, pixels: int) -> list[int]:

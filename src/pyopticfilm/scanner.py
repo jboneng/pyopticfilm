@@ -25,6 +25,7 @@ from pyopticfilm.image import ScanImage
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import CalibEntry, Calibrator, default_cache_path
 from pyopticfilm.scan.exposure_override import validate_manual_exposure, validate_n_passes
+from pyopticfilm.scan.me_exposure import validate_me_long_mode
 from pyopticfilm.usb.device import UsbDeviceHandle
 from pyopticfilm.usb.fake import FakeDeviceHandle, MockScannerTransport
 from pyopticfilm.usb.protocol import GenesysUsbProtocol, UsbTransport
@@ -32,6 +33,7 @@ from pyopticfilm.usb.protocol import GenesysUsbProtocol, UsbTransport
 logger = get_logger(__name__)
 
 ScanMode = Literal["color", "infrared", "gray"]
+MeLongMode = Literal["adaptive", "fixed"]
 ScanStatus = Literal["scanning"]
 
 
@@ -288,12 +290,14 @@ class Scanner:
         single_pass_exposure: int | None = None,
         me_short_exposure: int | None = None,
         me_long_exposure: int | None = None,
+        me_long_mode: MeLongMode = "adaptive",
         n_passes: int = 1,
     ) -> ScanImage:
         # Fail fast on bad manual-exposure input before touching the ASIC.
         validate_manual_exposure(single_pass_exposure, label="single_pass_exposure")
         validate_manual_exposure(me_short_exposure, label="me_short_exposure")
         validate_manual_exposure(me_long_exposure, label="me_long_exposure")
+        validate_me_long_mode(me_long_mode)
         validate_n_passes(n_passes)
         if getattr(self._model, "asic", "") == "GL128":
             from pyopticfilm.scan.session_gl128 import check_gl128_multi_pass
@@ -326,6 +330,7 @@ class Scanner:
             "single_pass_exposure": single_pass_exposure,
             "me_short_exposure": me_short_exposure,
             "me_long_exposure": me_long_exposure,
+            "me_long_mode": me_long_mode,
             "n_passes": n_passes,
         }
         if on_status is not None:

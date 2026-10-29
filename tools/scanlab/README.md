@@ -95,6 +95,7 @@ scan-ready GL128 **8100 (V2)** (`07b3:1824`).
 | **PPI** | Resolutions from the selected model’s `resolutions_dpi` (Scan only; Prescan uses a fixed low dpi). |
 | **IR pass** | After colour Scan, run a second infrared pass (disabled if the model has no IR). |
 | **Multi-exposure (ME)** | GL128 / hardware-tested models: short + adaptive long colour passes. Disabled at 7200 dpi, together with **Passes** (Multi-Pass); both reset when you pick 7200. Long clamp is 14k–85k. Fallback 42000. Host SNR/IVW merge into ``rgb``. Bracket planes on ``Scanner.last_me_debug`` (not ``ScanImage``). |
+| **Fixed ME long (SilverFast-style)** | With ME on: scan the long pass at the model's fixed exposure (`me_long_mode="fixed"`: 42000 on the 8200i SE / 8100 V2, 60000 on the 8300i SE) instead of metering the short pass. Still clamped to 14k–85k. The USB log's ``ME long exposure`` line shows ``(fixed)``. A manual **ME long exposure** wins over it. CLI: ``--me-long-mode fixed`` (requires ``--multi-exposure``). |
 | **Manual exposure overrides** | GL128 debug/testing only — see [Manual exposure overrides](#manual-exposure-overrides) below. |
 | **Prescan** | Low-res preview (GL128: 1200 dpi safe window; non-scan-ready: lowest dpi + short Y strip). |
 | **Scan** | Colour scan at the chosen PPI; optional IR and/or ME. Uses the prescan crop when one is set (clamped on non-scan-ready). |
@@ -120,7 +121,7 @@ Each field is grayed out when it does not apply to the current pass selection
 `REG_EXPOSURE` **verbatim** — it skips adaptive selection and the hardware-max
 clamp that apply to normal (automatic) exposure. Two limits still apply
 regardless: the 24-bit register range (1–16777215 / `0xFFFFFF`), and — at
-oversample == 1 resolutions (e.g. 7200 dpi) — the AHB per-channel exposure
+oversample == 1 resolutions (e.g. 7200 dpi) — the AHB scan motor
 table's 16-bit width (1–65535); an out-of-range value for either is rejected
 with a clear error rather than clamped or silently corrupted.
 

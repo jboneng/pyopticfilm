@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for the GL128 per-channel exposure AHB table builder."""
+"""Unit tests for the GL128 scan motor AHB table builder."""
 
 from __future__ import annotations
 

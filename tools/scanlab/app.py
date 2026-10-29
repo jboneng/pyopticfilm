@@ -146,6 +146,16 @@ class ScanLabWindow(QMainWindow):
         self.me_pass = QCheckBox("Multi-exposure (ME)")
         form.addWidget(self.me_pass)
 
+        self.me_fixed_long = QCheckBox("Fixed ME long (SilverFast-style)")
+        self.me_fixed_long.setToolTip(
+            "Scan the ME long pass at the model's fixed exposure on every frame "
+            "(42000 on the 8200i SE / 8100 V2, 60000 on the 8300i SE) instead "
+            "of metering the short pass. Still inside the normal 14k-85k clamp. "
+            "A manual ME long exposure below takes precedence."
+        )
+        self.me_fixed_long.setEnabled(False)
+        form.addWidget(self.me_fixed_long)
+
         n_passes_row = QHBoxLayout()
         n_passes_row.addWidget(QLabel("Multi-Pass N"))
         self.n_passes = QSpinBox()
@@ -207,7 +217,7 @@ class ScanLabWindow(QMainWindow):
             "REG_EXPOSURE for the ME long pass. Empty = normal adaptive "
             "selection. A value here overrides adaptive selection entirely, "
             "skips the hardware-max clamp, and is written verbatim — still "
-            "limited to the AHB per-channel exposure table's 16-bit width "
+            "limited to the AHB scan motor table's 16-bit width "
             "(1-65535) at oversample == 1 resolutions (e.g. 7200 dpi)."
         )
         self.me_long_exposure.setEnabled(False)
@@ -531,11 +541,19 @@ class ScanLabWindow(QMainWindow):
         self._update_me_tabs_visible()
 
     def _sync_manual_exposure_enabled(self, *, busy: bool = False) -> None:
-        """Manual overrides only apply to the pass they name — gray out the rest."""
+        """Manual overrides only apply to the pass they name — gray out the rest.
+
+        The fixed-long toggle is ME-only too, so it follows the same rule.
+        """
         me_active = self.me_pass.isEnabled() and self.me_pass.isChecked()
+        self.me_fixed_long.setEnabled(me_active)
         self.single_pass_exposure.setEnabled(not busy and self._is_gl128() and not me_active)
         self.me_short_exposure.setEnabled(me_active)
         self.me_long_exposure.setEnabled(me_active)
+
+    def _me_long_mode(self) -> str:
+        on = self.me_fixed_long.isEnabled() and self.me_fixed_long.isChecked()
+        return "fixed" if on else "adaptive"
 
     def _manual_exposure_value(self, edit: QLineEdit) -> int | None:
         if not edit.isEnabled():
@@ -1012,6 +1030,7 @@ class ScanLabWindow(QMainWindow):
                 "crop": list(crop) if crop is not None else None,
                 "ir_pass": self.ir_pass.isChecked(),
                 "me_pass": self.me_pass.isEnabled() and self.me_pass.isChecked(),
+                "me_long_mode": self._me_long_mode(),
                 "n_passes": self.n_passes.value(),
                 "align_passes": self.align_passes.isChecked(),
                 "apply_calib": self.apply_calib.isChecked(),
@@ -1029,6 +1048,7 @@ class ScanLabWindow(QMainWindow):
                 single_pass_exposure=single_pass_exposure,
                 me_short_exposure=me_short_exposure,
                 me_long_exposure=me_long_exposure,
+                me_long_mode=self._me_long_mode(),
                 n_passes=self.n_passes.value(),
                 align_passes=self.align_passes.isChecked(),
                 crop_norm=crop,

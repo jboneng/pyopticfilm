@@ -50,16 +50,16 @@ def test_entries_from_other_timing_are_ignored_but_kept(tmp_path: Path):
     stale.cache.upsert(_entry(b"OLD"))
     stale.cache.save()
 
-    current = Calibrator(None, cache_path=path, model=MODEL_8300I_SE)
+    current = Calibrator(None, cache_path=path, model=MODEL_8300I_SE, reuse_saved=True)
     assert _find(current.cache) is None
 
     current.cache.upsert(_entry(b"NEW"))
     current.cache.save()
-    reloaded = Calibrator(None, cache_path=path, model=MODEL_8300I_SE)
+    reloaded = Calibrator(None, cache_path=path, model=MODEL_8300I_SE, reuse_saved=True)
     hit = _find(reloaded.cache)
     assert hit is not None and hit.shading_blob == b"NEW"
     assert {e.shading_blob for e in reloaded.cache.entries} == {b"OLD", b"NEW"}
-    assert _find(Calibrator(None, cache_path=path, model=old_timing).cache).shading_blob == b"OLD"
+    assert _find(Calibrator(None, cache_path=path, model=old_timing, reuse_saved=True).cache).shading_blob == b"OLD"
 
 
 def test_pre_fingerprint_cache_file_is_ignored(tmp_path: Path):
@@ -70,3 +70,21 @@ def test_pre_fingerprint_cache_file_is_ignored(tmp_path: Path):
 
     cal = Calibrator(None, cache_path=path, model=MODEL_8200I_SE)
     assert cal.cache.entries == []
+
+
+def test_saved_entries_are_not_reused_by_a_new_session(tmp_path: Path):
+    """GL128 units share one USB serial and drift between sessions: measure once per session."""
+    path = tmp_path / "calib.json"
+    first = Calibrator(None, cache_path=path, model=MODEL_8200I_SE)
+    first.cache.upsert(_entry(b"SESSION1"))
+    first.cache.save()
+    assert _find(first.cache).shading_blob == b"SESSION1"  # same session: reused
+
+    second = Calibrator(None, cache_path=path, model=MODEL_8200I_SE)
+    assert _find(second.cache) is None
+    second.cache.upsert(_entry(b"SESSION2"))
+    second.cache.save()
+    assert _find(second.cache).shading_blob == b"SESSION2"
+    # Replaced, not appended: the file keeps one entry per window.
+    reloaded = Calibrator(None, cache_path=path, model=MODEL_8200I_SE, reuse_saved=True)
+    assert [e.shading_blob for e in reloaded.cache.entries] == [b"SESSION2"]

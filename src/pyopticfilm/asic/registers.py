@@ -137,10 +137,16 @@ class Gl128Registers:
     BULK_INDEX_RAM: int = 0x00
     BULK_INDEX_IMAGE: int = 0x08
 
-    # AHB windows (session 03/04): per-channel exposure, motor slopes, shading.
-    AHB_CHANNEL_R: int = 0x10000000
-    AHB_CHANNEL_G: int = 0x10004000
-    AHB_CHANNEL_B: int = 0x10008000
+    # AHB windows (session 03/04): scan motor tables, motor slopes, shading.
+    # The three scan motor windows each take the same 256 step periods (see
+    # Gl128Model.scan_motor_table); a mismatch with REG_EXPOSURE jams the motor
+    # (#66). They are not per-colour: early decodes named them R/G/B.
+    AHB_SCAN_MOTOR_0: int = 0x10000000
+    AHB_SCAN_MOTOR_1: int = 0x10004000
+    AHB_SCAN_MOTOR_2: int = 0x10008000
+    #: RAM read address for AFE and shading strip data (same address as the
+    #: first scan motor window).
+    AHB_RAM_BASE: int = 0x10000000
     AHB_SLOPE_SCAN: int = 0x1000C000
     AHB_SLOPE_FAST: int = 0x10010000
     AHB_SHADING: int = 0x10014000

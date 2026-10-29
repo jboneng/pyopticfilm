@@ -3,9 +3,10 @@
 
 SANE genesys has no GL128 command set, so nothing here is ported from SANE.
 Every register value is taken from USB captures of the Windows driver stored in
-``captures/8200i-se/``; each table below names the session that produced it.
-See ``captures/8200i-se/PROTOCOL.md`` for the full protocol synthesis and
-``SESSION_LOG.md`` / per-session ``NOTES.md`` for decode detail.
+``captures/8200i-se/`` (published as jboneng/pyopticfilm_captures); each table
+below names the session that produced it. See ``docs/gl128-model-comparison.md``
+for the protocol synthesis and the dataset's ``SESSIONS.md`` / per-session
+``NOTES.md`` for decode detail.
 
 The ASIC is GL124-family, not GL845: the frontend is reached through
 ``0x51``/``0x5D``/``0x5E``, status lives at ``0x101``, and the geometry
@@ -113,6 +114,9 @@ class Model8200iSE(Gl128Common):
 
     exposure_lperiod: int = 14000
     exposure_short: int = 14000
+    #: ME long pass for ``me_long_mode="fixed"``: 3x the short, the long
+    #: exposure SilverFast's ME captures use on this model.
+    me_fixed_long_exposure: int = 42000
     #: 13_7200ppi_color: SilverFast uploads 28000 per channel with
     #: ``REG_EXPOSURE`` 14000. At 14000 a full-width line outruns USB and the
     #: motor stops and restarts every few seconds.

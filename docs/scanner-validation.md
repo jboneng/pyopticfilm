@@ -78,7 +78,7 @@ cap is not a second model constant: the ceiling is
 `min(model max, 64000 * oversample)`. Oversample is 1 only at native optical
 resolution, so 85000 is left intact at 3600 dpi and below.
 
-64000 is a safety margin under 65536. The AHB per-channel exposure table
+64000 is a safety margin under 65536. The AHB scan motor table
 (`tables_8200i_se.exposure_table`) is 16-bit, and at oversample == 1
 `channel_exposure_for()` passes the exposure straight through into it
 unmasked — a value at or above 65536 would silently wrap there while

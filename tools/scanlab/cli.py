@@ -54,6 +54,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from pyopticfilm.scan.exposure_override import MAX_N_PASSES
+from pyopticfilm.scan.me_exposure import ME_LONG_MODES
 from pyopticfilm.usb.decode import decode_transaction
 from tools.scanlab.backend import (
     lab_scan_kwargs,
@@ -147,6 +148,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.multi_exposure and args.kind != "scan":
         raise SystemExit("--multi-exposure requires --kind scan")
 
+    if args.me_long_mode != "adaptive" and not args.multi_exposure:
+        raise SystemExit(f"--me-long-mode {args.me_long_mode} requires --multi-exposure")
+
     if not (1 <= args.n_passes <= MAX_N_PASSES):
         raise SystemExit(f"--n-passes must be between 1 and {MAX_N_PASSES}, got {args.n_passes}")
 
@@ -161,6 +165,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             single_pass_exposure=args.single_pass_exposure,
             me_short_exposure=args.me_short_exposure,
             me_long_exposure=args.me_long_exposure,
+            me_long_mode=args.me_long_mode,
             n_passes=args.n_passes,
             align_passes=args.align_passes,
             **kw,
@@ -305,6 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--multi-exposure",
         action="store_true",
         help="2-bracket multi-exposure color scan (scan kind only)",
+    )
+    p_scan.add_argument(
+        "--me-long-mode",
+        choices=list(ME_LONG_MODES),
+        default="adaptive",
+        help="ME long pass: frame-adaptive (default) or the model's fixed SilverFast-style value",
     )
     p_scan.add_argument(
         "--n-passes",

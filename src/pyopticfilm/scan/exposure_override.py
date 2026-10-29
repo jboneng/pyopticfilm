@@ -12,6 +12,8 @@ than clamping or wrapping them.
 
 from __future__ import annotations
 
+from numbers import Integral
+
 #: Largest value representable in the 24-bit REG_EXPOSURE register.
 MAX_EXPOSURE_REGISTER = 0xFFFFFF
 
@@ -20,26 +22,32 @@ MAX_EXPOSURE_REGISTER = 0xFFFFFF
 MAX_N_PASSES = 9
 
 
+def _is_integer(value: object) -> bool:
+    """An integer, including NumPy's, but not ``bool`` (``True`` is not a count or an exposure)."""
+    return isinstance(value, Integral) and not isinstance(value, bool)
+
+
 def validate_n_passes(value: int) -> int:
-    """Return ``value`` unchanged if it is a valid ``n_passes``, else raise."""
-    if not isinstance(value, int) or isinstance(value, bool):
+    """Return ``value`` as an ``int`` if it is a valid ``n_passes``, else raise."""
+    if not _is_integer(value):
         raise TypeError(f"n_passes must be an int, got {type(value).__name__}")
     if not (1 <= value <= MAX_N_PASSES):
         raise ValueError(f"n_passes must be between 1 and {MAX_N_PASSES}, got {value}")
-    return value
+    return int(value)
 
 
 def validate_manual_exposure(value: int | None, *, label: str) -> int | None:
-    """Return ``value`` unchanged if it is a valid manual exposure, else raise.
+    """Return ``value`` as an ``int`` if it is a valid manual exposure, else raise.
 
     ``None`` (no override requested) is always valid and preserves today's
     behavior. Otherwise ``value`` must be a positive integer that fits
     ``REG_EXPOSURE`` (1..0xFFFFFF) — invalid values raise ``ValueError``
-    rather than being silently clamped or wrapped.
+    rather than being silently clamped or wrapped. NumPy integers are
+    accepted; ``bool`` is not (``True`` would otherwise mean exposure 1).
     """
     if value is None:
         return None
-    if not isinstance(value, int):
+    if not _is_integer(value):
         raise TypeError(f"{label} must be an int or None, got {type(value).__name__}")
     if value <= 0:
         raise ValueError(f"{label} must be a positive integer, got {value}")
@@ -48,4 +56,4 @@ def validate_manual_exposure(value: int | None, *, label: str) -> int | None:
             f"{label}={value} exceeds the 24-bit REG_EXPOSURE maximum "
             f"(0x{MAX_EXPOSURE_REGISTER:06X} = {MAX_EXPOSURE_REGISTER})"
         )
-    return value
+    return int(value)

@@ -152,6 +152,8 @@ class Model8100V2(Gl128Common):
     # Capture-identical to the SE session-13 maps (shared before 8300i promotion).
     exposure_lperiod: int = 14000
     exposure_short: int = 14000
+    #: ME long pass for ``me_long_mode="fixed"``: 3x the short, as on the 8200i SE.
+    me_fixed_long_exposure: int = 42000
     pixel_clock_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(PIXEL_CLOCK_BY_DPI)
     )
