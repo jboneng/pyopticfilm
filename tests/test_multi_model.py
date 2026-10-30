@@ -108,6 +108,7 @@ def test_scan_ready_validate_set():
         id(MODEL_8100_V2),
         id(MODEL_8300I_SE),
         id(MODEL_7600I_V1),
+        id(MODEL_7600I_V2),
     }
     for m in KNOWN_MODELS:
         if m in (
@@ -115,6 +116,7 @@ def test_scan_ready_validate_set():
             MODEL_8100_V2,
             MODEL_8300I_SE,
             MODEL_7600I_V1,
+            MODEL_7600I_V2,
         ):
             assert m.scan_ready is True
             continue
@@ -140,6 +142,7 @@ def test_geometry_for_each_canonical_model():
 
 def test_infrared_caps():
     assert MODEL_8200I.supports_infrared is True
+    assert MODEL_7600I_V2.supports_infrared is True
     assert MODEL_7400.supports_infrared is False
     assert MODEL_7200I.supports_infrared is True
     assert MODEL_7200_V2.supports_infrared is False

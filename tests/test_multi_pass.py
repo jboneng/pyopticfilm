@@ -101,6 +101,13 @@ def test_merge_n_passes_all_frames_black_stays_black():
     assert result.fusion_stats.zero_weight_fraction == 1.0
 
 
+def test_merge_n_passes_below_floor_keeps_mean():
+    """Every repeat under the noise floor (131 DN): plain mean, not black."""
+    frames = [np.full((4, 4, 3), v, dtype=np.uint16) for v in (100, 120, 110)]
+    result = merge_n_passes(frames)
+    assert np.all(result.rgb == 110)
+
+
 def test_merge_n_passes_all_frames_clipped_keep_clip_level():
     """Clipped in every repeat: no confident frame, but the pixel stays bright."""
     frames = [np.full((4, 4, 3), 65535, dtype=np.uint16) for _ in range(3)]

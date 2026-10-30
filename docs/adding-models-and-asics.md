@@ -234,8 +234,9 @@ compare register programming against captures.
 
 Flip it only after the checklist in
 [scanner-validation.md](scanner-validation.md#hardware-sign-off-scan-ready--lock-oracle-edits)
-passes on that hardware: park, full-frame 1200 / 1800 / 7200, a crop,
-multi-exposure, and IR if the model has it. The sign-off change then:
+passes on that hardware: park; full-frame scans at representative low, middle,
+and maximum supported resolutions; a crop; multi-exposure if implemented for
+that model; and IR if the model supports it. The sign-off change then:
 
 - sets `scan_ready: bool = True` and updates the leaf docstring;
 - updates the model lists in the `_ensure_scan_ready()` error in `scanner.py`

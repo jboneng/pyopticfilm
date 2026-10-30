@@ -150,3 +150,37 @@ def test_host_calib_chunked_at_large_geometry():
     assert out.shape == (h, w, 3)
     assert out.dtype == np.uint16
     assert float(out.mean()) > 25000
+
+
+def test_7600i_v2_white_strip_uses_open_light_zone_near_home():
+    from pyopticfilm.device.select import MODEL_7600I_V2
+    from pyopticfilm.scan.geometry import compute_calib_geometry
+
+    geo = compute_calib_geometry(1800, model=MODEL_7600I_V2)
+    # 1.5 mm from home in 3600-dpi motor steps, not the 28.5 mm TA offset (holder edge).
+    assert geo.starty == int(1.5 * 3600 / 25.4)
+    assert compute_calib_geometry(1800, model=MODEL_8200I).starty == int(28.5 * 3600 / 25.4)
+
+
+def test_pga_gain_matches_ad9826_law():
+    from pyopticfilm.scan.calibrate import _pga_gain
+
+    assert _pga_gain(0) == 1.0
+    assert abs(_pga_gain(63) - 6.0) < 1e-9
+    # 7600i v2 hardware: code 24 → 17 changed G white by 1.135x.
+    assert abs(_pga_gain(24) / _pga_gain(17) - 1.135) < 0.005
+
+
+def test_7600i_v2_dark_reference_averages_more_lines():
+    from pyopticfilm.device.select import MODEL_7600I_V2
+
+    for model, expected_taller in ((MODEL_7600I_V2, True), (MODEL_8200I, False)):
+        cal = Calibrator(None, model=model)
+        scan = compute_geometry(1800, model=model, area=(0.0, 0.0, 0.2, 0.2))
+        white = cal._calib_geometry_for(scan, method="transparency")
+        dark = cal._dark_geometry_for(scan, white, method="transparency")
+        assert dark.pixels == white.pixels and dark.startx == white.startx
+        if expected_taller:
+            assert dark.lines >= MODEL_7600I_V2.calib_dark_lines - 2
+        else:
+            assert dark is white

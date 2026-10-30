@@ -290,7 +290,9 @@ class MockScannerTransport(FakeUsbTransport):
         self.registers.setdefault(0x06, _R.PWRBIT)
 
     def _status_byte(self) -> int:
-        v = _R.STATUS_PWRBIT | _R.STATUS_LAMPSTS
+        v = _R.STATUS_PWRBIT
+        if self.registers.get(0x03, 0) & _R.LAMPPWR:
+            v |= _R.STATUS_LAMPSTS
         if self.buffer_empty:
             v |= _R.STATUS_BUFEMPTY
         if self.at_home:
@@ -305,6 +307,10 @@ class MockScannerTransport(FakeUsbTransport):
         raw = self._status_byte()
         self.registers[_R.REG_0x41] = raw
         self.registers[_SE.REG_STATUS] = raw
+        motor_flags = _R.DATAENB if not self.buffer_empty else 0
+        if self.motor_enabled:
+            motor_flags |= _R.MOTMFLG
+        self.registers[0x40] = motor_flags
 
     def _before_register_read(self, addr: int) -> None:
         if addr in (_R.REG_0x41, _SE.REG_STATUS):
@@ -323,11 +329,16 @@ class MockScannerTransport(FakeUsbTransport):
         if self._motion_reads >= 4:
             self.motor_enabled = False
             self.feed_finished = True
+            if self.registers.get(0x02, 0) & _R.AGOHOME:
+                self.at_home = True
             self.request_register[0x21] = 0x04
             self._sync_status()
 
     def _after_register_write(self, addr: int, value: int) -> None:
         value &= 0xFF
+        if addr == 0x03:
+            self._sync_status()
+            return
         if addr == 0x01:
             scanning = bool(value & _R.SCAN)
             self.buffer_empty = not scanning
@@ -368,8 +379,17 @@ class MockScannerTransport(FakeUsbTransport):
         return 256
 
     def _bulk_in_bytes(self, size: int) -> bytes:
-        """Chunky RGB16 LE: R=x, G=y, B=x XOR y (visible layout/channel bugs)."""
+        """Chunky RGB16 LE: R=x, G=y, B=x XOR y (visible layout/channel bugs).
+
+        Values scale with LPERIOD (0x38) relative to 14000 so exposure brackets differ,
+        and drop to near-black with neither the lamp nor the IR LED on.
+        """
         width = self._line_width()
+        lperiod = ((self.registers.get(0x38, 0) & 0xFF) << 8) | (self.registers.get(0x39, 0) & 0xFF)
+        gain_num, gain_den = (lperiod, 14000) if lperiod else (1, 1)
+        lit = self.registers.get(0x03, 0) & _R.LAMPPWR or self.registers.get(0xA8, 0) & _R.IR_LAMP_A8_MASK
+        if not lit:
+            gain_den *= 64  # dark frame: no light source on
         out = bytearray(size)
         off = self._bulk_offset
         for i in range(0, size - 1, 2):
@@ -384,6 +404,7 @@ class MockScannerTransport(FakeUsbTransport):
                 val = y & 0xFFFF
             else:
                 val = (x ^ y) & 0xFFFF
+            val = min(0xFFFF, val * gain_num // gain_den)
             out[i] = val & 0xFF
             out[i + 1] = (val >> 8) & 0xFF
         self._bulk_offset += size

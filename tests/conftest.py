@@ -31,3 +31,17 @@ def _isolated_calib_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     monkeypatch.setattr(calibrate, "default_cache_path", lambda: path)
     monkeypatch.setattr(scanner, "default_cache_path", lambda: path)
     return path
+
+
+#: Mock scans skip hardware settle waits (lamp, dark/white strip); real waits
+#: made calibration-heavy mock tests take seconds each.
+_MAX_TEST_SLEEP_S = 0.005
+
+
+@pytest.fixture(autouse=True)
+def _fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cap ``time.sleep`` in tests; timeouts still use ``time.monotonic``."""
+    import time
+
+    real_sleep = time.sleep
+    monkeypatch.setattr(time, "sleep", lambda s: real_sleep(min(float(s), _MAX_TEST_SLEEP_S)))

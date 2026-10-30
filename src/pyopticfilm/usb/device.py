@@ -44,7 +44,7 @@ PID_OPTICFILM_7200_V2 = 0x0C07
 PID_OPTICFILM_7300 = 0x0C12
 PID_OPTICFILM_7400 = 0x0C3A  # bcd 0x0400 → 7300 tables; bcd 0x0605 → 7400-v2
 PID_OPTICFILM_7500I = 0x0C13
-PID_OPTICFILM_7600I = 0x0C3B  # bcd 0x0400 → 7600i v1; bcd 0x0605 → 8200i
+PID_OPTICFILM_7600I = 0x0C3B  # bcd 0x0400 → 7600i v1; bcd 0x0605 → 7600i v2 (8200i tables)
 PID_OPTICFILM_8100 = 0x130C
 
 SUPPORTED_IDS: frozenset[tuple[int, int]] = frozenset(
@@ -281,8 +281,8 @@ class UsbDeviceHandle:
                 f"Device {info.device_id} is not a known OpticFilm. "
                 f"This release scans OpticFilm 8200i SE (07b3:1825), "
                 f"OpticFilm 8100 (V2) (07b3:1824), OpticFilm 8300i SE "
-                f"(07b3:181f), and OpticFilm 7600i v1 (07b3:0c3b); other "
-                f"PIDs may open for probe/status only."
+                f"(07b3:181f), and OpticFilm 7600i v1 and v2 (07b3:0c3b); "
+                f"other PIDs may open for probe/status only."
             )
         self.info = info
         self._dev = None
@@ -311,7 +311,7 @@ class UsbDeviceHandle:
                 raise DeviceNotFoundError(
                     "No OpticFilm found. This release scans OpticFilm 8200i SE "
                     "(07b3:1825), OpticFilm 8100 (V2) (07b3:1824), OpticFilm "
-                    "8300i SE (07b3:181f), and OpticFilm 7600i v1 (07b3:0c3b). "
+                    "8300i SE (07b3:181f), and OpticFilm 7600i v1 and v2 (07b3:0c3b). "
                     "Check cabling and WinUSB binding — see "
                     "docs/windows-setup.md."
                 )

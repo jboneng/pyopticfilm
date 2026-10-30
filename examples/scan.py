@@ -3,9 +3,9 @@
 
 Enumerate connected scanners, pick one, choose PPI, optionally enable
 multi-exposure (ME) and infrared (IR) where the model offers them (ME on the
-8200i SE, 8100 V2 and 8300i SE except at 7200 dpi; IR on the 8200i SE and
-8300i SE, and on the 7600i v1 at 3600/7200 dpi), scan the default full frame,
-and write 16-bit TIFF files to a folder.
+8200i SE, 8100 V2 and 8300i SE except at 7200 dpi, and on the 7600i v2; IR on
+the 8200i SE, 8300i SE and 7600i v2, and on the 7600i v1 at 3600/7200 dpi),
+scan the default full frame, and write 16-bit TIFF files to a folder.
 
 Requires WinUSB/libusb binding and ``pip install tifffile`` for TIFF output::
 
@@ -101,7 +101,7 @@ def main() -> int:
         print(
             f"{model.model} is not scan-ready in this release; "
             "only the OpticFilm 8200i SE, OpticFilm 8100 (V2), "
-            "OpticFilm 8300i SE, and OpticFilm 7600i v1 can scan.",
+            "OpticFilm 8300i SE, and OpticFilm 7600i v1 and v2 can scan.",
             file=sys.stderr,
         )
         return 1

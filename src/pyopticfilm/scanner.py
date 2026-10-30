@@ -465,7 +465,7 @@ class Scanner:
                 f"{self._model.model} ({self._model.asic}) is locked out in this "
                 "release: only OpticFilm 8200i SE (07b3:1825), OpticFilm 8100 "
                 "(V2) (07b3:1824), OpticFilm 8300i SE (07b3:181f), and "
-                "OpticFilm 7600i v1 (07b3:0c3b) are validated for scanning. "
+                "OpticFilm 7600i v1 and v2 (07b3:0c3b) are validated for scanning. "
                 "Open, status, lamp and register dumps still work."
             )
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,10 @@ class ScanImage:
     All arrays are **linear film-negative measurements** (bright sensor values
     correspond to dense emulsion). Positive conversion is the host app's job.
 
+    Traditional silver black-and-white film (HP5, Tri-X, ...) blocks infrared,
+    so its ``ir`` plane records the picture rather than only dust. Check
+    :attr:`ir_tracks_image` before using ``ir`` for dust removal.
+
     Multi-exposure (GL128 hardware-tested models): the SNR/IVW-merged
     deliverable with film-base makeup is in ``rgb``. Bracket planes and fusion
     stats are **not** on ``ScanImage`` — use
@@ -34,9 +39,77 @@ class ScanImage:
     device_model: str = "PLUSTEK OpticFilm 8200i"
     ir: np.ndarray | None = None
 
+    @cached_property
+    def ir_tracks_image(self) -> bool | None:
+        """True when ``ir`` follows the picture (silver film), ``None`` without IR."""
+        if self.ir is None:
+            return None
+        return infrared_tracks_image(self.rgb, self.ir)
+
     def save_tiff(self, path: str | Path) -> Path:
         """Write a 16-bit RGB TIFF (the scanned frame only; no ``*_IR`` sidecar)."""
         return save_rgb16_tiff(self.rgb, path, dpi=self.dpi)
+
+
+#: IR p95-p5 spread over its median above which IR is not just a dust field.
+#: Colour negative measured 0.036, silver HP5 Plus 0.76 (7600i v2).
+IR_IMAGE_SPREAD = 0.2
+#: Block-averaged IR vs visible correlation above which IR follows the picture.
+#: Colour negative 0.60 (faint dye/shading), HP5 Plus and Tri-X 400 0.999.
+IR_IMAGE_CORRELATION = 0.8
+#: IR spread relative to the visible spread for low-contrast frames: silver
+#: film copies the image into IR (HP5 0.995, Tri-X 1.047), colour does not (0.053).
+IR_IMAGE_SPREAD_RATIO = 0.5
+#: Visible spread below which the ratio test is skipped (spreads are noise).
+VISIBLE_MIN_SPREAD = 0.1
+
+
+def infrared_tracks_image(
+    rgb: np.ndarray,
+    ir: np.ndarray,
+    *,
+    inset: float = 0.06,
+    block: int = 8,
+) -> bool:
+    """True when the IR plane records the picture, so it is unusable as a dust map.
+
+    Dyes in colour (and chromogenic B&W) film are IR-transparent, so their IR
+    plane is flat apart from dust. Silver grains block IR, so a silver B&W IR
+    plane varies widely and tracks the visible image. Both tests run on
+    ``block``-averaged pixels inside an ``inset`` border to ignore grain and
+    the holder edge.
+    """
+    vis = np.asarray(rgb, dtype=np.float64)
+    inf = np.asarray(ir, dtype=np.float64)
+    if vis.ndim == 3:
+        vis = vis.mean(axis=2)
+    if vis.shape != inf.shape:
+        raise ValueError(f"rgb {vis.shape} and ir {inf.shape} differ in size")
+    h, w = inf.shape
+    y0, y1 = int(h * inset), int(h * (1 - inset))
+    x0, x1 = int(w * inset), int(w * (1 - inset))
+    hh, ww = ((y1 - y0) // block) * block, ((x1 - x0) // block) * block
+    if hh < 2 * block or ww < 2 * block:
+        return False
+
+    def pool(a: np.ndarray) -> np.ndarray:
+        a = a[y0 : y0 + hh, x0 : x0 + ww]
+        return a.reshape(hh // block, block, ww // block, block).mean(axis=(1, 3)).ravel()
+
+    v, i = pool(vis), pool(inf)
+    if float(np.median(i)) <= 0 or float(np.median(v)) <= 0 or v.std() == 0 or i.std() == 0:
+        return False
+
+    def spread(a: np.ndarray) -> float:
+        return float(np.percentile(a, 95) - np.percentile(a, 5)) / float(np.median(a))
+
+    ir_spread, vis_spread = spread(i), spread(v)
+    # A thin, flat silver frame varies little in IR, but as much as it does in
+    # the visible; colour IR stays flat whatever the image contrast.
+    varies = ir_spread >= IR_IMAGE_SPREAD or (
+        vis_spread >= VISIBLE_MIN_SPREAD and ir_spread >= IR_IMAGE_SPREAD_RATIO * vis_spread
+    )
+    return varies and float(np.corrcoef(v, i)[0, 1]) > IR_IMAGE_CORRELATION
 
 
 def save_rgb16_tiff(rgb: np.ndarray, path: str | Path, *, dpi: int) -> Path:

@@ -274,6 +274,30 @@ class Model8200i:
             ("infrared", 7200): 14000,
         }
     )
+    #: LED settle after the lamp turns on before an image capture (s).
+    lamp_settle_s: float = 0.5
+    #: Absolute white-strip Y from home (mm); ``None`` keeps the SANE TA offset.
+    calib_white_home_y_mm: float | None = None
+    #: Per-channel PGA search target for the white strip p99; ``None`` keeps table gains.
+    afe_white_target: float | None = None
+    #: Lines averaged for the dark reference (0 = same strip as white).
+    calib_dark_lines: int = 0
+    #: Image-pass feed left after a low-res pre-feed (0 disables pre-feed).
+    prefeed_margin_steps: int = 0
+    #: Measured extra travel of the pre-feed scan beyond its nominal distance.
+    prefeed_offset_steps: int = 0
+    #: Single-pass prescan target for the film peak (raw counts); ``None`` disables.
+    auto_exposure_target: float | None = None
+
+    # Multi-Exposure: the long pass raises LPERIOD (reg 0x38); the scan slope
+    # table scales motor speed with it. Clamp max is the hardware-verified
+    # ceiling — raise it only after a supervised long-exposure scan.
+    supports_multi_exposure: bool = True
+    exposure_long: int = 42000
+    me_long_clamp_min: int = 28000
+    me_long_clamp_max: int = 42000
+    me_max_exposure_ratio: float = 3.0
+
     dummy_pixel: int = 20
     motor_base_ydpi: int = 3600
     optical_resolution: int = 7200
@@ -292,6 +316,11 @@ class Model8200i:
     @property
     def max_area_mm(self) -> tuple[float, float]:
         return (self.x_size_ta_mm, self.y_size_ta_mm)
+
+    @property
+    def multi_exposure_resolutions_dpi(self) -> tuple[int, ...]:
+        """Resolutions where ``scan(multi_exposure=True)`` is accepted."""
+        return self.resolutions_dpi if self.supports_multi_exposure else ()
 
     def boot_register_map(self) -> dict[int, int]:
         """Init regs with sensor custom overlay and dpihw applied."""

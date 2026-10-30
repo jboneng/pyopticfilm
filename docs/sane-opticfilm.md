@@ -5,7 +5,8 @@ backend. Scan / home / park / calibrate remain **gated** (`scan_ready=False`)
 until a model is **hardware-tested**. Protocol-validated traces (see
 [scanner-validation.md](scanner-validation.md)) do not flip that gate. The
 GL128 models (8200i SE, 8100 V2, and 8300i SE) and GL843 7600i v1 are
-capture-derived, not completed from SANE.
+capture-derived, not completed from SANE. The GL845 7600i v2 uses the
+SANE-derived 8200i tables and is hardware-tested.
 
 ## Model → ASIC → SANE sources
 
@@ -52,7 +53,7 @@ capture-derived, not completed from SANE.
 | GL842 scan session | `src/pyopticfilm/scan/session_gl842.py` |
 | GL128 scan session | `src/pyopticfilm/scan/session_gl128.py` |
 | Host dark/white calib | `src/pyopticfilm/scan/calibrate.py` (non-GL128 branch) |
-| ASIC DVDSET shading | `src/pyopticfilm/scan/calib_gl128.py` (GL128: SE and 8100 V2) |
+| ASIC DVDSET shading | `src/pyopticfilm/scan/calib_gl128.py` (GL128: 8200i SE, 8100 V2, 8300i SE) |
 
 ## MAXWD unit differences (SANE)
 
@@ -75,7 +76,7 @@ These matter when sizing the ASIC line buffer:
 
 1. Keep `scan_ready=False` except for the hardware-tested set (enforced by `tests/test_multi_model.py::test_scan_ready_validate_set`).
 2. Hardwareless protocol traces may be added per [scanner-validation.md](scanner-validation.md); they change the documented support level, not `scan_ready`.
-3. Lab sequence for GL845 8200i: `tools/bringup_gl845_8200i.py` (open → status → lamp → home → tiny scan → park → host calib → IR). Requires `--allow-unvalidated`; does **not** flip the gate.
+3. Lab sequence for GL845 8200i or 7600i v2: `tools/bringup_gl845_8200i.py --model 7600i-v2 --steps init,home,tiny,park` selects the latter by its USB revision. ASIC init and motor/image steps require `--allow-unvalidated`; this does **not** flip the gate.
 4. Flip **that** model’s `scan_ready` only after a successful image + park on real hardware.
 5. Sibling order after the GL128 trio (8200i SE, 8100 V2, 8300i SE): GL845 aliases (8100, 7400 v2, 7600i v2) → GL843 (incl. `swap_16bit_data` decode for 7200i) → GL842.
 
@@ -87,6 +88,7 @@ These matter when sizing the ASIC line buffer:
 | 8100 (V2) | capture-derived (SE sibling; no IR) | ASIC shading | **True** |
 | 8300i SE | capture-derived (SE sibling; IR) | ASIC shading | **True** |
 | 8200i (GL845) | setup USB golden | wired | False until HW image+park |
+| 7600i v2 (GL845) | 8200i tables + v2 overrides | host dark/white, AFE gain search | **True** |
 | Other GL845 aliases | share 8200i session | wired | False |
 | 7600i v1 (GL843) | capture-derived | live ASIC calibration per scan | **True** |
 | Other GL843 / GL842 | tables only | wired | False |
