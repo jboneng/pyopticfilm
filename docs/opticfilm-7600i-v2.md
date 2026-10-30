@@ -242,5 +242,3 @@ Independent reviews (filmscanner.info) report an effective resolution of about
    been run (results there). After maintainer approval, set `scan_ready=True` and
    add `tests/model_lock/opticfilm_7600i_v2/`.
 2. **Chromogenic B&W:** confirm that the IR detector does not flag it.
-3. **NegPy:** an end-to-end run once scanning is enabled.
-4. **DNG export:** not started.
