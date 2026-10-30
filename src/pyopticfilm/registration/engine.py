@@ -21,7 +21,7 @@ from pyopticfilm.registration.preprocess import (
     roi_registration_plane,
 )
 from pyopticfilm.registration.regions import consensus_translation, estimate_regional_shifts
-from pyopticfilm.registration.resample import warp_row_shifts, warp_shift
+from pyopticfilm.registration.resample import quadratic_field, warp_row_shifts, warp_shift
 from pyopticfilm.registration.types import (
     LineWarpTransform,
     RegistrationContext,
@@ -418,6 +418,96 @@ def _fit_row_line(rows: np.ndarray, dys: np.ndarray, outlier_px: float) -> tuple
             break
         keep = next_keep
     return float(slope), float(intercept), keep
+
+
+def _fit_quadratic_field(
+    xs: np.ndarray, ys: np.ndarray, shifts: np.ndarray, w: int, h: int, opt: RegistrationOptions
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Robust ``(dx, dy)`` surfaces over tiles, as :func:`quadratic_field` terms.
+
+    Falls to a plane when there are too few tiles for curvature, and to ``None``
+    when they do not cover enough of the frame to say what the corners do.
+    """
+    n = xs.shape[0]
+    if n < opt.field_min_tiles_plane:
+        return None
+    u = 2.0 * xs / max(w - 1, 1) - 1.0
+    v = 2.0 * ys / max(h - 1, 1) - 1.0
+    one = np.ones_like(u)
+    if n >= opt.field_min_tiles_quadratic:
+        design = np.column_stack([one, v, v * v, u, u * v, u * u])
+        terms = np.arange(6)
+    else:
+        design = np.column_stack([one, v, u])
+        terms = np.array([0, 1, 3])
+    keep = np.ones(n, dtype=bool)
+    coef = np.zeros((6, 2))
+    for _ in range(4):
+        if int(np.count_nonzero(keep)) < design.shape[1] + 2:
+            return None
+        coef[terms] = np.linalg.lstsq(design[keep], shifts[keep], rcond=None)[0]
+        err = np.hypot(*(shifts - design @ coef[terms]).T)
+        next_keep = err <= max(opt.field_outlier_px, 3.0 * float(np.median(err[keep])))
+        if np.array_equal(next_keep, keep):
+            break
+        keep = next_keep
+    if min(float(np.ptp(u[keep])), float(np.ptp(v[keep]))) < 2.0 * opt.field_min_coverage:
+        return None
+    return coef[:, 0], coef[:, 1]
+
+
+def estimate_shift_field(
+    reference: np.ndarray,
+    aligned: np.ndarray,
+    *,
+    options: RegistrationOptions | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Smooth ``(dx, dy)`` left between two already aligned planes, or ``None``.
+
+    The passes also differ across the frame, not only down it: a real HP5+ pair
+    had dx moving by a pixel corner to corner. On sharp grain that much reads as
+    disagreement, and the merge's guard threw out the long.
+    """
+    opt = options or RegistrationOptions()
+    ref = np.asarray(reference, dtype=np.float32)
+    mov = np.asarray(aligned, dtype=np.float32)
+    h, w = ref.shape[:2]
+    side, step = opt.field_tile_side, opt.field_tile_step
+    if ref.shape != mov.shape or h < 3 * side or w < 3 * side:
+        return None
+    origins = [(y0, x0) for y0 in range(side // 2, h - side, step) for x0 in range(side // 2, w - side, step)]
+
+    def measure(origin: tuple[int, int]) -> tuple[float, float, float, float] | None:
+        y0, x0 = origin
+        a, b = ref[y0 : y0 + side, x0 : x0 + side], mov[y0 : y0 + side, x0 : x0 + side]
+        if float(b.max()) >= opt.field_clip_level or float(a.std()) < opt.field_min_tile_std:
+            return None
+        dx, dy, _ = phase_correlate_shift(a - a.mean(), b - b.mean(), upsample=opt.subpixel_factor)
+        return x0 + side / 2.0, y0 + side / 2.0, dx, dy
+
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+        tiles = [t for t in pool.map(measure, origins) if t is not None]
+    if not tiles:
+        return None
+    arr = np.asarray(tiles, dtype=np.float64)
+    fit = _fit_quadratic_field(arr[:, 0], arr[:, 1], arr[:, 2:4], w, h, opt)
+    if fit is None:
+        return None
+    grid_x = np.linspace(0.0, w - 1, 17)
+    grid_y = np.linspace(0.0, h - 1, 17)[:, None]
+    fields = [quadratic_field(c, grid_x, grid_y, w, h) for c in fit]
+    if max(float(np.abs(f).max()) for f in fields) > opt.field_max_px:
+        return None
+    if max(float(np.ptp(f)) for f in fields) < opt.field_min_range_px:
+        return None
+    logger.info(
+        "registration: ME shift field dx range %.2f, dy range %.2f from %d/%d tiles",
+        float(np.ptp(fields[0])),
+        float(np.ptp(fields[1])),
+        arr.shape[0],
+        len(origins),
+    )
+    return fit
 
 
 def estimate_row_drift(

@@ -8,11 +8,14 @@ import pytest
 
 from pyopticfilm.registration.resample import (
     fill_shift_border,
+    quadratic_field,
     row_shift_var_scale,
     warp_cubic,
     warp_integer,
     warp_row_shifts,
     warp_shift,
+    warp_x_field,
+    x_field_var_scale,
 )
 
 
@@ -124,3 +127,44 @@ def test_register_apply_round_trip_reduces_residual():
     assert abs(result.shift[1] - true[1]) < 0.5
     after = luma_residual(ref, aligned)
     assert after < 0.25 * before, (before, after)
+
+
+def _sines(xs: np.ndarray, ys: np.ndarray, seed: int = 3, n: int = 60) -> np.ndarray:
+    """Band-limited texture that can be sampled at any position."""
+    rng = np.random.default_rng(seed)
+    fx, fy = rng.uniform(-0.25, 0.25, (2, n))
+    phase = rng.uniform(0.0, 2.0 * np.pi, n)
+    out = np.zeros(np.broadcast(xs, ys).shape)
+    for a, b, p in zip(fx, fy, phase, strict=True):
+        out += np.sin(2.0 * np.pi * (a * xs + b * ys) + p)
+    return 20000.0 + 900.0 * out
+
+
+def test_quadratic_field_terms():
+    coef = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    assert quadratic_field(coef, np.array(0.0), 0.0, 11, 21) == pytest.approx(1.0 - 2.0 + 3.0 - 4.0 + 5.0 + 6.0)
+    assert quadratic_field(coef, np.array(5.0), 10.0, 11, 21) == pytest.approx(1.0)
+    assert quadratic_field(coef, np.array(10.0), 20.0, 11, 21) == pytest.approx(21.0)
+
+
+def test_warp_x_field_constant_matches_row_warp():
+    yy, xx = np.mgrid[0:64, 0:96].astype(np.float64)
+    img = np.rint(_sines(xx, yy)).astype(np.uint16)
+    field = warp_x_field(img, 0.3, np.zeros(6), method="lanczos4")
+    rows = warp_row_shifts(img, 0.3, np.zeros(64), method="lanczos4")
+    assert np.abs(field[:, 8:-8].astype(int) - rows[:, 8:-8].astype(int)).max() <= 3
+
+
+def test_warp_x_field_follows_the_field():
+    yy, xx = np.mgrid[0:256, 0:256].astype(np.float64)
+    coef = np.array([0.1, 0.2, 0.0, -0.4, 0.3, 0.1])
+    shift = quadratic_field(coef, xx, yy, 256, 256)
+    mov = np.rint(_sines(xx + shift, yy)).astype(np.uint16)
+    out = warp_x_field(mov, 0.0, coef, method="lanczos4")
+    err = out[:, 12:-12].astype(np.float64) - _sines(xx, yy)[:, 12:-12]
+    assert float(np.abs(err).mean()) < 25.0
+
+
+def test_x_field_var_scale_is_one_on_whole_pixels():
+    assert x_field_var_scale(2.0, np.zeros(6), 64, 64, method="lanczos4") == pytest.approx(1.0)
+    assert x_field_var_scale(0.5, np.zeros(6), 64, 64, method="lanczos4") < 1.0

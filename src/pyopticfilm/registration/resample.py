@@ -318,6 +318,58 @@ def row_shift_var_scale(dx: float, dy_per_row: np.ndarray, *, method: str = "lin
     return vertical * float(np.sum(np.stack(horizontal).astype(np.float64) ** 2))
 
 
+def quadratic_field(coef: np.ndarray, x: np.ndarray, y: np.ndarray | float, w: int, h: int) -> np.ndarray:
+    """``c0 + c1 v + c2 v^2 + u (c3 + c4 v) + c5 u^2``, with ``u, v`` in [-1, 1] over the frame."""
+    u = 2.0 * np.asarray(x, dtype=np.float64) / max(w - 1, 1) - 1.0
+    v = 2.0 * np.asarray(y, dtype=np.float64) / max(h - 1, 1) - 1.0
+    return coef[0] + coef[1] * v + coef[2] * v * v + u * (coef[3] + coef[4] * v) + coef[5] * u * u
+
+
+def x_field_var_scale(dx: float, coef: np.ndarray, w: int, h: int, *, method: str = "linear") -> float:
+    """Mean variance factor of white noise through :func:`warp_x_field`."""
+    xs = np.linspace(0.0, w - 1, 33)
+    ys = np.linspace(0.0, h - 1, 33)[:, None]
+    pos = -(float(dx) + quadratic_field(coef, xs, ys, w, h)).ravel()
+    _, weights = _row_tap_weights(pos - np.floor(pos), method)
+    return float(np.mean(np.sum(np.stack(weights).astype(np.float64) ** 2, axis=0)))
+
+
+def warp_x_field(mov: np.ndarray, dx: float, coef: np.ndarray, *, method: str = "linear") -> np.ndarray:
+    """``dst(x, y) = src(x - dx - field(x, y), y)``; see :func:`quadratic_field`.
+
+    The field is held constant over row bands short enough that it moves by
+    under 0.02 px across one.
+    """
+    arr = np.asarray(mov)
+    h, w = arr.shape[:2]
+    dtype = arr.dtype
+    integer = np.issubdtype(dtype, np.integer)
+    top = np.iinfo(dtype).max if integer else 0
+    per_row = 2.0 * (abs(coef[1]) + 2.0 * abs(coef[2]) + abs(coef[4])) / max(h - 1, 1)
+    band_rows = int(np.clip(0.02 / max(per_row, 1e-9), 1, 64))
+    # One taps table: computing weights per pixel is most of the cost otherwise.
+    phases = 1024
+    first, table = _row_tap_weights(np.arange(phases + 1, dtype=np.float64) / phases, method)
+    xs = np.arange(w, dtype=np.float64)
+    trail = (None,) * (arr.ndim - 2)
+    out = np.empty(arr.shape, dtype=dtype)
+
+    def warp_band(r0: int) -> None:
+        r1 = min(h, r0 + band_rows)
+        pos = xs - dx - quadratic_field(coef, xs, 0.5 * (r0 + r1 - 1), w, h)
+        base = np.floor(pos).astype(np.int64)
+        phase = np.rint((pos - base) * phases).astype(np.int64)
+        src = arr[r0:r1].astype(np.float32)
+        acc = np.zeros(src.shape, dtype=np.float32)
+        for i, taps in enumerate(table):
+            acc += taps[phase][(None, slice(None), *trail)] * src[:, np.clip(base + first + i, 0, w - 1)]
+        out[r0:r1] = np.clip(np.rint(acc), 0, top) if integer else acc
+
+    with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
+        list(pool.map(warp_band, range(0, h, band_rows)))
+    return out
+
+
 def warp_row_shifts(
     mov: np.ndarray,
     dx: float,

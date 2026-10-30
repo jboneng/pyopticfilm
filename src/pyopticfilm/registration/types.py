@@ -57,7 +57,18 @@ class LineWarpTransform:
         return float(self.dy_per_row[h // 2])
 
 
-Transform: TypeAlias = TranslationTransform | LineWarpTransform
+@dataclass(frozen=True)
+class FieldWarpTransform(LineWarpTransform):
+    """A :class:`LineWarpTransform` whose dx also varies smoothly over the frame.
+
+    ``dst(x, y) = src(x - dx - field(x, y), y - dy_per_row[y])``; ``dx_coef`` holds
+    the terms of :func:`pyopticfilm.registration.resample.quadratic_field`.
+    """
+
+    dx_coef: np.ndarray  # 6 terms, float64
+
+
+Transform: TypeAlias = TranslationTransform | LineWarpTransform | FieldWarpTransform
 
 
 @dataclass(frozen=True)
@@ -156,3 +167,18 @@ class RegistrationOptions:
     #: Top-to-bottom drift below this (px) stays a plain translation.
     drift_min_range_px: float = 0.15
     drift_outlier_px: float = 0.25
+    #: ME shift field: small tiles on a fine grid, since it is the frame's corners
+    #: that move. Tiles with clipped or flat content are skipped.
+    field_tile_side: int = 128
+    field_tile_step: int = 192
+    field_clip_level: float = 60000.0
+    field_min_tile_std: float = 30.0
+    #: Tiles for a quadratic and for a plane; fewer leaves the row drift alone.
+    field_min_tiles_quadratic: int = 24
+    field_min_tiles_plane: int = 8
+    #: Kept tiles must span this fraction of each axis, or the fit extrapolates.
+    field_min_coverage: float = 0.5
+    #: Over the frame: less than this is not worth a resample, more is not credible.
+    field_min_range_px: float = 0.1
+    field_max_px: float = 2.0
+    field_outlier_px: float = 0.1

@@ -7,7 +7,10 @@ import numpy as np
 import pytest
 
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
-from pyopticfilm.pass_align import align_pass_to_reference
+from pyopticfilm.pass_align import align_pass_to_reference, apply_me_transform, estimate_me_transform
+from pyopticfilm.registration.engine import estimate_shift_field
+from pyopticfilm.registration.resample import quadratic_field
+from pyopticfilm.registration.types import FieldWarpTransform
 from pyopticfilm.scan.exposure_merge import merge_exposures, merge_exposures_result
 
 
@@ -845,3 +848,56 @@ def test_confidence_lut_matches_the_ramps():
     kwargs = {"floor": 131.0, "clip_start": 52428.0, "clip_end": 62258.0}
     raw = np.array([0, 130, 131, 200, 262, 30000, 52428, 58000, 62258, 65535], dtype=np.uint16)
     assert np.array_equal(_confidence_lut(**kwargs)[raw], _smooth_confidence(raw.astype(np.float32), **kwargs))
+
+
+def _sine_scene(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    rng = np.random.default_rng(5)
+    fx, fy = rng.uniform(-0.2, 0.2, (2, 250))
+    phase = rng.uniform(0.0, 2.0 * np.pi, 250)
+    out = np.zeros(np.broadcast(xs, ys).shape)
+    for a, b, p in zip(fx, fy, phase, strict=True):
+        out += np.sin(2.0 * np.pi * (a * xs + b * ys) + p)
+    return 12000.0 + 200.0 * out
+
+
+def _field_pair(coef_x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    h, w = 1000, 1200
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    field = quadratic_field(coef_x, xx, yy, w, h)
+    short = np.repeat(_sine_scene(xx, yy)[..., None], 3, axis=2)
+    long = np.repeat(_sine_scene(xx + field, yy)[..., None], 3, axis=2)
+    return np.rint(short).astype(np.uint16), np.rint(long).astype(np.uint16), field
+
+
+def test_me_transform_recovers_shift_field():
+    short, long, field = _field_pair(np.array([0.0, 0.0, 0.0, -0.4, 0.35, 0.0]))
+    transform = estimate_me_transform(short, long)
+    assert isinstance(transform, FieldWarpTransform)
+    h, w = short.shape[:2]
+    yy, xx = np.mgrid[0:h:50, 0:w:50].astype(np.float64)
+    got = transform.dx + quadratic_field(transform.dx_coef, xx, yy, w, h)
+    assert np.abs(got - field[::50, ::50]).max() < 0.08
+
+
+def test_me_transform_field_warp_registers_the_long():
+    short, long, _ = _field_pair(np.array([0.0, 0.0, 0.0, -0.4, 0.35, 0.0]))
+    aligned, var_scale = apply_me_transform(long, estimate_me_transform(short, long))
+    assert var_scale.shape == (short.shape[0],)
+    inner = (slice(16, -16), slice(16, -16))
+    before = np.abs(long[inner].astype(np.float64) - short[inner]).mean()
+    after = np.abs(aligned[inner].astype(np.float64) - short[inner]).mean()
+    assert after < 0.2 * before
+
+
+def test_me_transform_skips_field_without_one():
+    short, long, _ = _field_pair(np.zeros(6))
+    assert not isinstance(estimate_me_transform(short, long), FieldWarpTransform)
+
+
+def test_shift_field_needs_frame_coverage():
+    """Tiles in one corner say nothing about the others: no field beats a wild one."""
+    short, long, _ = _field_pair(np.array([0.0, 0.0, 0.0, -0.4, 0.35, 0.0]))
+    plane_s, plane_l = short[..., 1].astype(np.float32), long[..., 1].astype(np.float32)
+    plane_l[:, 300:] = 65000.0
+    plane_l[300:] = 65000.0
+    assert estimate_shift_field(plane_s, plane_l) is None

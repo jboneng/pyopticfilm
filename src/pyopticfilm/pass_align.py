@@ -14,18 +14,23 @@ from pyopticfilm.registration.engine import (
     apply_transform,
     estimate_banded,
     estimate_row_drift,
+    estimate_shift_field,
     estimate_translation,
 )
 from pyopticfilm.registration.models import band_shift_profile
 from pyopticfilm.registration.phase import phase_correlate_shift
 from pyopticfilm.registration.resample import (
+    quadratic_field,
     row_shift_touch_mask,
     row_shift_var_scale,
     warp_integer,
     warp_row_shifts,
+    warp_x_field,
+    x_field_var_scale,
 )
 from pyopticfilm.registration.resample import warp_shift as _warp_shift_impl
 from pyopticfilm.registration.types import (
+    FieldWarpTransform,
     LineWarpTransform,
     RegistrationMode,
     RegistrationOptions,
@@ -123,7 +128,7 @@ def estimate_pass_shift(reference: np.ndarray, moving: np.ndarray) -> Shift2D:
 
 
 def estimate_me_transform(reference: np.ndarray, moving: np.ndarray) -> Transform:
-    """Registration of an ME pass: translation plus row drift when there is any."""
+    """Registration of an ME pass: translation, then row drift and a shift field if any."""
     options = _default_options()
     result = estimate_translation(
         reference,
@@ -134,7 +139,37 @@ def estimate_me_transform(reference: np.ndarray, moving: np.ndarray) -> Transfor
     if not result.accepted:
         return TranslationTransform(0.0, 0.0)
     drift = estimate_row_drift(reference, moving, result.shift, options=options)
-    return result.transform if drift is None else drift
+    return _add_shift_field(reference, moving, result.transform if drift is None else drift, options)
+
+
+def _add_shift_field(
+    reference: np.ndarray, moving: np.ndarray, transform: Transform, options: RegistrationOptions
+) -> Transform:
+    """``transform`` with the smooth shift left after it, or as it is when there is none.
+
+    Measured on green after the warp, so tiles report what the warp leaves. A dy
+    that varies along a row would need a second vertical pass; dy down the frame
+    covers it on real pairs, so the field's dy is taken at mid-column.
+    """
+    ref = np.asarray(reference)
+    mov = np.asarray(moving)
+    h, w = ref.shape[:2]
+    if isinstance(transform, LineWarpTransform):
+        dx, dy = float(transform.dx), np.asarray(transform.dy_per_row, dtype=np.float64)
+    else:
+        dx, dy = float(transform.dx), np.full(h, float(transform.dy))
+    plane = (lambda a: a[..., 1]) if ref.ndim == 3 else (lambda a: a)
+    aligned = warp_row_shifts(plane(mov), dx, dy, method=_ME_RESAMPLER)
+    field = estimate_shift_field(plane(ref), aligned, options=options)
+    if field is None:
+        return transform
+    coef_x, coef_y = field
+    rows = np.arange(h, dtype=np.float64)
+    return FieldWarpTransform(
+        dx=dx,
+        dy_per_row=dy + quadratic_field(coef_y, np.asarray((w - 1) / 2.0), rows, w, h),
+        dx_coef=coef_x,
+    )
 
 
 def transform_mean_shift(transform: Transform) -> Shift2D:
@@ -161,7 +196,24 @@ def apply_me_transform(
     merge's clip confidence rejects it.
     """
     mov = np.asarray(moving)
-    h = mov.shape[0]
+    h, w = mov.shape[:2]
+    if isinstance(transform, FieldWarpTransform):
+        dx, dy = float(transform.dx), np.asarray(transform.dy_per_row, dtype=np.float64)
+        aligned = warp_x_field(
+            warp_row_shifts(mov, 0.0, dy, method=_ME_RESAMPLER), dx, transform.dx_coef, method=_ME_RESAMPLER
+        )
+        var_scale = row_shift_var_scale(0.0, dy, method=_ME_RESAMPLER) * x_field_var_scale(
+            dx, transform.dx_coef, w, h, method=_ME_RESAMPLER
+        )
+        grid = quadratic_field(transform.dx_coef, np.linspace(0.0, w - 1, 17), np.linspace(0.0, h - 1, 17)[:, None], w, h)
+        mid = float(np.median(grid))
+        reach = _ME_RING_REACH + int(np.ceil(float(np.abs(grid - mid).max())))
+        if clip_level is not None and np.issubdtype(mov.dtype, np.integer):
+            clipped = mov >= clip_level
+            if np.any(clipped):
+                touched = row_shift_touch_mask(clipped, round(dx + mid), dy, reach=reach)
+                aligned[touched] = np.iinfo(mov.dtype).max
+        return aligned, var_scale
     if isinstance(transform, LineWarpTransform):
         dx, dy = float(transform.dx), np.asarray(transform.dy_per_row, dtype=np.float64)
     else:
