@@ -249,7 +249,9 @@ def _fit_pg_noise_from_pair(
         ac = a[..., c]
         bc = b_raw[..., c]
         rc = float(r[c])
-        valid = (ac > floor) & (ac < clip_start) & (bc > floor) & (bc < clip_start)
+        # Select on the long's level, not the short's reading: cutting the
+        # short at the floor trims its noise there and biases the fit.
+        valid = (bc / rc > floor) & (bc < clip_start) & (ac < clip_start)
         if int(np.count_nonzero(valid)) < _NOISE_FIT_MIN_BINS * _NOISE_FIT_MIN_PER_BIN:
             continue
         level = bc[valid] / rc
@@ -373,6 +375,34 @@ def _pass_variances(
     return va, vb
 
 
+def _confident_luma(
+    conf: np.ndarray,
+    xa: np.ndarray,
+    xb: np.ndarray,
+    va: np.ndarray,
+    vb: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Luma of both passes and its variances over channels confident in both.
+
+    A channel clipped in the long (often the clear red under the orange mask)
+    reads far below the short there; in a plain mean it made every pixel with
+    one clipped channel look misregistered, and the guards then dropped the
+    long for the other channels too. ``conf`` is ``min(ca, cb)`` per channel.
+    Returns ``(lum_xa, lum_xb, va_lum, vb_lum, has)``; ``has`` is False where
+    no channel is confident in both passes.
+    """
+    wsum = conf.sum(axis=2)
+    has = wsum > 1e-6
+    wsafe = np.maximum(wsum, 1e-6)
+    return (
+        (conf * xa).sum(axis=2) / wsafe,
+        (conf * xb).sum(axis=2) / wsafe,
+        (conf * va).sum(axis=2) / wsafe,
+        (conf * vb).sum(axis=2) / wsafe,
+        has,
+    )
+
+
 def _estimate_z_median(
     short_u: np.ndarray,
     long_u: np.ndarray,
@@ -390,15 +420,18 @@ def _estimate_z_median(
     a = a_s.astype(np.float32)
     b_raw = b_s.astype(np.float32)
     xb = b_raw / r
-    lum_xa = a.mean(axis=2)
-    lum_xb = xb.mean(axis=2)
     va, vb = _pass_variances(
         a, b_raw, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale
     )
-    va_lum = va.mean(axis=2)
-    vb_lum = vb.mean(axis=2)
+    conf = np.minimum(
+        _smooth_confidence(a, floor=floor, clip_start=clip_start, clip_end=clip_end),
+        _smooth_confidence(b_raw, floor=floor, clip_start=clip_start, clip_end=clip_end),
+    )
+    lum_xa, lum_xb, va_lum, vb_lum, has = _confident_luma(conf, a, xb, va, vb)
+    if not np.any(has):
+        return 0.0
     z = (lum_xa - lum_xb) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
-    return float(np.median(z))
+    return float(np.median(z[has]))
 
 
 def _merge_snr_rows(
@@ -427,10 +460,7 @@ def _merge_snr_rows(
         xa, b_raw, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale
     )
 
-    lum_xa = xa.mean(axis=2)
-    lum_xb = xb.mean(axis=2)
-    va_lum = va.mean(axis=2)
-    vb_lum = vb.mean(axis=2)
+    lum_xa, lum_xb, va_lum, vb_lum, has = _confident_luma(np.minimum(ca, cb), xa, xb, va, vb)
     z = (lum_xa - lum_xb) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
     z_local = z - z_median
     c_res = _residual_confidence(z_local)
@@ -447,7 +477,8 @@ def _merge_snr_rows(
     merged = c_res_eff[..., np.newaxis] * ivw + (1.0 - c_res_eff[..., np.newaxis]) * prefer
     # Misregistered edges: per-channel IVW causes R/G/B fringes; fall back to short scale
     # only when luma AND channel spread both disagree (dense shadow keeps long recovery).
-    lum_diff = np.abs(lum_xa - lum_xb)
+    # No channel confident in both: nothing to compare, and IVW is short-only anyway.
+    lum_diff = np.where(has, np.abs(lum_xa - lum_xb), 0.0)
     ivw_spread = np.max(ivw, axis=2) - np.min(ivw, axis=2)
     misaligned = (lum_diff > _LUMA_DISAGREE_TAU) & (ivw_spread > _IVW_CHANNEL_SPREAD_TAU)
     out = np.where(misaligned[..., np.newaxis], xa, merged)

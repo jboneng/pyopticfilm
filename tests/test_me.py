@@ -505,13 +505,28 @@ def test_merge_snr_just_below_clip_end_is_not_black():
 
 
 def _noisy_pair(
-    *, alpha: float, beta: float, r: float, shape=(256, 256), seed: int = 0
+    *,
+    alpha: float,
+    beta: float,
+    r: float,
+    shape=(256, 256),
+    seed: int = 0,
+    level_lo: float = 400.0,
+    log_levels: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Short/long uint16 pair over a smooth scene with Poisson-Gaussian noise."""
+    """Short/long uint16 pair over a smooth scene with Poisson-Gaussian noise.
+
+    ``log_levels`` spaces levels evenly in log (dense film: many pixels near
+    the floor) instead of linearly.
+    """
     rng = np.random.default_rng(seed)
     h, w = shape
     yy, xx = np.mgrid[0:h, 0:w]
-    level = 400.0 + 17000.0 * (xx / (w - 1)) * (0.6 + 0.4 * yy / (h - 1))
+    if log_levels:
+        ramp = level_lo * (17400.0 / level_lo) ** (xx / (w - 1))
+    else:
+        ramp = level_lo + 17000.0 * (xx / (w - 1))
+    level = ramp * (0.6 + 0.4 * yy / (h - 1))
     x = np.repeat(level[..., None], 3, axis=2)
 
     def capture(mean: np.ndarray) -> np.ndarray:
@@ -573,3 +588,58 @@ def test_linear_shift_var_scale():
     assert _linear_shift_var_scale((3.0, -2.0)) == 1.0
     assert abs(_linear_shift_var_scale((0.5, 0.5)) - 0.25) < 1e-12
     assert abs(_linear_shift_var_scale((-0.25, 0.0)) - 0.625) < 1e-12
+
+
+def _one_channel_clipped_pair(seed: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Red clipped in the long (orange-mask-like), G/B dense and well exposed."""
+    rng = np.random.default_rng(seed)
+    truth = np.empty((128, 128, 3))
+    truth[..., 0] = 30000.0
+    truth[..., 1] = 8000.0
+    truth[..., 2] = 5000.0
+
+    def capture(mean: np.ndarray) -> np.ndarray:
+        std = np.sqrt(0.5 * mean + 400.0)
+        return np.clip(np.rint(mean + rng.normal(size=mean.shape) * std), 0, 65535).astype(
+            np.uint16
+        )
+
+    return truth, capture(truth), capture(truth * 3.0)
+
+
+def test_merge_clipped_channel_keeps_long_for_the_others():
+    """A clipped long red must not make G/B fall back to the noisy short."""
+    truth, short, long = _one_channel_clipped_pair()
+    result = merge_exposures_result(short, long, align_shift=(0, 0))
+    out = result.rgb.astype(np.float64)
+    for c in (1, 2):
+        rms_short = float(np.sqrt(np.mean((short[..., c] - truth[..., c]) ** 2)))
+        rms_out = float(np.sqrt(np.mean((out[..., c] - truth[..., c]) ** 2)))
+        assert rms_out < 0.7 * rms_short
+    # Red has no usable long: it stays the short reading (float round-trip: 1 DN).
+    assert np.abs(result.rgb[..., 0].astype(np.int64) - short[..., 0]).max() <= 1
+
+
+def test_merge_guard_still_catches_misregistration_with_clipped_channel():
+    """With red clipped in the long, a misregistered G/B edge still falls back to short."""
+    h, w = 64, 64
+    short = np.empty((h, w, 3), dtype=np.uint16)
+    short[..., 0] = 30000
+    short[..., 1:] = 4000
+    short[: h // 2, :, 1:] = 15000
+    long = np.clip(short.astype(np.int64) * 3, 0, 65535).astype(np.uint16)
+    long = np.roll(long, 2, axis=0)
+    result = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    # Rows h/2, h/2+1 carry the long's bright side over the short's dark side.
+    for row in (h // 2, h // 2 + 1):
+        assert np.array_equal(result.rgb[row], short[row])
+
+
+def test_merge_snr_noise_fit_unbiased_at_high_read_noise():
+    """Read noise comparable to the floor: selecting on the short biased the fit."""
+    short, long = _noisy_pair(alpha=1.0, beta=4096.0, r=3.0, seed=3, level_lo=60.0, log_levels=True)
+    stats = merge_exposures_result(short, long, align_shift=(0, 0)).fusion_stats
+    assert stats is not None
+    assert stats.noise_fitted == (True, True, True)
+    assert np.allclose(stats.noise_alpha, 1.0, rtol=0.08)
+    assert np.allclose(stats.noise_beta, 4096.0, rtol=0.1)
