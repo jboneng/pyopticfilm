@@ -5,16 +5,16 @@ without a physical device, and how that differs from hardware bring-up.
 
 Protocol tests **do not** prove that a physical scanner works. Motor timing,
 lamp/AFE analogue behaviour, firmware quirks, and real USB races are out of
-scope. The OpticFilm 8200i SE, OpticFilm 8100 (V2), OpticFilm 8300i SE, and
-OpticFilm 7600i v1 are hardware-tested (`scan_ready=True`). Every other model
-keeps `scan_ready=False` until it has produced a real image and a successful
-park.
+scope. The OpticFilm 8200i SE, OpticFilm 8100 (V2), OpticFilm 8300i SE,
+OpticFilm 7600i v1, and OpticFilm 7600i v2 are hardware-tested
+(`scan_ready=True`). Every other model keeps `scan_ready=False` until it has
+produced a real image and a successful park.
 
 ## Support levels
 
 | Level | Meaning |
 |-------|---------|
-| **Hardware tested** | Live scan + park on physical hardware. Currently the 8200i SE, 8100 (V2), 8300i SE, and 7600i v1. |
+| **Hardware tested** | Live scan + park on physical hardware. Currently the 8200i SE, 8100 (V2), 8300i SE, 7600i v1, and 7600i v2. |
 | **Protocol validated** | Python USB traffic for a documented setup matches a golden trace, and optical registers match independently computed geometry. A SANE genesys register dump, when present, is an additional oracle. |
 | **Experimental** | Tables and session code exist; `scan()`, `home()`, `park()`, and `calibrate()` stay locked. |
 
@@ -188,7 +188,8 @@ uv run python tools/bringup_gl845_8200i.py --model 7600i-v2 \
 The 7600i v2 shares the GL845 8200i session/tables in this release. The tool
 checks the selected model identity before issuing commands. Use `--device-id`
 when multiple Plustek scanners are connected. ASIC init and motor/image steps
-require the explicit lab override and do not change `scan_ready`.
+require the explicit lab override and do not change `scan_ready` (the 7600i v2
+is already scan-ready; the 8200i is not).
 
 Flip only the tested model's `scan_ready` flag after its hardware sign-off
 checklist below passes; a tiny scan alone is not sufficient.
@@ -211,8 +212,9 @@ scanner, print `bcd_device` and `asic_hint` from
 
 ### 7600i v2 bring-up status
 
-Hardware findings, settings and open work for this model are in
-[opticfilm-7600i-v2.md](opticfilm-7600i-v2.md).
+Hardware-tested (`scan_ready=True`; lock oracles in
+`tests/model_lock/opticfilm_7600i_v2/`). Hardware findings, settings and open
+work for this model are in [opticfilm-7600i-v2.md](opticfilm-7600i-v2.md).
 
 Tested on physical OpticFilm 7600i v2 hardware (`07b3:0c3b`, `bcdDevice=0x0605`):
 
@@ -290,9 +292,10 @@ model's files under `tests/model_lock/`, confirm on **that** hardware:
 - Infrared, if the model has an IR channel
 
 For the 7600i v2, the supported resolution ladder is 900, 1800, 3600, and 7200
-dpi. GL845 multi-exposure is experimental. Before ME is listed as supported,
-record a supervised ME scan at each validated resolution that confirms the long
-LPERIOD envelope (`me_long_clamp_max`).
+dpi. Its sign-off covered all of the above, including a supervised ME scan at
+each resolution (full frame at 900/1800/3600, a crop at 7200) and the long
+LPERIOD envelope up to `me_long_clamp_max` (65000). GL845 multi-exposure on
+other models stays experimental.
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md).
 

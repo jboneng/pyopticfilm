@@ -30,6 +30,7 @@ def test_scan_ready_validate_set():
     from pyopticfilm.device.model_7600i_v1 import MODEL_7600I_V1
     from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
     from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
+    from pyopticfilm.device.select import MODEL_7600I_V2
 
     for m in KNOWN_MODELS:
         if m in (
@@ -37,6 +38,7 @@ def test_scan_ready_validate_set():
             MODEL_8100_V2,
             MODEL_8300I_SE,
             MODEL_7600I_V1,
+            MODEL_7600I_V2,
         ):
             assert model_is_scan_ready(m) is True
         else:
