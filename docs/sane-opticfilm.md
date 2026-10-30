@@ -5,7 +5,8 @@ backend. Scan / home / park / calibrate remain **gated** (`scan_ready=False`)
 until a model is **hardware-tested**. Protocol-validated traces (see
 [scanner-validation.md](scanner-validation.md)) do not flip that gate. The
 GL128 models (8200i SE, 8100 V2, and 8300i SE) and GL843 7600i v1 are
-capture-derived, not completed from SANE.
+capture-derived, not completed from SANE. The GL845 7600i v2 uses the
+SANE-derived 8200i tables and is hardware-tested.
 
 ## Model → ASIC → SANE sources
 
@@ -87,6 +88,7 @@ These matter when sizing the ASIC line buffer:
 | 8100 (V2) | capture-derived (SE sibling; no IR) | ASIC shading | **True** |
 | 8300i SE | capture-derived (SE sibling; IR) | ASIC shading | **True** |
 | 8200i (GL845) | setup USB golden | wired | False until HW image+park |
+| 7600i v2 (GL845) | 8200i tables + v2 overrides | host dark/white, AFE gain search | **True** |
 | Other GL845 aliases | share 8200i session | wired | False |
 | 7600i v1 (GL843) | capture-derived | live ASIC calibration per scan | **True** |
 | Other GL843 / GL842 | tables only | wired | False |

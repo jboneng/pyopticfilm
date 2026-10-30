@@ -10,6 +10,7 @@ Current lock folders:
 - [`opticfilm_8100_v2/`](opticfilm_8100_v2/) — OpticFilm 8100 (V2) (`07b3:1824`)
 - [`opticfilm_8300i_se/`](opticfilm_8300i_se/) — OpticFilm 8300i SE (`07b3:181f`)
 - [`opticfilm_7600i_v1/`](opticfilm_7600i_v1/) — OpticFilm 7600i v1 (`07b3:0c3b`, bcdDevice 4.00)
+- [`opticfilm_7600i_v2/`](opticfilm_7600i_v2/) — OpticFilm 7600i v2 (`07b3:0c3b`, bcdDevice 6.05)
 
 - Add a sibling folder only when that model is hardware-validated and the
   maintainer asks for a lock.

@@ -11,6 +11,7 @@ alwaysApply: true
 - `tests/model_lock/opticfilm_8100_v2/`
 - `tests/model_lock/opticfilm_8300i_se/`
 - `tests/model_lock/opticfilm_7600i_v1/`
+- `tests/model_lock/opticfilm_7600i_v2/`
 
 ## Never without an explicit user request
 

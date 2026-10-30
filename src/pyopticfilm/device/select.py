@@ -43,6 +43,8 @@ MODEL_7600I_V2 = MODEL_8200I.__class__(
     name="plustek-opticfilm-7600i-v2",
     model="OpticFilm 7600i (v2)",
     usb_product_id=PID_OPTICFILM_7600I,
+    # Hardware sign-off: docs/scanner-validation.md and docs/opticfilm-7600i-v2.md.
+    scan_ready=True,
     # Y profile (900 dpi): open light path 0.5-5 mm from home,
     # holder plastic 6.6-28.5 mm, film window from 29 mm. The SANE TA offset
     # (28.5 mm) puts the white strip on the holder edge.
