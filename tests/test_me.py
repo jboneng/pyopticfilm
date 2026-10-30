@@ -502,3 +502,74 @@ def test_merge_snr_just_below_clip_end_is_not_black():
     long[:, :, 0] = 65535
     result = merge_exposures_result(short, long, align_shift=(0, 0))
     assert np.all(result.rgb[:, :, 0] == 62256)
+
+
+def _noisy_pair(
+    *, alpha: float, beta: float, r: float, shape=(256, 256), seed: int = 0
+) -> tuple[np.ndarray, np.ndarray]:
+    """Short/long uint16 pair over a smooth scene with Poisson-Gaussian noise."""
+    rng = np.random.default_rng(seed)
+    h, w = shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    level = 400.0 + 17000.0 * (xx / (w - 1)) * (0.6 + 0.4 * yy / (h - 1))
+    x = np.repeat(level[..., None], 3, axis=2)
+
+    def capture(mean: np.ndarray) -> np.ndarray:
+        std = np.sqrt(alpha * mean + beta)
+        return np.clip(np.rint(mean + rng.normal(0.0, 1.0, mean.shape) * std), 0, 65535).astype(
+            np.uint16
+        )
+
+    return capture(x), capture(x * r)
+
+
+def test_merge_snr_fits_noise_model_from_pass_pair():
+    short, long = _noisy_pair(alpha=0.5, beta=400.0, r=3.0)
+    result = merge_exposures_result(short, long, align_shift=(0, 0))
+    stats = result.fusion_stats
+    assert stats is not None
+    assert stats.noise_fitted == (True, True, True)
+    assert stats.noise_alpha is not None and stats.noise_beta is not None
+    assert np.allclose(stats.noise_alpha, 0.5, rtol=0.15)
+    assert np.allclose(stats.noise_beta, 400.0, rtol=0.35)
+
+
+def test_merge_snr_noise_fit_accounts_for_subpixel_shift():
+    """Bilinear half-pixel shift quarters the long's noise variance (both axes)."""
+    short, long = _noisy_pair(alpha=0.5, beta=400.0, r=3.0, seed=1)
+    result = merge_exposures_result(short, long, align_shift=(0.5, 0.5))
+    stats = result.fusion_stats
+    assert stats is not None
+    assert stats.noise_fitted == (True, True, True)
+    assert np.allclose(stats.noise_alpha, 0.5, rtol=0.15)
+
+
+def test_merge_snr_noise_fit_falls_back_without_noise():
+    """Noiseless frames give no fit; the merge keeps the default model."""
+    short = np.full((64, 64, 3), 8000, dtype=np.uint16)
+    long = np.full((64, 64, 3), 24000, dtype=np.uint16)
+    stats = merge_exposures_result(short, long, align_shift=(0, 0)).fusion_stats
+    assert stats is not None
+    assert stats.noise_fitted == (False, False, False)
+    assert stats.noise_alpha == (1.0, 1.0, 1.0)
+    assert stats.noise_beta == (4096.0, 4096.0, 4096.0)
+
+
+def test_merge_snr_explicit_noise_model_skips_fit():
+    short, long = _noisy_pair(alpha=0.5, beta=400.0, r=3.0, seed=2)
+    stats = merge_exposures_result(
+        short, long, align_shift=(0, 0), alpha=2.0, beta=1000.0
+    ).fusion_stats
+    assert stats is not None
+    assert stats.noise_fitted == (False, False, False)
+    assert stats.noise_alpha == (2.0, 2.0, 2.0)
+    assert stats.noise_beta == (1000.0, 1000.0, 1000.0)
+
+
+def test_linear_shift_var_scale():
+    from pyopticfilm.scan.exposure_merge import _linear_shift_var_scale
+
+    assert _linear_shift_var_scale((0.0, 0.0)) == 1.0
+    assert _linear_shift_var_scale((3.0, -2.0)) == 1.0
+    assert abs(_linear_shift_var_scale((0.5, 0.5)) - 0.25) < 1e-12
+    assert abs(_linear_shift_var_scale((-0.25, 0.0)) - 0.625) < 1e-12

@@ -314,8 +314,9 @@ Scan modes: `"color"`, `"infrared"`. `"gray"` is not implemented.
 
 `scan(..., multi_exposure=True)` is GL128 / hardware-tested models only (8200i SE,
 8100 V2, and 8300i SE). When ME is on, `rgb` is always SNR/IVW-merged (per-channel
-clip confidence, soft highlight roll-off from ~80–95% FS; optional
-`model.me_noise_alpha` / `me_noise_beta`). Pass `infrared=True` with
+clip confidence, soft highlight roll-off from ~80–95% FS). The noise model is
+fitted from each scan's own short/long pair (`last_me_debug.fusion_stats`
+reports it); set both `model.me_noise_alpha` / `me_noise_beta` to fix it instead. Pass `infrared=True` with
 `mode="color"` for a dust/IR plane on the same `ScanImage` (8200i SE, 8300i SE, and
 7600i v1; the 8100 V2 has no IR). Inspect short/long via `scanner.last_me_debug`
 after the scan.

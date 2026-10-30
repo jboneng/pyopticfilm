@@ -513,8 +513,9 @@ class Gl128ScanSession(ScanSession):
             short_manual = False
             exp_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
         exp_long = int(getattr(model, "exposure_long", exp_short * 3))
-        noise_alpha = float(getattr(model, "me_noise_alpha", 1.0))
-        noise_beta = float(getattr(model, "me_noise_beta", 4096.0))
+        # Unset: the ME merge fits its noise model from each scan's pass pair.
+        noise_alpha = getattr(model, "me_noise_alpha", None)
+        noise_beta = getattr(model, "me_noise_beta", None)
 
         if not self.asic._initialized:
             self.asic.init()

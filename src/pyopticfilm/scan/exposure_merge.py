@@ -16,10 +16,19 @@ _FULL_SCALE = 65535.0
 _SNR_FLOOR = 0.002 * _FULL_SCALE
 _SNR_CLIP_START = 0.80 * _FULL_SCALE
 _SNR_CLIP_END = 0.95 * _FULL_SCALE
-# Provisional Poisson-Gaussian DN² model (override via alpha/beta kwargs or
-# :func:`estimate_pg_noise_params` from flat fields).
+# Poisson-Gaussian DN² model. ME merges fit it per scan from the pass pair
+# (:func:`_fit_pg_noise_from_pair`); these are the fallback when the fit fails.
 _SNR_ALPHA = 1.0
 _SNR_BETA = 4096.0  # ~64 DN read noise
+# Pass-pair noise fit: equal-count level bins, robust spread per bin.
+_NOISE_FIT_BINS = 24
+_NOISE_FIT_MIN_PER_BIN = 200
+_NOISE_FIT_MIN_BINS = 4
+# Plausible fitted range; outside it the channel keeps the fallback model.
+_NOISE_FIT_ALPHA_MIN = 1e-3
+_NOISE_FIT_ALPHA_MAX = 100.0
+_NOISE_FIT_BETA_MIN = 1.0
+_NOISE_FIT_BETA_MAX = 1e7
 _SNR_Z_LO = 3.0
 _SNR_Z_HI = 5.0
 
@@ -44,6 +53,11 @@ class FusionStats:
     exposure_ratio_used: float | None = None
     #: Long/short ratio applied to each of R, G, B.
     exposure_ratio_per_channel: tuple[float, ...] | None = None
+    #: Poisson-Gaussian ``α`` / ``β`` used for each of R, G, B (short-pass DN).
+    noise_alpha: tuple[float, ...] | None = None
+    noise_beta: tuple[float, ...] | None = None
+    #: Per channel: ``True`` when ``α``/``β`` were fitted from this pass pair.
+    noise_fitted: tuple[bool, ...] | None = None
 
     @property
     def zero_weight_fraction(self) -> float:
@@ -124,10 +138,14 @@ def merge_exposures(
     exposure_short: int = 14000,
     exposure_long: int = 42000,
     align_shift: tuple[float, float] | tuple[int, int] | None = None,
-    alpha: float = _SNR_ALPHA,
-    beta: float = _SNR_BETA,
+    alpha: float | None = None,
+    beta: float | None = None,
 ) -> np.ndarray:
-    """Fuse short and long RGB negatives into one uint16 frame (SNR / IVW)."""
+    """Fuse short and long RGB negatives into one uint16 frame (SNR / IVW).
+
+    With ``alpha`` and ``beta`` both given, they set the noise model; otherwise
+    it is fitted from this pass pair (see :func:`_fit_pg_noise_from_pair`).
+    """
     return merge_exposures_result(
         short,
         long,
@@ -146,8 +164,8 @@ def merge_exposures_result(
     exposure_short: int = 14000,
     exposure_long: int = 42000,
     align_shift: tuple[float, float] | tuple[int, int] | None = None,
-    alpha: float = _SNR_ALPHA,
-    beta: float = _SNR_BETA,
+    alpha: float | None = None,
+    beta: float | None = None,
 ) -> MergeResult:
     """Like :func:`merge_exposures` but returns weight stats."""
     short_u = np.asarray(short, dtype=np.uint16)
@@ -159,13 +177,14 @@ def merge_exposures_result(
     if exposure_long <= 0 or exposure_short <= 0:
         raise ValueError("exposure values must be positive")
 
-    long_u, _ = align_pass_to_reference(short_u, long_u, shift=align_shift)
+    long_u, shift_used = align_pass_to_reference(short_u, long_u, shift=align_shift)
     usb_ratio = exposure_long / float(exposure_short)
 
     rgb, stats = _merge_snr(
         short_u,
         long_u,
         usb_ratio=usb_ratio,
+        long_var_scale=_linear_shift_var_scale(shift_used),
         alpha=alpha,
         beta=beta,
         floor=_SNR_FLOOR,
@@ -183,6 +202,99 @@ def _subsample_for_stats(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.n
     if sy == 1 and sx == 1:
         return a, b
     return a[::sy, ::sx], b[::sy, ::sx]
+
+
+def _linear_shift_var_scale(shift: tuple[float, float]) -> float:
+    """Variance factor of white noise after a bilinear shift by ``shift``.
+
+    Linear interpolation at fraction ``t`` averages two samples with weights
+    ``1-t``, ``t``, scaling variance by ``(1-t)² + t²`` per axis — down to a
+    quarter at a half-pixel shift on both axes.
+    """
+    scale = 1.0
+    for s in shift:
+        t = float(s) - np.floor(float(s))
+        scale *= (1.0 - t) ** 2 + t**2
+    return scale
+
+
+def _fit_pg_noise_from_pair(
+    a: np.ndarray,
+    b_raw: np.ndarray,
+    *,
+    r: np.ndarray,
+    long_var_scale: float,
+    floor: float,
+    clip_start: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-channel Poisson-Gaussian ``α``, ``β`` from the aligned pass pair.
+
+    Both passes see the same scene, so ``d = short - long/r`` is noise plus
+    leftover misregistration, which the robust spread rejects. At true level
+    ``x`` (short scale), with ``s`` the long's resampling variance factor::
+
+        var(d) = α·x·(1 + s/r) + β·(1 + s/r²)
+
+    Binning ``d`` by level (read from the long, the less noisy pass) and
+    fitting that line gives ``α``, ``β``. Grain and fixed-pattern noise common
+    to both passes cancel in ``d``; that is right for the weights, which only
+    need the noise that averages down between passes.
+
+    Returns ``(alpha, beta, fitted)`` per channel; NaN where the fit fails.
+    """
+    n_ch = a.shape[2]
+    alpha = np.full(n_ch, np.nan)
+    beta = np.full(n_ch, np.nan)
+    for c in range(n_ch):
+        ac = a[..., c]
+        bc = b_raw[..., c]
+        rc = float(r[c])
+        valid = (ac > floor) & (ac < clip_start) & (bc > floor) & (bc < clip_start)
+        if int(np.count_nonzero(valid)) < _NOISE_FIT_MIN_BINS * _NOISE_FIT_MIN_PER_BIN:
+            continue
+        level = bc[valid] / rc
+        d = ac[valid] - level
+        edges = np.quantile(level, np.linspace(0.0, 1.0, _NOISE_FIT_BINS + 1))
+        idx = np.clip(np.searchsorted(edges, level, side="right") - 1, 0, _NOISE_FIT_BINS - 1)
+        xs: list[float] = []
+        vs: list[float] = []
+        ns: list[int] = []
+        for k in range(_NOISE_FIT_BINS):
+            in_bin = idx == k
+            n = int(np.count_nonzero(in_bin))
+            if n < _NOISE_FIT_MIN_PER_BIN:
+                continue
+            dk = d[in_bin]
+            mad = float(np.median(np.abs(dk - np.median(dk))))
+            xs.append(float(np.median(level[in_bin])))
+            vs.append((1.4826 * mad) ** 2)
+            ns.append(n)
+        if len(xs) < _NOISE_FIT_MIN_BINS:
+            continue
+        x = np.asarray(xs)
+        v = np.asarray(vs)
+        n = np.asarray(ns, dtype=np.float64)
+        design = np.column_stack([x, np.ones_like(x)])
+        # A bin's variance estimate has spread ∝ var/√n: reweight by the
+        # predicted variance (start from the measured one).
+        pred = np.maximum(v, 1e-6)
+        coef = np.zeros(2)
+        for _ in range(3):
+            sw = np.sqrt(n) / pred
+            coef, *_ = np.linalg.lstsq(design * sw[:, None], v * sw, rcond=None)
+            pred = np.maximum(design @ coef, 1e-6)
+        a_fit = float(coef[0]) / (1.0 + long_var_scale / rc)
+        b_fit = float(coef[1]) / (1.0 + long_var_scale / (rc * rc))
+        if not (np.isfinite(a_fit) and np.isfinite(b_fit)):
+            continue
+        if not (_NOISE_FIT_ALPHA_MIN <= a_fit <= _NOISE_FIT_ALPHA_MAX):
+            continue
+        if b_fit > _NOISE_FIT_BETA_MAX:
+            continue
+        alpha[c] = a_fit
+        # A slightly negative intercept is fit noise around a tiny read noise.
+        beta[c] = max(b_fit, _NOISE_FIT_BETA_MIN)
+    return alpha, beta, np.isfinite(alpha)
 
 
 def _smoothstep01(x: np.ndarray) -> np.ndarray:
@@ -246,13 +358,29 @@ def _estimate_exposure_ratio(
     return ratios
 
 
+def _pass_variances(
+    xa: np.ndarray,
+    b_raw: np.ndarray,
+    *,
+    r: np.ndarray,
+    alpha: np.ndarray,
+    beta: np.ndarray,
+    long_var_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-pixel noise variance of the short and of the long in short scale."""
+    va = alpha * np.maximum(xa, 0.0) + beta
+    vb = (alpha * np.maximum(b_raw, 0.0) + beta) * (long_var_scale / (r * r))
+    return va, vb
+
+
 def _estimate_z_median(
     short_u: np.ndarray,
     long_u: np.ndarray,
     *,
     r: np.ndarray,
-    alpha: float,
-    beta: float,
+    alpha: np.ndarray,
+    beta: np.ndarray,
+    long_var_scale: float,
     floor: float,
     clip_start: float,
     clip_end: float,
@@ -264,8 +392,11 @@ def _estimate_z_median(
     xb = b_raw / r
     lum_xa = a.mean(axis=2)
     lum_xb = xb.mean(axis=2)
-    va_lum = alpha * np.maximum(lum_xa, 0.0) + beta
-    vb_lum = ((alpha * np.maximum(b_raw, 0.0) + beta) / (r * r)).mean(axis=2)
+    va, vb = _pass_variances(
+        a, b_raw, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale
+    )
+    va_lum = va.mean(axis=2)
+    vb_lum = vb.mean(axis=2)
     z = (lum_xa - lum_xb) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
     return float(np.median(z))
 
@@ -276,8 +407,9 @@ def _merge_snr_rows(
     *,
     r: np.ndarray,
     z_median: float,
-    alpha: float,
-    beta: float,
+    alpha: np.ndarray,
+    beta: np.ndarray,
+    long_var_scale: float,
     floor: float,
     clip_start: float,
     clip_end: float,
@@ -291,12 +423,13 @@ def _merge_snr_rows(
     ca = _smooth_confidence(a, floor=floor, clip_start=clip_start, clip_end=clip_end)
     cb = _smooth_confidence(b_raw, floor=floor, clip_start=clip_start, clip_end=clip_end)
 
-    va = alpha * np.maximum(xa, 0.0) + beta
-    vb = (alpha * np.maximum(b_raw, 0.0) + beta) / (r * r)
+    va, vb = _pass_variances(
+        xa, b_raw, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale
+    )
 
     lum_xa = xa.mean(axis=2)
     lum_xb = xb.mean(axis=2)
-    va_lum = alpha * np.maximum(lum_xa, 0.0) + beta
+    va_lum = va.mean(axis=2)
     vb_lum = vb.mean(axis=2)
     z = (lum_xa - lum_xb) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
     z_local = z - z_median
@@ -338,8 +471,9 @@ def _merge_snr(
     long_u: np.ndarray,
     *,
     usb_ratio: float,
-    alpha: float,
-    beta: float,
+    long_var_scale: float,
+    alpha: float | None,
+    beta: float | None,
     floor: float,
     clip_start: float,
     clip_end: float,
@@ -347,22 +481,38 @@ def _merge_snr(
     """Clipping-aware inverse-variance fusion in short-exposure radiometric scale.
 
     Processed in row bands so peak memory stays O(chunk) not O(full frame float32).
+    ``alpha``/``beta`` both given set the noise model; otherwise it is fitted
+    per channel from the pair, with the module defaults where the fit fails.
     """
     a_sub, b_sub = _subsample_for_stats(short_u, long_u)
-    r = np.maximum(
-        _estimate_exposure_ratio(
-            a_sub.astype(np.float32),
-            b_sub.astype(np.float32),
-            usb_ratio=usb_ratio,
-        ),
-        1e-12,
-    )
+    a_sub = a_sub.astype(np.float32)
+    b_sub = b_sub.astype(np.float32)
+    r = np.maximum(_estimate_exposure_ratio(a_sub, b_sub, usb_ratio=usb_ratio), 1e-12)
+    n_ch = short_u.shape[2]
+    if alpha is not None and beta is not None:
+        alpha_c = np.full(n_ch, float(alpha))
+        beta_c = np.full(n_ch, float(beta))
+        fitted = np.zeros(n_ch, dtype=bool)
+    else:
+        alpha_c, beta_c, fitted = _fit_pg_noise_from_pair(
+            a_sub,
+            b_sub,
+            r=r,
+            long_var_scale=long_var_scale,
+            floor=floor,
+            clip_start=clip_start,
+        )
+        alpha_c = np.where(fitted, alpha_c, _SNR_ALPHA)
+        beta_c = np.where(fitted, beta_c, _SNR_BETA)
+    alpha_c = alpha_c.astype(np.float32)
+    beta_c = beta_c.astype(np.float32)
     z_median = _estimate_z_median(
         short_u,
         long_u,
         r=r,
-        alpha=alpha,
-        beta=beta,
+        alpha=alpha_c,
+        beta=beta_c,
+        long_var_scale=long_var_scale,
         floor=floor,
         clip_start=clip_start,
         clip_end=clip_end,
@@ -384,8 +534,9 @@ def _merge_snr(
             long_u[y0:y1],
             r=r,
             z_median=z_median,
-            alpha=alpha,
-            beta=beta,
+            alpha=alpha_c,
+            beta=beta_c,
+            long_var_scale=long_var_scale,
             floor=floor,
             clip_start=clip_start,
             clip_end=clip_end,
@@ -405,6 +556,9 @@ def _merge_snr(
         mean_residual_confidence=c_res_sum / max(total_pixels, 1),
         exposure_ratio_used=float(r.mean()),
         exposure_ratio_per_channel=tuple(float(v) for v in r),
+        noise_alpha=tuple(float(v) for v in alpha_c),
+        noise_beta=tuple(float(v) for v in beta_c),
+        noise_fitted=tuple(bool(v) for v in fitted),
     )
     return out, stats
 
@@ -412,8 +566,8 @@ def _merge_snr(
 def merge_n_passes(
     frames: list[np.ndarray],
     *,
-    alpha: float = _SNR_ALPHA,
-    beta: float = _SNR_BETA,
+    alpha: float | None = None,
+    beta: float | None = None,
 ) -> MergeResult:
     """Stack N same-exposure captures for an SNR gain (no exposure fusion).
 
@@ -454,6 +608,8 @@ def merge_n_passes(
     """
     if not frames:
         raise ValueError("merge_n_passes needs >= 1 frame, got 0")
+    alpha = _SNR_ALPHA if alpha is None else float(alpha)
+    beta = _SNR_BETA if beta is None else float(beta)
     ref = np.asarray(frames[0], dtype=np.uint16)
     if ref.ndim != 3 or ref.shape[2] != 3:
         raise ValueError(f"expected HxWx3 arrays, got {ref.shape}")
