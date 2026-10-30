@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
+import pytest
 
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
-from pyopticfilm.pass_align import align_pass_to_reference
-from pyopticfilm.scan.exposure_merge import merge_exposures, merge_exposures_result
+from pyopticfilm.pass_align import align_pass_to_reference, apply_me_transform, estimate_me_transform
+from pyopticfilm.registration.engine import estimate_shift_field
+from pyopticfilm.registration.resample import quadratic_field
+from pyopticfilm.registration.types import FieldWarpTransform
+from pyopticfilm.scan.exposure_merge import _fit_transfer, merge_exposures, merge_exposures_result
 
 
 def test_model_me_exposure_constants():
@@ -257,12 +263,12 @@ def test_merge_snr_differs_from_short_when_long_adds_signal():
     short = np.full((32, 32, 3), 8000, dtype=np.uint16)
     long = np.full((32, 32, 3), 24000, dtype=np.uint16)
     # Dense corner: short near floor, long has recoverable signal at 3×.
-    short[:16, :16, :] = 400
+    short[:16, :16, :] = 140
     long[:16, :16, :] = 6000  # → ~2000 on short scale after r=3
     result = merge_exposures_result(
         short, long, exposure_short=14000, exposure_long=42000, align_shift=(0, 0)
     )
-    # Dense corner should be brighter than short's 400 (long contributes).
+    # Dense corner should be brighter than short's 140 (long contributes).
     assert float(result.rgb[:16, :16].mean()) > 800.0
     assert not np.allclose(result.rgb, short, atol=50)
 
@@ -643,3 +649,276 @@ def test_merge_snr_noise_fit_unbiased_at_high_read_noise():
     assert stats.noise_fitted == (True, True, True)
     assert np.allclose(stats.noise_alpha, 1.0, rtol=0.08)
     assert np.allclose(stats.noise_beta, 4096.0, rtol=0.1)
+
+
+def _detailed_rgb(h: int = 1400, w: int = 1000, seed: int = 11) -> np.ndarray:
+    """Band-limited random detail, the kind of texture phase correlation locks on."""
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(size=(h, w))
+    spectrum = np.fft.rfft2(noise)
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.rfftfreq(w)[None, :]
+    spectrum *= np.exp(-((fy**2 + fx**2) / (2.0 * 0.05**2)))
+    plane = np.fft.irfft2(spectrum, s=(h, w))
+    plane = (plane - plane.mean()) / plane.std()
+    return np.stack([plane * s + m for s, m in ((1500, 9000), (1000, 6000), (500, 3000))], axis=2)
+
+
+def _drifted(rgb: np.ndarray, dy_per_row: np.ndarray) -> np.ndarray:
+    """``rgb`` with content at ``y + dy[y]``, by Fourier-free row interpolation."""
+    h = rgb.shape[0]
+    src = np.arange(h, dtype=np.float64) + dy_per_row
+    lo = np.clip(np.floor(src).astype(int), 0, h - 2)
+    t = (src - lo)[:, None, None]
+    return (1.0 - t) * rgb[lo] + t * rgb[lo + 1]
+
+
+def test_estimate_me_transform_recovers_row_drift():
+    from pyopticfilm.pass_align import estimate_me_transform
+    from pyopticfilm.registration.types import LineWarpTransform
+
+    rgb = _detailed_rgb()
+    h = rgb.shape[0]
+    drift = np.linspace(4.0, 1.0, h)  # mean 2.5 px, range 3 px
+    transform = estimate_me_transform(rgb.astype(np.uint16), _drifted(rgb, drift).astype(np.uint16))
+    assert isinstance(transform, LineWarpTransform)
+    assert np.abs(transform.dy_per_row - drift).max() < 0.15
+
+
+def test_estimate_me_transform_stays_translation_without_drift():
+    from pyopticfilm.pass_align import estimate_me_transform
+    from pyopticfilm.registration.types import TranslationTransform
+
+    rgb = _detailed_rgb()
+    transform = estimate_me_transform(rgb.astype(np.uint16), _drifted(rgb, np.full(rgb.shape[0], 3.0)).astype(np.uint16))
+    assert isinstance(transform, TranslationTransform)
+    assert transform.dy == pytest.approx(3.0, abs=0.1)
+
+
+def test_estimate_me_transform_small_frame_falls_back_to_translation():
+    from pyopticfilm.pass_align import estimate_me_transform
+    from pyopticfilm.registration.types import TranslationTransform
+
+    arr = np.full((128, 128, 3), 5000, dtype=np.uint16)
+    assert isinstance(estimate_me_transform(arr, arr), TranslationTransform)
+
+
+def _drifted_pair() -> tuple[np.ndarray, np.ndarray]:
+    rgb = _detailed_rgb()
+    long = _drifted(rgb, np.linspace(3.0, -3.0, rgb.shape[0])) * 3.0
+    return rgb.astype(np.uint16), long.astype(np.uint16)
+
+
+def _long_share(result) -> float:
+    return result.fusion_stats.mean_residual_confidence
+
+
+def test_merge_with_row_transform_uses_the_long_across_the_frame():
+    """Unregistered, the guard must fall back to the short away from the frame centre."""
+    from pyopticfilm.pass_align import estimate_me_transform
+
+    short, long = _drifted_pair()
+    fixed = merge_exposures_result(short, long, align_transform=estimate_me_transform(short, long))
+    plain = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    assert _long_share(fixed) > 0.9
+    assert _long_share(plain) < 0.5 * _long_share(fixed)
+
+
+def test_merge_defaults_to_estimating_the_transform():
+    short, long = _drifted_pair()
+    assert _long_share(merge_exposures_result(short, long)) > 0.9
+
+
+def test_apply_me_transform_ringing_at_clip_edge_reads_as_clipped():
+    from pyopticfilm.pass_align import apply_me_transform
+    from pyopticfilm.registration.types import LineWarpTransform
+
+    long = np.full((64, 8, 3), 30000, dtype=np.uint16)
+    long[32:] = 65535
+    transform = LineWarpTransform(0.0, np.full(64, 0.5))
+    plain, _ = apply_me_transform(long, transform)
+    guarded, _ = apply_me_transform(long, transform, clip_level=62000)
+    # Without the guard the lobes dip below full scale inside the clip.
+    assert plain[32:40, 0, 0].min() < 65535
+    assert np.all(guarded[33:] == 65535)
+    assert np.all(guarded[20:26] == 30000)
+
+
+def _ramp_pair(offset: tuple[float, float, float], lo: float = 500.0, hi: float = 15000.0) -> tuple:
+    rng = np.random.default_rng(5)
+    level = np.exp(np.linspace(np.log(lo), np.log(hi), 800))[None, :] * np.ones((400, 800))
+    short = np.stack([level, level * 0.7, level * 0.45], axis=2)
+    long = short * 3.0 + np.asarray(offset)
+    noisy = [x + rng.normal(0.0, np.sqrt(0.5 * np.maximum(x, 1.0) + 400.0)) for x in (short, long)]
+    return tuple(np.clip(np.rint(x), 0, 65535).astype(np.uint16) for x in noisy)
+
+
+def test_merge_snr_gain_ignores_long_black_offset():
+    short, long = _ramp_pair((-880.0, 0.0, -1230.0))
+    stats = merge_exposures_result(short, long, align_shift=(0.0, 0.0)).fusion_stats
+    assert stats.exposure_ratio_per_channel[1] == pytest.approx(3.0, abs=0.03)
+    assert 2.6 < stats.exposure_ratio_per_channel[2] < 3.0
+
+
+def test_merge_snr_black_offset_keeps_dense_film_level():
+    short, long = _ramp_pair((-880.0, 0.0, -1230.0))
+    merged = merge_exposures(short, long, align_shift=(0.0, 0.0)).astype(np.float64)
+    dense = short[:, 40:80, 2].astype(np.float64).mean()
+    assert merged[:, 40:80, 2].mean() == pytest.approx(dense, rel=0.01)
+
+
+def test_merge_snr_follows_a_ratio_that_falls_towards_black():
+    """Real passes: long/short drops near black, which no gain and offset can follow."""
+    short = np.tile(np.geomspace(200.0, 15000.0, 512)[None, :, None], (64, 1, 3))
+    long = short * (3.0 - 0.5 * np.exp(-short / 2000.0))
+    short_u = np.rint(short).astype(np.uint16)
+    merged = merge_exposures(short_u, np.rint(long).astype(np.uint16), align_shift=(0.0, 0.0)).astype(np.float64)
+    err = merged[:, 20:-4, 1] / short[:, 20:-4, 1] - 1.0
+    assert float(np.abs(err).max()) < 0.01
+
+
+def test_transfer_curve_is_monotonic():
+    rng = np.random.default_rng(1)
+    a = rng.uniform(150.0, 12000.0, 40000).astype(np.float32)
+    b = (a * 3.0 + rng.normal(0.0, 150.0, a.shape)).astype(np.float32)
+    gain, curve = _fit_transfer(a, b, 3.0, 131.0)
+    assert gain == pytest.approx(3.0, rel=0.01)
+    assert np.all(np.diff(curve) >= 0.0)
+    assert curve[30000] == pytest.approx(10000.0, rel=0.01)
+
+
+def test_transfer_keeps_plain_ratio_on_a_narrow_level_span():
+    rng = np.random.default_rng(2)
+    a = rng.uniform(9000.0, 12000.0, 40000).astype(np.float32)
+    gain, curve = _fit_transfer(a, a * 3.0 - 900.0, 2.9, 131.0)
+    assert gain == 2.9
+    assert curve[2900] == pytest.approx(1000.0)
+
+
+def test_merge_snr_long_hidden_by_offset_keeps_short_level():
+    """Dense film a black offset pushed to the long's zero must keep its short level."""
+    short, long = _ramp_pair((-880.0, 0.0, -1230.0), lo=60.0)
+    merged = merge_exposures(short, long, align_shift=(0.0, 0.0)).astype(np.float64)
+    dense = short[:, :40, 2].astype(np.float64).mean()
+    assert merged[:, :40, 2].mean() < dense + 60.0
+
+
+def test_merge_snr_real_misregistration_keeps_the_short():
+    """A patch that moved between passes must not ghost into the merge."""
+    rgb = _detailed_rgb(h=500, w=500)
+    short = rgb.copy()
+    long = rgb * 3.0
+    long[200:260, 200:260] = long[200:260, 200:260] * 0.5
+    short_u = short.astype(np.uint16)
+    merged = merge_exposures(short_u, long.astype(np.uint16), align_shift=(0.0, 0.0)).astype(np.float64)
+    inner = (slice(210, 250), slice(210, 250))
+    assert np.abs(merged[inner] - short[inner]).mean() < 0.02 * short[inner].mean()
+
+
+def test_merge_snr_noise_does_not_trip_the_guard():
+    """Heavy noise on a flat frame: the long is used everywhere, none falls back."""
+    rng = np.random.default_rng(9)
+    short = np.clip(10000.0 + rng.normal(0.0, 600.0, size=(300, 300, 3)), 0, 65535)
+    long = np.clip(30000.0 + rng.normal(0.0, 1000.0, size=(300, 300, 3)), 0, 65535)
+    short_u = short.astype(np.uint16)
+    merged = merge_exposures(short_u, long.astype(np.uint16), align_shift=(0.0, 0.0))
+    assert np.std(merged.astype(np.float64)) < 0.7 * np.std(short)
+
+
+def test_merge_snr_output_does_not_depend_on_band_height(monkeypatch):
+    from pyopticfilm.scan import exposure_merge
+
+    rgb = _detailed_rgb(h=300, w=200)
+    short = rgb.astype(np.uint16)
+    long = np.clip(_drifted(rgb, np.linspace(0.0, 0.4, 300)) * 3.0, 0, 65535).astype(np.uint16)
+    first = merge_exposures(short, long, align_shift=(0.0, 0.0))
+    monkeypatch.setattr(exposure_merge, "_MERGE_CHUNK_ROWS", 37)
+    second = merge_exposures(short, long, align_shift=(0.0, 0.0))
+    assert np.abs(first.astype(np.int32) - second.astype(np.int32)).max() <= 1
+
+
+def test_merge_snr_rounds_to_nearest():
+    short = np.full((8, 8, 3), 1000, dtype=np.uint16)
+    long = np.full((8, 8, 3), 3001, dtype=np.uint16)
+    merged = merge_exposures(short, long, align_shift=(0.0, 0.0), exposure_short=1000, exposure_long=3000)
+    assert np.all(merged == 1000)
+
+
+def test_merge_snr_output_does_not_depend_on_worker_count(monkeypatch):
+    from pyopticfilm.scan import exposure_merge
+
+    rgb = _detailed_rgb(h=400, w=300)
+    short = rgb.astype(np.uint16)
+    long = np.clip(_drifted(rgb, np.linspace(0.0, 0.4, 400)) * 3.0, 0, 65535).astype(np.uint16)
+    monkeypatch.setattr(exposure_merge, "_MERGE_WORKERS", 1)
+    serial = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    monkeypatch.setattr(exposure_merge, "_MERGE_WORKERS", 4)
+    threaded = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    assert np.array_equal(serial.rgb, threaded.rgb)
+    assert serial.fusion_stats == threaded.fusion_stats
+
+
+def test_confidence_lut_matches_the_ramps():
+    from pyopticfilm.scan.exposure_merge import _confidence_lut, _smooth_confidence
+
+    kwargs = {"floor": 131.0, "clip_start": 52428.0, "clip_end": 62258.0}
+    raw = np.array([0, 130, 131, 200, 262, 30000, 52428, 58000, 62258, 65535], dtype=np.uint16)
+    assert np.array_equal(_confidence_lut(**kwargs)[raw], _smooth_confidence(raw.astype(np.float32), **kwargs))
+
+
+def _sine_scene(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    rng = np.random.default_rng(5)
+    fx, fy = rng.uniform(-0.2, 0.2, (2, 250))
+    phase = rng.uniform(0.0, 2.0 * np.pi, 250)
+    out = np.zeros(np.broadcast(xs, ys).shape)
+    for a, b, p in zip(fx, fy, phase, strict=True):
+        out += np.sin(2.0 * np.pi * (a * xs + b * ys) + p)
+    return 12000.0 + 200.0 * out
+
+
+@functools.lru_cache(maxsize=2)
+def _field_pair(terms: tuple[float, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    coef_x = np.asarray(terms)
+    h, w = 1000, 1200
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    field = quadratic_field(coef_x, xx, yy, w, h)
+    short = np.repeat(_sine_scene(xx, yy)[..., None], 3, axis=2)
+    long = np.repeat(_sine_scene(xx + field, yy)[..., None], 3, axis=2)
+    return np.rint(short).astype(np.uint16), np.rint(long).astype(np.uint16), field
+
+
+_FIELD_TERMS = (0.0, 0.0, 0.0, -0.4, 0.35, 0.0)
+
+
+def test_me_transform_recovers_shift_field():
+    short, long, field = _field_pair(_FIELD_TERMS)
+    transform = estimate_me_transform(short, long)
+    assert isinstance(transform, FieldWarpTransform)
+    h, w = short.shape[:2]
+    yy, xx = np.mgrid[0:h:50, 0:w:50].astype(np.float64)
+    got = transform.dx + quadratic_field(transform.dx_coef, xx, yy, w, h)
+    assert np.abs(got - field[::50, ::50]).max() < 0.08
+
+
+def test_me_transform_field_warp_registers_the_long():
+    short, long, _ = _field_pair(_FIELD_TERMS)
+    aligned, var_scale = apply_me_transform(long, estimate_me_transform(short, long))
+    assert var_scale.shape == (short.shape[0],)
+    inner = (slice(16, -16), slice(16, -16))
+    before = np.abs(long[inner].astype(np.float64) - short[inner]).mean()
+    after = np.abs(aligned[inner].astype(np.float64) - short[inner]).mean()
+    assert after < 0.2 * before
+
+
+def test_me_transform_skips_field_without_one():
+    short, long, _ = _field_pair((0.0,) * 6)
+    assert not isinstance(estimate_me_transform(short, long), FieldWarpTransform)
+
+
+def test_shift_field_needs_frame_coverage():
+    """Tiles in one corner say nothing about the others: no field beats a wild one."""
+    short, long, _ = _field_pair(_FIELD_TERMS)
+    plane_s, plane_l = short[..., 1].astype(np.float32), long[..., 1].astype(np.float32).copy()
+    plane_l[:, 300:] = 65000.0
+    plane_l[300:] = 65000.0
+    assert estimate_shift_field(plane_s, plane_l) is None
