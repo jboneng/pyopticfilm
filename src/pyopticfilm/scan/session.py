@@ -6,6 +6,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 
 from pyopticfilm.asic.motor import (
     SLOPE_TABLE_AHB,
@@ -22,18 +23,22 @@ from pyopticfilm.device.sensor_lookup import (
     maxwd_register_value,
     sensor_regs_for,
 )
-from pyopticfilm.exceptions import MotorTimeoutError, ScanCancelled, ScanError
+from pyopticfilm.exceptions import AsicError, MotorTimeoutError, ScanCancelled, ScanError
 from pyopticfilm.image import ScanImage
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
-from pyopticfilm.scan.geometry import ScanGeometry, compute_geometry
+from pyopticfilm.scan.geometry import MM_PER_INCH, ScanGeometry, compute_geometry
 from pyopticfilm.scan.pipeline import ImagePipeline
 
 logger = get_logger(__name__)
 
 FEED_TIMEOUT_S = 60.0
+#: Feed fails early when the step counter stops advancing this long (stall).
+FEED_STALL_S = 10.0
 DATA_TIMEOUT_S = 30.0
 BULK_CHUNK_LINES = 8
+HOME_SCAN_PIXELS = 50
+HOME_SCAN_LINES = 3
 
 
 class ScanSession:
@@ -144,14 +149,19 @@ class ScanSession:
                     mode="infrared" if method == "infrared" else "color",
                 )
 
-        raw = self.acquire_raw(
-            geometry,
-            method=method,
-            lamp_on=True,
-            start_motor=True,
-            progress=progress,
-            cancel=cancel,
-        )
+        try:
+            raw = self.acquire_raw(
+                geometry,
+                method=method,
+                lamp_on=True,
+                start_motor=True,
+                progress=progress,
+                cancel=cancel,
+            )
+        except BaseException:
+            if getattr(self.model, "asic", "") == "GL845":
+                self._park_quietly()
+            raise
 
         use_host = (
             calib is not None
@@ -227,25 +237,102 @@ class ScanSession:
         # block they write during _configure.
         self._lamp_requested = lamp_on
         if lamp_on:
+            was_lit = self._lamp_lit(method)
             self.asic.lamp_on()
+            settle_s = float(getattr(self.model, "lamp_settle_s", 0.0))
+            if not was_lit and settle_s > 0:
+                logger.info("lamp settle %.2fs before %s capture", settle_s, method)
+                time.sleep(settle_s)
         else:
             self.asic.lamp_off()
 
         try:
             self._configure(geometry)
             self._begin_scan(start_motor=start_motor)
-            return self._acquire(
+            raw = self._acquire(
                 geometry,
                 progress=progress,
                 cancel=cancel,
                 wait_feed=start_motor and getattr(self, "_feedl", 0) > 0,
             )
+        except BaseException:
+            try:
+                self._end_scan()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("end_scan after failed capture: %s", exc)
+            raise
+        self._end_scan()
+        return raw
+
+    def _lamp_lit(self, method: str) -> bool:
+        """True when the light source for ``method`` is already on (cached regs)."""
+        cache = getattr(self.asic, "_reg_cache", None) or {}
+        if method == "infrared":
+            mask = getattr(getattr(self.asic, "registers", None), "IR_LAMP_A8_MASK", 0)
+            return bool(cache.get(0xA8, 0) & mask)
+        return bool(cache.get(0x03, 0) & self.regs.LAMPPWR)
+
+    def start_home_seek(self, *, starty: int) -> None:
+        """Start the short reverse scan used by the GL845 home-sensor seek."""
+        if not self.asic.is_initialized:
+            raise AsicError("Call init()/warmup() before home()")
+
+        resolution = min(self.model.resolutions_dpi)
+        width_mm = HOME_SCAN_PIXELS * MM_PER_INCH / resolution + 0.01
+        height_mm = HOME_SCAN_LINES * MM_PER_INCH / resolution + 0.01
+        area = (
+            0.0,
+            0.0,
+            min(1.0, width_mm / self.model.x_size_ta_mm),
+            min(1.0, height_mm / self.model.y_size_ta_mm),
+        )
+        geometry = compute_geometry(resolution, model=self.model, area=area)
+        if geometry.pixels < HOME_SCAN_PIXELS or geometry.lines < HOME_SCAN_LINES:
+            raise ScanError(
+                f"Home-scan geometry is too small: {geometry.pixels}x{geometry.lines}"
+            )
+        geometry = replace(
+            geometry,
+            startx=0,
+            starty=starty,
+            channels=1,
+            depth=8,
+            line_bytes=geometry.pixels,
+            optical_line_count=HOME_SCAN_LINES,
+            shift_r=0,
+            shift_g=0,
+            shift_b=0,
+            stagger_y=(),
+            num_staggered_lines=0,
+            register_lincnt=HOME_SCAN_LINES,
+        )
+
+        # Leave the lamp alone: parking between calibration and image passes
+        # must not cool the LED the next capture was calibrated against.
+        prior_method = getattr(self.asic, "_scan_method", "transparency")
+        self.asic.set_scan_method("transparency")
+        try:
+            self._configure(geometry, home_seek=True)
         finally:
-            self._end_scan()
+            self.asic.set_scan_method(prior_method)
+        self._begin_scan(start_motor=True)
+        logger.info(
+            "started reverse home scan pixels=%d lines=%d starty=%d",
+            geometry.pixels,
+            geometry.lines,
+            starty,
+        )
+
+    def _park_quietly(self) -> None:
+        """Return the head home after a failed pass without masking the original error."""
+        try:
+            self.asic.park()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("park after failed multi-pass scan: %s", exc)
 
     # --- configure ------------------------------------------------------
 
-    def _configure(self, geometry: ScanGeometry) -> None:
+    def _configure(self, geometry: ScanGeometry, *, home_seek: bool = False) -> None:
         proto = self.asic.protocol
         r = self.regs
         if self.asic._reg_cache:
@@ -266,14 +353,21 @@ class ScanSession:
         # Optical: SHDAREA on, DVDSET off (host-side calib), SCAN off
         cache[0x01] = (cache.get(0x01, 0x22) | r.SHDAREA) & ~r.DVDSET & ~r.SCAN
 
-        if method == "infrared":
+        if home_seek:
+            pass  # keep the current LAMPPWR state
+        elif method == "infrared" or not self._lamp_requested:
+            # Dark calib captures must keep the lamp off through configure.
             cache[0x03] = cache.get(0x03, 0xBF) & ~r.LAMPPWR
         else:
             cache[0x03] = cache.get(0x03, 0xBF) | r.LAMPPWR
         cache[0x03] = cache[0x03] & ~0x40  # clear AVEENB
 
-        # 0x04: 16-bit color — BITSET, AFEMOD=2, FESET=2 (ADI)
-        cache[0x04] = (cache.get(0x04, 0x22) & ~0x8C) | 0x40 | 0x20
+        if home_seek:
+            # SANE's reverse-home mini-scan is 8-bit green-only.
+            cache[0x04] = (cache.get(0x04, 0x22) & ~0xCC) | 0x28
+        else:
+            # 0x04: 16-bit color — BITSET, AFEMOD=2, FESET=2 (ADI)
+            cache[0x04] = (cache.get(0x04, 0x22) & ~0x8C) | 0x40 | 0x20
 
         # dpihw 1200, clear gamma (GMMENB)
         dpihw = int(getattr(self.model, "register_dpihw", 1200))
@@ -296,6 +390,7 @@ class ScanSession:
         self._set16(cache, 0x30, geometry.pixel_startx)
         self._set16(cache, 0x32, geometry.pixel_endx)
         self._set16(cache, 0x38, lperiod)
+        self._lperiod = int(geometry.exposure_lperiod)
         cache[0x34] = geometry.dummy_pixel
         maxwd = maxwd_register_value(
             self.model, line_bytes=geometry.line_bytes, channels=geometry.channels
@@ -315,6 +410,8 @@ class ScanSession:
         fast_slope = create_fast_slope_table(step_multiplier=step_mult, profile=mp)
 
         cache[0x02] = r.MTRPWR
+        if home_seek:
+            cache[0x02] |= r.AGOHOME | r.NOTHOME | r.MTRREV
         if geometry.disable_buffer_full_move:
             cache[0x02] |= r.ACDCDIS
 
@@ -415,10 +512,7 @@ class ScanSession:
         logger.info("scan started motor=%s", start_motor)
 
     def _end_scan(self) -> None:
-        try:
-            self.asic.stop_motor()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("end_scan stop_motor: %s", exc)
+        self.asic.stop_motor()
 
     def _read_feed_steps(self) -> int:
         proto = self.asic.protocol
@@ -436,16 +530,30 @@ class ScanSession:
         return words
 
     def _wait_feed(self, cancel: threading.Event | None) -> None:
-        deadline = time.monotonic() + FEED_TIMEOUT_S
+        # The feed runs on the scan slope, so longer LPERIODs feed proportionally slower.
+        base = int(getattr(self.model, "exposure_lperiod", 14000)) or 14000
+        timeout_s = FEED_TIMEOUT_S * max(1.0, getattr(self, "_lperiod", base) / base)
+        start = time.monotonic()
+        deadline = start + timeout_s
         target = getattr(self, "_feedl", 0)
-        while time.monotonic() < deadline:
+        last_steps, last_move = -1, start
+        while (now := time.monotonic()) < deadline:
             if cancel is not None and cancel.is_set():
                 raise ScanCancelled("cancelled during feed")
-            if self._read_feed_steps() >= target:
-                logger.debug("feed complete (%d)", target)
+            steps = self._read_feed_steps()
+            if steps >= target:
+                logger.debug("feed complete (%d) in %.1fs", target, now - start)
                 return
+            if steps != last_steps:
+                last_steps, last_move = steps, now
+            elif now - last_move > FEED_STALL_S:
+                raise MotorTimeoutError(
+                    f"Feed stalled at {steps}/{target} steps for {FEED_STALL_S:.0f}s"
+                )
             time.sleep(0.05)
-        raise MotorTimeoutError(f"Feed did not complete within {FEED_TIMEOUT_S:.0f}s")
+        raise MotorTimeoutError(
+            f"Feed did not complete within {timeout_s:.0f}s ({last_steps}/{target} steps)"
+        )
 
     def _wait_data(self, cancel: threading.Event | None) -> None:
         deadline = time.monotonic() + DATA_TIMEOUT_S

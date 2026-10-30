@@ -17,6 +17,8 @@ logger = get_logger(__name__)
 class Gl842(Gl845):
     """GL842 ASIC — shares status/lamp/home with Gl845; different asic_boot."""
 
+    REVERSE_SCAN_HOME = False
+
     def asic_boot(self, *, cold: bool | None = None) -> None:
         if cold is None:
             cold = self.is_cold_boot()

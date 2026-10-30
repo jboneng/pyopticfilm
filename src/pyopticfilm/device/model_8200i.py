@@ -274,6 +274,9 @@ class Model8200i:
             ("infrared", 7200): 14000,
         }
     )
+    #: LED settle after the lamp turns on before an image capture (s).
+    lamp_settle_s: float = 0.5
+
     dummy_pixel: int = 20
     motor_base_ydpi: int = 3600
     optical_resolution: int = 7200

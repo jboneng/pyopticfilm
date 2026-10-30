@@ -54,6 +54,8 @@ class Gl845Registers:
 
     # 0x40
     CHKVER: int = 0x10
+    MOTMFLG: int = 0x02
+    DATAENB: int = 0x01
 
     # 0x41 status bits (scanner_read_status)
     STATUS_PWRBIT: int = 0x80
