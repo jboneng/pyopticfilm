@@ -19,6 +19,7 @@ from pyopticfilm.registration.engine import (
 from pyopticfilm.registration.models import band_shift_profile
 from pyopticfilm.registration.phase import phase_correlate_shift
 from pyopticfilm.registration.resample import (
+    row_shift_touch_mask,
     row_shift_var_scale,
     warp_integer,
     warp_row_shifts,
@@ -143,18 +144,6 @@ def transform_mean_shift(transform: Transform) -> Shift2D:
     return float(transform.dx), float(transform.dy)
 
 
-def _grow_mask(mask: np.ndarray, axis: int, reach: int) -> None:
-    """Dilate a bool mask in place by ``reach`` samples along ``axis``."""
-    for _ in range(reach):
-        fwd = [slice(None)] * mask.ndim
-        back = [slice(None)] * mask.ndim
-        fwd[axis], back[axis] = slice(1, None), slice(None, -1)
-        grown = mask.copy()
-        grown[tuple(fwd)] |= mask[tuple(back)]
-        grown[tuple(back)] |= mask[tuple(fwd)]
-        mask[:] = grown
-
-
 def apply_me_transform(
     moving: np.ndarray,
     transform: Transform,
@@ -184,12 +173,7 @@ def apply_me_transform(
     if clip_level is not None and np.issubdtype(mov.dtype, np.integer):
         clipped = mov >= clip_level
         if np.any(clipped):
-            # Bilinear taps cover both neighbours of each sample: any non-zero
-            # result is a pixel that touches a clipped reading.
-            touched = warp_row_shifts(clipped.astype(np.uint16), dx, dy, method="linear") > 0
-            _grow_mask(touched, 0, _ME_RING_REACH)
-            if abs(dx - round(dx)) >= 1e-6:
-                _grow_mask(touched, 1, _ME_RING_REACH)
+            touched = row_shift_touch_mask(clipped, dx, dy, reach=_ME_RING_REACH)
             aligned[touched] = np.iinfo(mov.dtype).max
     return aligned, var_scale
 

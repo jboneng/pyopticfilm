@@ -823,3 +823,25 @@ def test_merge_snr_rounds_to_nearest():
     long = np.full((8, 8, 3), 3001, dtype=np.uint16)
     merged = merge_exposures(short, long, align_shift=(0.0, 0.0), exposure_short=1000, exposure_long=3000)
     assert np.all(merged == 1000)
+
+
+def test_merge_snr_output_does_not_depend_on_worker_count(monkeypatch):
+    from pyopticfilm.scan import exposure_merge
+
+    rgb = _detailed_rgb(h=400, w=300)
+    short = rgb.astype(np.uint16)
+    long = np.clip(_drifted(rgb, np.linspace(0.0, 0.4, 400)) * 3.0, 0, 65535).astype(np.uint16)
+    monkeypatch.setattr(exposure_merge, "_MERGE_WORKERS", 1)
+    serial = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    monkeypatch.setattr(exposure_merge, "_MERGE_WORKERS", 4)
+    threaded = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    assert np.array_equal(serial.rgb, threaded.rgb)
+    assert serial.fusion_stats == threaded.fusion_stats
+
+
+def test_confidence_lut_matches_the_ramps():
+    from pyopticfilm.scan.exposure_merge import _confidence_lut, _smooth_confidence
+
+    kwargs = {"floor": 131.0, "clip_start": 52428.0, "clip_end": 62258.0}
+    raw = np.array([0, 130, 131, 200, 262, 30000, 52428, 58000, 62258, 65535], dtype=np.uint16)
+    assert np.array_equal(_confidence_lut(**kwargs)[raw], _smooth_confidence(raw.astype(np.float32), **kwargs))

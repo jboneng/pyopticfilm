@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -47,8 +49,13 @@ _SNR_Z_LO = 5.0
 _SNR_Z_HI = 8.0
 
 # Row bands for IVW merge — avoids several full-frame float32 planes at 3600+ dpi.
+# Each band holds about 15 float32 planes, so wide frames take shorter bands to keep
+# the peak bounded across workers. NumPy drops the GIL in these loops; past 8
+# workers memory bandwidth limits the gain.
 _MERGE_CHUNK_ROWS = 128
-_STATS_MAX_SIDE = 1024
+_MERGE_BAND_PIXELS = 512_000
+_MERGE_WORKERS = min(8, os.cpu_count() or 1)
+_STATS_MAX_PIXELS = 500_000
 # Multi-Pass luma disagreement (DN) above which a repeat is dropped as an outlier.
 _LUMA_DISAGREE_TAU = 300.0
 # ME disagreement guard: residual energy over a (2r+1)² box, as a multiple of what
@@ -235,11 +242,10 @@ def merge_exposures_result(
 def _subsample_for_stats(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Stride down large frames for global ratio / median estimates."""
     ha, wa = a.shape[:2]
-    sy = max(1, ha // _STATS_MAX_SIDE)
-    sx = max(1, wa // _STATS_MAX_SIDE)
-    if sy == 1 and sx == 1:
+    stride = int(np.ceil(np.sqrt(ha * wa / _STATS_MAX_PIXELS)))
+    if stride <= 1:
         return a, b
-    return a[::sy, ::sx], b[::sy, ::sx]
+    return a[::stride, ::stride], b[::stride, ::stride]
 
 
 def _linear_shift_var_scale(shift: tuple[float, float]) -> float:
@@ -355,6 +361,13 @@ def _smooth_confidence(
     t = (raw - clip_start) / max(clip_end - clip_start, 1e-12)
     clip_w = 1.0 - _smoothstep01(t)
     return floor_w * clip_w
+
+
+def _confidence_lut(*, floor: float, clip_start: float, clip_end: float) -> np.ndarray:
+    """:func:`_smooth_confidence` for every uint16 reading; a lookup beats the ramps."""
+    return _smooth_confidence(
+        np.arange(65536, dtype=np.float32), floor=floor, clip_start=clip_start, clip_end=clip_end
+    )
 
 
 def _residual_confidence(z: np.ndarray, *, z_lo: float = _SNR_Z_LO, z_hi: float = _SNR_Z_HI) -> np.ndarray:
@@ -546,11 +559,10 @@ def _box_sum(a: np.ndarray, radius: int) -> np.ndarray:
 
 def _agreement_confidence(residual: np.ndarray, variance: np.ndarray, level: np.ndarray) -> np.ndarray:
     """1 where the pass residual is noise, falling to 0 where its energy exceeds noise."""
-    n = (2 * _GUARD_RADIUS + 1) ** 2
-    energy = _box_sum(residual * residual, _GUARD_RADIUS) / n
-    tolerance = _GUARD_LEVEL_TOLERANCE * _box_sum(np.abs(level), _GUARD_RADIUS) / n
-    expected = _box_sum(variance, _GUARD_RADIUS) / n + tolerance * tolerance
-    ratio = energy / np.maximum(expected, 1e-12)
+    # Variance and level vary slowly, so their value here stands in for the box's.
+    energy = _box_sum(residual * residual, _GUARD_RADIUS) / (2 * _GUARD_RADIUS + 1) ** 2
+    tolerance = _GUARD_LEVEL_TOLERANCE * level
+    ratio = energy / np.maximum(variance + tolerance * tolerance, 1e-12)
     return np.clip((_GUARD_ENERGY_HI - ratio) / (_GUARD_ENERGY_HI - _GUARD_ENERGY_LO), 0.0, 1.0).astype(np.float32)
 
 
@@ -565,9 +577,9 @@ def _merge_snr_rows(
     alpha: np.ndarray,
     beta: np.ndarray,
     long_var_scale: np.ndarray,
+    conf_lut: np.ndarray,
     floor: float,
     clip_start: float,
-    clip_end: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """IVW merge for one row band; returns uint16 chunk and stat accumulators.
 
@@ -579,8 +591,8 @@ def _merge_snr_rows(
     xa = a
     xb = (b_raw - offset) / r
 
-    ca = _smooth_confidence(a, floor=floor, clip_start=clip_start, clip_end=clip_end)
-    cb = _smooth_confidence(b_raw, floor=floor, clip_start=clip_start, clip_end=clip_end)
+    ca = conf_lut[short_rows]
+    cb = conf_lut[long_rows]
 
     va, vb = _pass_variances(
         xa, xb, cb, r=r, offset=offset, alpha=alpha, beta=beta, long_var_scale=long_var_scale
@@ -679,17 +691,14 @@ def _merge_snr(
         clip_end=clip_end,
     )
 
-    h = short_u.shape[0]
+    h, w = short_u.shape[:2]
     out = np.empty_like(short_u)
-    wa_sum = 0.0
-    wb_sum = 0.0
-    n_weights = 0
-    zero_count = 0
-    c_res_sum = 0.0
-    total_pixels = int(short_u.shape[0] * short_u.shape[1])
+    total_pixels = int(h * w)
+    conf_lut = _confidence_lut(floor=floor, clip_start=clip_start, clip_end=clip_end)
+    band_rows = max(32, min(_MERGE_CHUNK_ROWS, _MERGE_BAND_PIXELS // max(w, 1)))
 
-    for y0 in range(0, h, _MERGE_CHUNK_ROWS):
-        y1 = min(h, y0 + _MERGE_CHUNK_ROWS)
+    def merge_band(y0: int) -> tuple[float, float, int, int, float]:
+        y1 = min(h, y0 + band_rows)
         pad_y0 = max(0, y0 - _GUARD_RADIUS)
         pad_y1 = min(h, y1 + _GUARD_RADIUS)
         chunk, wa, wb, both_zero_pix, c_res_eff = _merge_snr_rows(
@@ -702,16 +711,22 @@ def _merge_snr(
             alpha=alpha_c,
             beta=beta_c,
             long_var_scale=long_var_scale[pad_y0:pad_y1, np.newaxis, np.newaxis].astype(np.float32),
+            conf_lut=conf_lut,
             floor=floor,
             clip_start=clip_start,
-            clip_end=clip_end,
         )
         out[y0:y1] = chunk
-        wa_sum += float(wa.sum())
-        wb_sum += float(wb.sum())
-        n_weights += int(wa.size)
-        zero_count += int(np.count_nonzero(both_zero_pix))
-        c_res_sum += float(c_res_eff.sum())
+        return (
+            float(wa.sum()),
+            float(wb.sum()),
+            int(wa.size),
+            int(np.count_nonzero(both_zero_pix)),
+            float(c_res_eff.sum()),
+        )
+
+    with ThreadPoolExecutor(max_workers=_MERGE_WORKERS) as pool:
+        bands = list(pool.map(merge_band, range(0, h, band_rows)))
+    wa_sum, wb_sum, n_weights, zero_count, c_res_sum = (sum(column) for column in zip(*bands, strict=True))
 
     stats = FusionStats(
         mean_short_weight=wa_sum / max(n_weights, 1),

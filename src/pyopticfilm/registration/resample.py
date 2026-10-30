@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 
 _LANCZOS_TAPS = {"lanczos3": 3, "lanczos4": 4}
+
+
+def _warp_workers() -> int:
+    return min(8, os.cpu_count() or 1)
 
 
 @dataclass(frozen=True)
@@ -357,9 +363,12 @@ def warp_row_shifts(
     tap_rows = [np.clip(y0 + first_tap + i, 0, h - 1) for i in range(len(weights))]
     trail = (None,) * (arr.ndim - 1)
 
-    out = np.empty(arr.shape, dtype=np.float32)
+    integer = np.issubdtype(dtype, np.integer)
+    top = np.iinfo(dtype).max if integer else 0
+    out = np.empty(arr.shape, dtype=dtype)
     chunk = max(32, int(chunk_rows))
-    for r0 in range(0, h, chunk):
+
+    def warp_band(r0: int) -> None:
         r1 = min(h, r0 + chunk)
         lo = int(min(t[r0:r1].min() for t in tap_rows))
         hi = int(max(t[r0:r1].max() for t in tap_rows)) + 1
@@ -367,13 +376,28 @@ def warp_row_shifts(
         acc = weights[0][r0:r1][(slice(None), *trail)] * slab[tap_rows[0][r0:r1] - lo]
         for w_i, rows in zip(weights[1:], tap_rows[1:], strict=True):
             acc += w_i[r0:r1][(slice(None), *trail)] * slab[rows[r0:r1] - lo]
-        out[r0:r1] = acc
+        out[r0:r1] = np.clip(np.rint(acc), 0, top) if integer else acc
 
-    if np.issubdtype(dtype, np.integer):
-        out_i = np.clip(np.rint(out), 0, np.iinfo(dtype).max).astype(dtype)
-    else:
-        out_i = out.astype(dtype, copy=False)
-    return fill_row_shift_border(out_i, dx, dy)
+    with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
+        list(pool.map(warp_band, range(0, h, chunk)))
+    return fill_row_shift_border(out, dx, dy)
+
+
+def row_shift_touch_mask(mask: np.ndarray, dx: float, dy_per_row: np.ndarray, *, reach: int) -> np.ndarray:
+    """Where :func:`warp_row_shifts` output lies within ``reach`` px of a set ``mask`` sample."""
+    h, w = mask.shape[:2]
+    src_y = np.floor(np.arange(h, dtype=np.float64) - np.asarray(dy_per_row, dtype=np.float64)).astype(np.int64)
+    out = np.zeros(mask.shape, dtype=bool)
+    for offset in range(-reach, reach + 2):
+        out |= mask[np.clip(src_y + offset, 0, h - 1)]
+    base_x = int(np.floor(-float(dx)))
+    if abs(float(dx) - round(float(dx))) >= 1e-6:
+        cols = np.arange(w)
+        wide = np.zeros(mask.shape, dtype=bool)
+        for offset in range(-reach, reach + 2):
+            wide |= out[:, np.clip(cols + base_x + offset, 0, w - 1)]
+        return wide
+    return out[:, np.clip(np.arange(w) + base_x, 0, w - 1)]
 
 
 def valid_mask_translation(h: int, w: int, dx: float, dy: float) -> np.ndarray:
