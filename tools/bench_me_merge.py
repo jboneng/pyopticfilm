@@ -28,7 +28,14 @@ pair (needs tifffile), where there is no ground truth:
   noise cannot score as detail and a blurred long pass loses score.
 * ``dense`` — merged/short per short-level band in blue, the densest channel
   under the orange mask; 1.0 means no shift of colour with tone.
-* ``short-only`` — pixels written as the exact short reading (guards fired).
+* ``short-only`` — pixels written as the exact short reading, split into ``clipped``
+  (the long is past the merge's cutoff there) and ``rejected`` (the long was usable
+  and a guard dropped it).
+
+``--real`` also takes a folder of scans (``<film>/<run>/color_short*.tif``), scoring
+each pair. Same-size runs in one folder are repeat scans of a frame: their difference
+holds scanner noise but no grain, so ``repeat noise`` is what the merge really
+removes. ``spread`` is how far the fits and dense blue move between repeats.
 
 ``--timing-mp N`` also times the merge on that pair tiled up to N megapixels.
 
@@ -45,6 +52,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import inspect
+import itertools
 import subprocess
 import sys
 import tempfile
@@ -66,7 +74,9 @@ _CROP = (slice(3, -3), slice(3, -3))
 
 # ``--real``: tile side for the quiet / busy masks, short-level bands for blue.
 _REAL_TILE = 32
-_REAL_DENSE_BANDS = ((1200, 1800), (1800, 3000), (3000, 5000), (5000, 7500))
+_REAL_DENSE_BANDS = ((300, 800), (800, 1200), (1200, 1800), (1800, 3000), (3000, 5000), (5000, 7500))
+# Long readings past this are the merge's own clip region, not a guard's doing.
+_REAL_LONG_CUTOFF = 0.80 * _FULL_SCALE
 
 _BANDS = (
     ("10-44 (long<floor)", 10, 44),
@@ -325,19 +335,46 @@ def _detail(out: np.ndarray, short: np.ndarray, busy: np.ndarray, c: int, partne
     return float(np.dot(mine - mine.mean(), ref) / np.dot(theirs - theirs.mean(), ref))
 
 
-def run_real(folder: Path, versions: dict[str, ModuleType], timing_mp: float) -> None:
-    short, long = _read_pair(folder)
+def _find_pairs(root: Path) -> list[Path]:
+    if any(root.glob("color_short*.tif")):
+        return [root]
+    return sorted({p.parent for p in root.rglob("color_short*.tif")})
+
+
+@dataclass
+class _Scored:
+    """One version's merge of one pair, kept for the repeat comparison."""
+
+    short: np.ndarray
+    out: np.ndarray
+    dense: list[float]
+    stats: object
+
+
+def _score_pair(
+    short: np.ndarray, long: np.ndarray, folder: Path, versions: dict[str, ModuleType], repeats: int
+) -> dict[str, _Scored]:
+    from pyopticfilm import pass_align
+
     t0 = time.perf_counter()
     shift, transform = _estimate_alignment(short, long)
     align_s = time.perf_counter() - t0
     flat, busy = _tile_masks(short)
     level = short[..., 2].astype(np.float32)
     h, w = short.shape[:2]
-    print(f"\n=== real pair {folder}  {w}x{h}  mean shift=({shift[0]:.3f}, {shift[1]:.3f})  align {align_s:.2f}s")
+    print(
+        f"\n=== {folder}  {w}x{h}  {type(transform).__name__}  "
+        f"mean shift=({shift[0]:.3f}, {shift[1]:.3f})  align {align_s:.2f}s"
+    )
+    aligned = long
+    if transform is not None:
+        aligned = pass_align.apply_me_transform(long, transform, clip_level=0.95 * _FULL_SCALE)[0]
+    long_clipped = aligned[..., 1] >= _REAL_LONG_CUTOFF
+    scored: dict[str, _Scored] = {}
     for label, mod in versions.items():
         kwargs = _merge_kwargs(mod, shift, transform)
         times = []
-        for _ in range(3):
+        for _ in range(repeats):
             t0 = time.perf_counter()
             res = mod.merge_exposures_result(short, long, **kwargs)
             times.append(time.perf_counter() - t0)
@@ -348,9 +385,9 @@ def run_real(folder: Path, versions: dict[str, ModuleType], timing_mp: float) ->
         for lo, hi in _REAL_DENSE_BANDS:
             m = (level >= lo) & (level < hi)
             dense.append(float(np.median(out[..., 2][m].astype(np.float32)) / np.median(level[m])) if m.any() else 0.0)
-        short_only = float((out[..., 1] == short[..., 1]).mean() * 100.0)
+        same = out[..., 1] == short[..., 1]
         stats = res.fusion_stats
-        offsets = getattr(stats, "exposure_offset_per_channel", None) or ()
+        offsets = getattr(stats, "exposure_offset_per_channel", None)
         print(f"  {label}:")
         print("    merge s      " + " ".join(f"{t:.2f}" for t in times))
         print("    flat RGB     " + " ".join(f"{v:.0f}" for v in noise))
@@ -359,18 +396,80 @@ def run_real(folder: Path, versions: dict[str, ModuleType], timing_mp: float) ->
             "    dense blue   "
             + " ".join(f"{lo}-{hi}:{v:.3f}" for (lo, hi), v in zip(_REAL_DENSE_BANDS, dense, strict=True))
         )
-        print(f"    short-only   {short_only:.1f}% of G pixels")
+        print(
+            f"    short-only   {same.mean() * 100.0:.1f}% of G pixels = "
+            f"{(same & long_clipped).mean() * 100.0:.1f}% clipped + {(same & ~long_clipped).mean() * 100.0:.1f}% rejected"
+        )
         print(
             "    gain "
             + " ".join(f"{v:.3f}" for v in stats.exposure_ratio_per_channel)
-            + "  offset "
-            + " ".join(f"{v:.0f}" for v in offsets)
+            + ("" if offsets is None else "  offset " + " ".join(f"{v:.0f}" for v in offsets))
             + "  alpha "
             + " ".join(f"{v:.2f}" for v in stats.noise_alpha)
             + "  beta "
             + " ".join(f"{v:.0f}" for v in stats.noise_beta)
         )
-    if timing_mp > 0:
+        scored[label] = _Scored(short, out, dense, stats)
+    return scored
+
+
+def _repeat_noise(first: _Scored, second: _Scored) -> tuple[list[float], list[float]]:
+    """Scanner noise of the short and of the merge, RGB, from two scans of one frame.
+
+    Grain is in both scans, so it cancels and only noise that differs is left. The
+    second scan is resampled onto the first, which scales its noise; dividing by
+    the combined factor gives the noise of one scan.
+    """
+    from pyopticfilm import pass_align
+
+    transform = pass_align.estimate_me_transform(first.short, second.short)
+    aligned_short, var_scale = pass_align.apply_me_transform(second.short, transform)
+    aligned_out, _ = pass_align.apply_me_transform(second.out, transform)
+    norm = float(np.sqrt(1.0 + np.mean(var_scale)))
+    edge = _REAL_TILE
+
+    def one(a: np.ndarray, b: np.ndarray) -> list[float]:
+        return [float(_highpass(a[..., c].astype(np.float32) - b[..., c])[edge:-edge, edge:-edge].std()) / norm for c in range(3)]
+
+    return one(first.short, aligned_short), one(first.out, aligned_out)
+
+
+def _print_repeats(folder: Path, runs: list[dict[str, _Scored]]) -> None:
+    print(f"\n=== repeats {folder}: {len(runs)} runs")
+    for label in runs[0]:
+        short_noise, merged_noise = _repeat_noise(runs[0][label], runs[1][label])
+        print(f"  {label}:")
+        print("    repeat noise short  " + " ".join(f"{v:.1f}" for v in short_noise))
+        print("    repeat noise merged " + " ".join(f"{v:.1f}" for v in merged_noise))
+        dense = np.array([run[label].dense for run in runs])
+        print(
+            "    spread dense blue   "
+            + " ".join(f"{lo}-{hi}:{v:.3f}" for (lo, hi), v in zip(_REAL_DENSE_BANDS, np.ptp(dense, axis=0), strict=True))
+        )
+        for name in ("exposure_ratio_per_channel", "noise_alpha", "noise_beta"):
+            values = np.array([getattr(run[label].stats, name) for run in runs])
+            print(f"    spread {name:<27}" + " ".join(f"{v:.3f}" for v in np.ptp(values, axis=0)))
+
+
+def run_real(root: Path, versions: dict[str, ModuleType], timing_mp: float) -> None:
+    pairs = _find_pairs(root)
+    if not pairs:
+        raise SystemExit(f"no color_short*.tif under {root}")
+    # One merge each on a set: three would only refine the timing.
+    repeats = 3 if len(pairs) == 1 else 1
+    short, long = None, None
+    for parent, folders in itertools.groupby(pairs, key=lambda p: p.parent):
+        runs: list[dict[str, _Scored]] = []
+        shapes: list[tuple[int, ...]] = []
+        for folder in folders:
+            short, long = _read_pair(folder)
+            runs.append(_score_pair(short, long, folder, versions, repeats))
+            shapes.append(short.shape)
+        same_size = [run for run, shape in zip(runs, shapes, strict=True) if shape == shapes[0]]
+        if len(same_size) >= 2:
+            _print_repeats(parent, same_size)
+    if timing_mp > 0 and short is not None and long is not None:
+        h, w = short.shape[:2]
         n = int(np.ceil(np.sqrt(timing_mp * 1e6 / (h * w))))
         big_s = np.tile(short, (n, n, 1))
         big_l = np.tile(long, (n, n, 1))
@@ -392,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--case", action="append", default=[], help="Run only these case keys (A-F)")
     parser.add_argument("--seeds", type=int, default=3, help="Noise realisations per case (default 3)")
-    parser.add_argument("--real", type=Path, help="Folder with a real color_short*/color_long* TIFF pair")
+    parser.add_argument("--real", type=Path, help="Real color_short*/color_long* TIFF pair, or a folder of them")
     parser.add_argument("--timing-mp", type=float, default=0.0, help="With --real, also time a frame tiled to N MP")
     args = parser.parse_args(argv)
 
