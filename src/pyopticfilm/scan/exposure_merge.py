@@ -30,6 +30,17 @@ _NOISE_FIT_ALPHA_MIN = 1e-3
 _NOISE_FIT_ALPHA_MAX = 100.0
 _NOISE_FIT_BETA_MIN = 1.0
 _NOISE_FIT_BETA_MAX = 1e7
+# Long-vs-short transfer fit: equal-count bins over the two passes' mean level.
+_TRANSFER_BINS = 16
+_TRANSFER_MIN_PIXELS = 4000
+# Below this level span (max/min bin) gain and offset trade off and the fit is unstable.
+_TRANSFER_MIN_SPAN = 2.0
+# An offset must shrink the fit's relative rms error by this factor to be used...
+_TRANSFER_MIN_IMPROVEMENT = 1.5
+# ...and the gain-only error must be worth correcting at all.
+_TRANSFER_MIN_ERROR = 0.002
+# Larger offsets (short scale) are not a black level; distrust them.
+_TRANSFER_MAX_OFFSET = 0.05 * _FULL_SCALE
 _SNR_Z_LO = 3.0
 _SNR_Z_HI = 5.0
 
@@ -54,6 +65,8 @@ class FusionStats:
     exposure_ratio_used: float | None = None
     #: Long/short ratio applied to each of R, G, B.
     exposure_ratio_per_channel: tuple[float, ...] | None = None
+    #: Long black offset per channel (long DN): ``long = ratio * short + offset``.
+    exposure_offset_per_channel: tuple[float, ...] | None = None
     #: Poisson-Gaussian ``α`` / ``β`` used for each of R, G, B (short-pass DN).
     noise_alpha: tuple[float, ...] | None = None
     noise_beta: tuple[float, ...] | None = None
@@ -237,13 +250,14 @@ def _fit_pg_noise_from_pair(
     b_raw: np.ndarray,
     *,
     r: np.ndarray,
+    offset: np.ndarray,
     long_var_scale: float,
     floor: float,
     clip_start: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-channel Poisson-Gaussian ``α``, ``β`` from the aligned pass pair.
 
-    Both passes see the same scene, so ``d = short - long/r`` is noise plus
+    Both passes see the same scene, so ``d = short - (long-o)/r`` is noise plus
     leftover misregistration, which the robust spread rejects. At true level
     ``x`` (short scale), with ``s`` the long's resampling variance factor::
 
@@ -265,10 +279,11 @@ def _fit_pg_noise_from_pair(
         rc = float(r[c])
         # Select on the long's level, not the short's reading: cutting the
         # short at the floor trims its noise there and biases the fit.
-        valid = (bc / rc > floor) & (bc < clip_start) & (ac < clip_start)
+        scaled = (bc - float(offset[c])) / rc
+        valid = (scaled > floor) & (bc > floor) & (bc < clip_start) & (ac < clip_start)
         if int(np.count_nonzero(valid)) < _NOISE_FIT_MIN_BINS * _NOISE_FIT_MIN_PER_BIN:
             continue
-        level = bc[valid] / rc
+        level = scaled[valid]
         d = ac[valid] - level
         edges = np.quantile(level, np.linspace(0.0, 1.0, _NOISE_FIT_BINS + 1))
         idx = np.clip(np.searchsorted(edges, level, side="right") - 1, 0, _NOISE_FIT_BINS - 1)
@@ -374,6 +389,57 @@ def _estimate_exposure_ratio(
     return ratios
 
 
+def _fit_transfer(a: np.ndarray, b_raw: np.ndarray, ratio: float, floor: float) -> tuple[float, float]:
+    """One channel's ``long = gain * short + offset``, or ``(ratio, 0)`` if not justified.
+
+    The passes do not share a black level, so a pure ratio reads the long too
+    dark in dense film: on a real pair blue ran 18% low there, a colour shift
+    with tone. Bins follow the mean of both passes because binning on either
+    one alone selects on its noise and bends the line at the ends.
+    """
+    hi = 0.85 * _FULL_SCALE
+    level = 0.5 * (a + b_raw / ratio)
+    # Stay well above the floor: selecting near it keeps only the upward noise and
+    # bends the line, and a negative offset hides dense film at the long's zero.
+    valid = (level > 4.0 * floor) & (b_raw > 2.0 * floor) & (a < hi) & (b_raw < hi)
+    if int(np.count_nonzero(valid)) < _TRANSFER_MIN_PIXELS:
+        return ratio, 0.0
+    lv, av, bv = level[valid], a[valid], b_raw[valid]
+    edges = np.quantile(lv, np.linspace(0.0, 1.0, _TRANSFER_BINS + 1))
+    idx = np.clip(np.searchsorted(edges, lv, side="right") - 1, 0, _TRANSFER_BINS - 1)
+    n = np.bincount(idx, minlength=_TRANSFER_BINS).astype(np.float64)
+    ok = n > 0
+    x = np.bincount(idx, weights=av, minlength=_TRANSFER_BINS)[ok] / n[ok]
+    y = np.bincount(idx, weights=bv, minlength=_TRANSFER_BINS)[ok] / n[ok]
+    if x.size < 4 or x.min() <= 0.0 or x.max() / x.min() < _TRANSFER_MIN_SPAN:
+        return ratio, 0.0
+    gain, offset = np.polyfit(x, y, 1)
+    if gain <= 0.0 or abs(offset / gain) > _TRANSFER_MAX_OFFSET:
+        return ratio, 0.0
+    err_ratio = float(np.sqrt(np.mean((y / ratio / x - 1.0) ** 2)))
+    err_line = float(np.sqrt(np.mean(((y - offset) / gain / x - 1.0) ** 2)))
+    if err_ratio < _TRANSFER_MIN_ERROR or err_ratio < _TRANSFER_MIN_IMPROVEMENT * err_line:
+        return ratio, 0.0
+    return float(gain), float(offset)
+
+
+def _estimate_transfer(
+    a: np.ndarray,
+    b_raw: np.ndarray,
+    *,
+    usb_ratio: float,
+    floor: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel ``(gain, offset)`` taking short to long; see :func:`_fit_transfer`."""
+    ratios = np.maximum(_estimate_exposure_ratio(a, b_raw, usb_ratio=usb_ratio), 1e-12)
+    n_ch = a.shape[2]
+    gain = ratios.astype(np.float64)
+    offset = np.zeros(n_ch)
+    for c in range(n_ch):
+        gain[c], offset[c] = _fit_transfer(a[..., c], b_raw[..., c], float(ratios[c]), floor)
+    return gain.astype(np.float32), offset.astype(np.float32)
+
+
 def _pass_variances(
     xa: np.ndarray,
     b_raw: np.ndarray,
@@ -422,6 +488,7 @@ def _estimate_z_median(
     long_u: np.ndarray,
     *,
     r: np.ndarray,
+    offset: np.ndarray,
     alpha: np.ndarray,
     beta: np.ndarray,
     long_var_scale: float,
@@ -433,7 +500,7 @@ def _estimate_z_median(
     a_s, b_s = _subsample_for_stats(short_u, long_u)
     a = a_s.astype(np.float32)
     b_raw = b_s.astype(np.float32)
-    xb = b_raw / r
+    xb = (b_raw - offset) / r
     va, vb = _pass_variances(
         a, b_raw, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale
     )
@@ -453,6 +520,7 @@ def _merge_snr_rows(
     long_rows: np.ndarray,
     *,
     r: np.ndarray,
+    offset: np.ndarray,
     z_median: float,
     alpha: np.ndarray,
     beta: np.ndarray,
@@ -465,7 +533,7 @@ def _merge_snr_rows(
     a = short_rows.astype(np.float32)
     b_raw = long_rows.astype(np.float32)
     xa = a
-    xb = b_raw / r
+    xb = (b_raw - offset) / r
 
     ca = _smooth_confidence(a, floor=floor, clip_start=clip_start, clip_end=clip_end)
     cb = _smooth_confidence(b_raw, floor=floor, clip_start=clip_start, clip_end=clip_end)
@@ -502,8 +570,10 @@ def _merge_snr_rows(
     # areas to black one DN under the floor. Only a short at the floor against
     # a clipped long (no usable reading) goes to 0. Test against clip_start:
     # confidence already reads as zero a few DN below clip_end, and the noise
-    # floor is nowhere near it.
-    fallback = np.where(a >= clip_start, xa, np.where(b_raw < clip_start, xb, 0.0))
+    # floor is nowhere near it. A negative long offset hides dense film at the
+    # long's zero, so a long reading under that offset is no reading either.
+    long_hidden = b_raw < np.minimum(floor, -offset)
+    fallback = np.where(a >= clip_start, xa, np.where(b_raw < clip_start, np.where(long_hidden, xa, xb), 0.0))
     out = np.where(both_zero, fallback, out)
 
     both_zero_pix = np.all(both_zero, axis=2)
@@ -533,7 +603,7 @@ def _merge_snr(
     a_sub, b_sub = _subsample_for_stats(short_u, long_u)
     a_sub = a_sub.astype(np.float32)
     b_sub = b_sub.astype(np.float32)
-    r = np.maximum(_estimate_exposure_ratio(a_sub, b_sub, usb_ratio=usb_ratio), 1e-12)
+    r, offset = _estimate_transfer(a_sub, b_sub, usb_ratio=usb_ratio, floor=floor)
     n_ch = short_u.shape[2]
     mean_var_scale = float(np.mean(long_var_scale))
     if alpha is not None and beta is not None:
@@ -545,6 +615,7 @@ def _merge_snr(
             a_sub,
             b_sub,
             r=r,
+            offset=offset,
             long_var_scale=mean_var_scale,
             floor=floor,
             clip_start=clip_start,
@@ -557,6 +628,7 @@ def _merge_snr(
         short_u,
         long_u,
         r=r,
+        offset=offset,
         alpha=alpha_c,
         beta=beta_c,
         long_var_scale=mean_var_scale,
@@ -580,6 +652,7 @@ def _merge_snr(
             short_u[y0:y1],
             long_u[y0:y1],
             r=r,
+            offset=offset,
             z_median=z_median,
             alpha=alpha_c,
             beta=beta_c,
@@ -603,6 +676,7 @@ def _merge_snr(
         mean_residual_confidence=c_res_sum / max(total_pixels, 1),
         exposure_ratio_used=float(r.mean()),
         exposure_ratio_per_channel=tuple(float(v) for v in r),
+        exposure_offset_per_channel=tuple(float(v) for v in offset),
         noise_alpha=tuple(float(v) for v in alpha_c),
         noise_beta=tuple(float(v) for v in beta_c),
         noise_fitted=tuple(bool(v) for v in fitted),

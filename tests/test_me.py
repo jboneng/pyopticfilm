@@ -740,3 +740,48 @@ def test_apply_me_transform_ringing_at_clip_edge_reads_as_clipped():
     assert plain[32:40, 0, 0].min() < 65535
     assert np.all(guarded[33:] == 65535)
     assert np.all(guarded[20:26] == 30000)
+
+
+def _ramp_pair(offset: tuple[float, float, float], lo: float = 500.0, hi: float = 15000.0) -> tuple:
+    rng = np.random.default_rng(5)
+    level = np.exp(np.linspace(np.log(lo), np.log(hi), 800))[None, :] * np.ones((400, 800))
+    short = np.stack([level, level * 0.7, level * 0.45], axis=2)
+    long = short * 3.0 + np.asarray(offset)
+    noisy = [x + rng.normal(0.0, np.sqrt(0.5 * np.maximum(x, 1.0) + 400.0)) for x in (short, long)]
+    return tuple(np.clip(np.rint(x), 0, 65535).astype(np.uint16) for x in noisy)
+
+
+def test_merge_snr_recovers_long_black_offset():
+    short, long = _ramp_pair((-880.0, 0.0, -1230.0))
+    result = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    stats = result.fusion_stats
+    assert stats.exposure_offset_per_channel[0] == pytest.approx(-880.0, abs=90.0)
+    assert stats.exposure_offset_per_channel[2] == pytest.approx(-1230.0, abs=90.0)
+    assert stats.exposure_ratio_per_channel[2] == pytest.approx(3.0, abs=0.03)
+
+
+def test_merge_snr_black_offset_keeps_dense_film_level():
+    short, long = _ramp_pair((-880.0, 0.0, -1230.0))
+    merged = merge_exposures(short, long, align_shift=(0.0, 0.0)).astype(np.float64)
+    dense = short[:, 40:80, 2].astype(np.float64).mean()
+    assert merged[:, 40:80, 2].mean() == pytest.approx(dense, rel=0.03)
+
+
+def test_merge_snr_no_offset_stays_a_pure_ratio():
+    short, long = _ramp_pair((0.0, 0.0, 0.0))
+    stats = merge_exposures_result(short, long, align_shift=(0.0, 0.0)).fusion_stats
+    assert stats.exposure_offset_per_channel == (0.0, 0.0, 0.0)
+
+
+def test_merge_snr_narrow_level_span_skips_offset_fit():
+    short, long = _ramp_pair((-900.0, -900.0, -900.0), lo=9000.0, hi=12000.0)
+    stats = merge_exposures_result(short, long, align_shift=(0.0, 0.0)).fusion_stats
+    assert stats.exposure_offset_per_channel == (0.0, 0.0, 0.0)
+
+
+def test_merge_snr_long_hidden_by_offset_keeps_short_level():
+    """Dense film the offset pushed to the long's zero must not read as -offset/gain."""
+    short, long = _ramp_pair((-880.0, 0.0, -1230.0), lo=60.0)
+    merged = merge_exposures(short, long, align_shift=(0.0, 0.0)).astype(np.float64)
+    dense = short[:, :40, 2].astype(np.float64).mean()
+    assert merged[:, :40, 2].mean() < dense + 60.0
