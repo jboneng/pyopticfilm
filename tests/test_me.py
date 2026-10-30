@@ -258,12 +258,12 @@ def test_merge_snr_differs_from_short_when_long_adds_signal():
     short = np.full((32, 32, 3), 8000, dtype=np.uint16)
     long = np.full((32, 32, 3), 24000, dtype=np.uint16)
     # Dense corner: short near floor, long has recoverable signal at 3×.
-    short[:16, :16, :] = 400
+    short[:16, :16, :] = 140
     long[:16, :16, :] = 6000  # → ~2000 on short scale after r=3
     result = merge_exposures_result(
         short, long, exposure_short=14000, exposure_long=42000, align_shift=(0, 0)
     )
-    # Dense corner should be brighter than short's 400 (long contributes).
+    # Dense corner should be brighter than short's 140 (long contributes).
     assert float(result.rgb[:16, :16].mean()) > 800.0
     assert not np.allclose(result.rgb, short, atol=50)
 
@@ -698,33 +698,30 @@ def test_estimate_me_transform_small_frame_falls_back_to_translation():
     assert isinstance(estimate_me_transform(arr, arr), TranslationTransform)
 
 
-def test_merge_with_row_transform_keeps_detail_at_frame_ends():
+def _drifted_pair() -> tuple[np.ndarray, np.ndarray]:
+    rgb = _detailed_rgb()
+    long = _drifted(rgb, np.linspace(3.0, -3.0, rgb.shape[0])) * 3.0
+    return rgb.astype(np.uint16), long.astype(np.uint16)
+
+
+def _long_share(result) -> float:
+    return result.fusion_stats.mean_residual_confidence
+
+
+def test_merge_with_row_transform_uses_the_long_across_the_frame():
+    """Unregistered, the guard must fall back to the short away from the frame centre."""
     from pyopticfilm.pass_align import estimate_me_transform
 
-    rgb = _detailed_rgb()
-    h = rgb.shape[0]
-    long = _drifted(rgb, np.linspace(3.0, -3.0, h)) * 3.0
-    short_u = rgb.astype(np.uint16)
-    long_u = long.astype(np.uint16)
-    fixed = merge_exposures(short_u, long_u, align_transform=estimate_me_transform(short_u, long_u))
-    plain = merge_exposures(short_u, long_u, align_shift=(0.0, 0.0))
-    top = (slice(40, 240), slice(40, -40))
-    err_fixed = np.abs(fixed[top].astype(np.float64) - rgb[top]).mean()
-    err_plain = np.abs(plain[top].astype(np.float64) - rgb[top]).mean()
-    assert err_fixed < 0.5 * err_plain
+    short, long = _drifted_pair()
+    fixed = merge_exposures_result(short, long, align_transform=estimate_me_transform(short, long))
+    plain = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
+    assert _long_share(fixed) > 0.9
+    assert _long_share(plain) < 0.5 * _long_share(fixed)
 
 
 def test_merge_defaults_to_estimating_the_transform():
-    rgb = _detailed_rgb()
-    h = rgb.shape[0]
-    short_u = rgb.astype(np.uint16)
-    long_u = (_drifted(rgb, np.linspace(3.0, -3.0, h)) * 3.0).astype(np.uint16)
-    default = merge_exposures(short_u, long_u)
-    plain = merge_exposures(short_u, long_u, align_shift=(0.0, 0.0))
-    top = (slice(40, 240), slice(40, -40))
-    assert np.abs(default[top].astype(np.float64) - rgb[top]).mean() < np.abs(
-        plain[top].astype(np.float64) - rgb[top]
-    ).mean()
+    short, long = _drifted_pair()
+    assert _long_share(merge_exposures_result(short, long)) > 0.9
 
 
 def test_apply_me_transform_ringing_at_clip_edge_reads_as_clipped():
@@ -785,3 +782,44 @@ def test_merge_snr_long_hidden_by_offset_keeps_short_level():
     merged = merge_exposures(short, long, align_shift=(0.0, 0.0)).astype(np.float64)
     dense = short[:, :40, 2].astype(np.float64).mean()
     assert merged[:, :40, 2].mean() < dense + 60.0
+
+
+def test_merge_snr_real_misregistration_keeps_the_short():
+    """A patch that moved between passes must not ghost into the merge."""
+    rgb = _detailed_rgb(h=500, w=500)
+    short = rgb.copy()
+    long = rgb * 3.0
+    long[200:260, 200:260] = long[200:260, 200:260] * 0.5
+    short_u = short.astype(np.uint16)
+    merged = merge_exposures(short_u, long.astype(np.uint16), align_shift=(0.0, 0.0)).astype(np.float64)
+    inner = (slice(210, 250), slice(210, 250))
+    assert np.abs(merged[inner] - short[inner]).mean() < 0.02 * short[inner].mean()
+
+
+def test_merge_snr_noise_does_not_trip_the_guard():
+    """Heavy noise on a flat frame: the long is used everywhere, none falls back."""
+    rng = np.random.default_rng(9)
+    short = np.clip(10000.0 + rng.normal(0.0, 600.0, size=(300, 300, 3)), 0, 65535)
+    long = np.clip(30000.0 + rng.normal(0.0, 1000.0, size=(300, 300, 3)), 0, 65535)
+    short_u = short.astype(np.uint16)
+    merged = merge_exposures(short_u, long.astype(np.uint16), align_shift=(0.0, 0.0))
+    assert np.std(merged.astype(np.float64)) < 0.7 * np.std(short)
+
+
+def test_merge_snr_output_does_not_depend_on_band_height(monkeypatch):
+    from pyopticfilm.scan import exposure_merge
+
+    rgb = _detailed_rgb(h=300, w=200)
+    short = rgb.astype(np.uint16)
+    long = np.clip(_drifted(rgb, np.linspace(0.0, 0.4, 300)) * 3.0, 0, 65535).astype(np.uint16)
+    first = merge_exposures(short, long, align_shift=(0.0, 0.0))
+    monkeypatch.setattr(exposure_merge, "_MERGE_CHUNK_ROWS", 37)
+    second = merge_exposures(short, long, align_shift=(0.0, 0.0))
+    assert np.abs(first.astype(np.int32) - second.astype(np.int32)).max() <= 1
+
+
+def test_merge_snr_rounds_to_nearest():
+    short = np.full((8, 8, 3), 1000, dtype=np.uint16)
+    long = np.full((8, 8, 3), 3001, dtype=np.uint16)
+    merged = merge_exposures(short, long, align_shift=(0.0, 0.0), exposure_short=1000, exposure_long=3000)
+    assert np.all(merged == 1000)

@@ -41,15 +41,26 @@ _TRANSFER_MIN_IMPROVEMENT = 1.5
 _TRANSFER_MIN_ERROR = 0.002
 # Larger offsets (short scale) are not a black level; distrust them.
 _TRANSFER_MAX_OFFSET = 0.05 * _FULL_SCALE
-_SNR_Z_LO = 3.0
-_SNR_Z_HI = 5.0
+# Per-pixel residual gate: only for single-pixel events (dust, hot pixels). It has
+# to sit well above the noise's tails, or it keeps exactly the noisiest readings.
+_SNR_Z_LO = 5.0
+_SNR_Z_HI = 8.0
 
 # Row bands for IVW merge — avoids several full-frame float32 planes at 3600+ dpi.
 _MERGE_CHUNK_ROWS = 128
 _STATS_MAX_SIDE = 1024
-# Luma disagreement (short scale) above which IVW is suppressed (misregistration guard).
+# Multi-Pass luma disagreement (DN) above which a repeat is dropped as an outlier.
 _LUMA_DISAGREE_TAU = 300.0
-_IVW_CHANNEL_SPREAD_TAU = 150.0
+# ME disagreement guard: residual energy over a (2r+1)² box, as a multiple of what
+# the noise model predicts. Noise sits near 1 and cannot trip it, unlike a per-pixel
+# threshold, which threw out the long on a third of a real frame. Energy rather than
+# the mean, so detail the resampled long softened counts too: its residual changes
+# sign and would average away. Falling back there costs little, as texture hides
+# noise. Transfer-model error is tolerated as a fraction of the level.
+_GUARD_RADIUS = 3
+_GUARD_ENERGY_LO = 1.5
+_GUARD_ENERGY_HI = 3.0
+_GUARD_LEVEL_TOLERANCE = 0.005
 
 
 @dataclass(frozen=True)
@@ -442,16 +453,24 @@ def _estimate_transfer(
 
 def _pass_variances(
     xa: np.ndarray,
-    b_raw: np.ndarray,
+    xb: np.ndarray,
+    cb: np.ndarray,
     *,
     r: np.ndarray,
+    offset: np.ndarray,
     alpha: np.ndarray,
     beta: np.ndarray,
     long_var_scale: float | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-pixel noise variance of the short and of the long in short scale."""
-    va = alpha * np.maximum(xa, 0.0) + beta
-    vb = (alpha * np.maximum(b_raw, 0.0) + beta) * (long_var_scale / (r * r))
+    """Per-pixel noise variance of the short and of the long in short scale.
+
+    Both come from one level estimate, the long where it is confident. Taken
+    from each pass's own reading, a reading that noise pushed low would get a
+    low variance, so a high weight, and the merge would be biased dark.
+    """
+    level = np.maximum(xa + cb * (xb - xa), 0.0)
+    va = alpha * level + beta
+    vb = (alpha * np.maximum(level * r + offset, 0.0) + beta) * (long_var_scale / (r * r))
     return va, vb
 
 
@@ -469,16 +488,19 @@ def _confident_luma(
     one clipped channel look misregistered, and the guards then dropped the
     long for the other channels too. ``conf`` is ``min(ca, cb)`` per channel.
     Returns ``(lum_xa, lum_xb, va_lum, vb_lum, has)``; ``has`` is False where
-    no channel is confident in both passes.
+    no channel is confident in both passes. Channel noise is independent, so the
+    luma variances are those of a weighted average, not the average variance.
     """
     wsum = conf.sum(axis=2)
     has = wsum > 1e-6
     wsafe = np.maximum(wsum, 1e-6)
+    w2 = conf * conf
+    w2sum = wsafe * wsafe
     return (
         (conf * xa).sum(axis=2) / wsafe,
         (conf * xb).sum(axis=2) / wsafe,
-        (conf * va).sum(axis=2) / wsafe,
-        (conf * vb).sum(axis=2) / wsafe,
+        (w2 * va).sum(axis=2) / w2sum,
+        (w2 * vb).sum(axis=2) / w2sum,
         has,
     )
 
@@ -501,13 +523,11 @@ def _estimate_z_median(
     a = a_s.astype(np.float32)
     b_raw = b_s.astype(np.float32)
     xb = (b_raw - offset) / r
+    cb = _smooth_confidence(b_raw, floor=floor, clip_start=clip_start, clip_end=clip_end)
     va, vb = _pass_variances(
-        a, b_raw, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale
+        a, xb, cb, r=r, offset=offset, alpha=alpha, beta=beta, long_var_scale=long_var_scale
     )
-    conf = np.minimum(
-        _smooth_confidence(a, floor=floor, clip_start=clip_start, clip_end=clip_end),
-        _smooth_confidence(b_raw, floor=floor, clip_start=clip_start, clip_end=clip_end),
-    )
+    conf = np.minimum(_smooth_confidence(a, floor=floor, clip_start=clip_start, clip_end=clip_end), cb)
     lum_xa, lum_xb, va_lum, vb_lum, has = _confident_luma(conf, a, xb, va, vb)
     if not np.any(has):
         return 0.0
@@ -515,10 +535,30 @@ def _estimate_z_median(
     return float(np.median(z[has]))
 
 
+def _box_sum(a: np.ndarray, radius: int) -> np.ndarray:
+    """Sum over a ``(2r+1)²`` box; the frame edge repeats outward."""
+    n = 2 * radius + 1
+    c = np.cumsum(np.pad(a, ((radius + 1, radius), (0, 0)), mode="edge"), axis=0, dtype=np.float64)
+    rows = c[n:] - c[:-n]
+    c = np.cumsum(np.pad(rows, ((0, 0), (radius + 1, radius)), mode="edge"), axis=1)
+    return c[:, n:] - c[:, :-n]
+
+
+def _agreement_confidence(residual: np.ndarray, variance: np.ndarray, level: np.ndarray) -> np.ndarray:
+    """1 where the pass residual is noise, falling to 0 where its energy exceeds noise."""
+    n = (2 * _GUARD_RADIUS + 1) ** 2
+    energy = _box_sum(residual * residual, _GUARD_RADIUS) / n
+    tolerance = _GUARD_LEVEL_TOLERANCE * _box_sum(np.abs(level), _GUARD_RADIUS) / n
+    expected = _box_sum(variance, _GUARD_RADIUS) / n + tolerance * tolerance
+    ratio = energy / np.maximum(expected, 1e-12)
+    return np.clip((_GUARD_ENERGY_HI - ratio) / (_GUARD_ENERGY_HI - _GUARD_ENERGY_LO), 0.0, 1.0).astype(np.float32)
+
+
 def _merge_snr_rows(
     short_rows: np.ndarray,
     long_rows: np.ndarray,
     *,
+    keep: slice,
     r: np.ndarray,
     offset: np.ndarray,
     z_median: float,
@@ -529,7 +569,11 @@ def _merge_snr_rows(
     clip_start: float,
     clip_end: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """IVW merge for one row band; returns uint16 chunk and stat accumulators."""
+    """IVW merge for one row band; returns uint16 chunk and stat accumulators.
+
+    The band carries :data:`_GUARD_RADIUS` extra rows on inner edges so the box
+    filter does not see the band split; ``keep`` selects the rows to return.
+    """
     a = short_rows.astype(np.float32)
     b_raw = long_rows.astype(np.float32)
     xa = a
@@ -539,31 +583,29 @@ def _merge_snr_rows(
     cb = _smooth_confidence(b_raw, floor=floor, clip_start=clip_start, clip_end=clip_end)
 
     va, vb = _pass_variances(
-        xa, b_raw, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale
+        xa, xb, cb, r=r, offset=offset, alpha=alpha, beta=beta, long_var_scale=long_var_scale
     )
 
     lum_xa, lum_xb, va_lum, vb_lum, has = _confident_luma(np.minimum(ca, cb), xa, xb, va, vb)
-    z = (lum_xa - lum_xb) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
-    z_local = z - z_median
-    c_res = _residual_confidence(z_local)
-    gate = np.minimum(ca, cb).mean(axis=2)
-    c_res_eff = 1.0 - gate * (1.0 - c_res)
+    var_lum = va_lum + vb_lum
+    residual = np.where(has, lum_xa - lum_xb, 0.0)
+    z_local = residual / np.sqrt(np.maximum(var_lum, 1e-12)) - z_median
+    agreement = _agreement_confidence(residual, np.where(has, var_lum, 0.0), lum_xb)
+    # No channel confident in both: nothing to compare, and IVW is one-sided anyway.
+    c_res = np.where(has, np.minimum(_residual_confidence(z_local), agreement), 1.0)[keep]
+
+    a, b_raw, xa, xb, ca, cb, va, vb = (x[keep] for x in (a, b_raw, xa, xb, ca, cb, va, vb))
 
     wa = ca / np.maximum(va, 1e-12)
     wb = cb / np.maximum(vb, 1e-12)
-    denom = wa + wb
     both_zero = (ca + cb) <= 1e-6
-    ivw = (wa * xa + wb * xb) / np.maximum(denom, 1e-12)
+    ivw = (wa * xa + wb * xb) / np.maximum(wa + wb, 1e-12)
 
-    prefer = np.where(wa >= wb, xa, xb)
-    merged = c_res_eff[..., np.newaxis] * ivw + (1.0 - c_res_eff[..., np.newaxis]) * prefer
-    # Misregistered edges: per-channel IVW causes R/G/B fringes; fall back to short scale
-    # only when luma AND channel spread both disagree (dense shadow keeps long recovery).
-    # No channel confident in both: nothing to compare, and IVW is short-only anyway.
-    lum_diff = np.where(has, np.abs(lum_xa - lum_xb), 0.0)
-    ivw_spread = np.max(ivw, axis=2) - np.min(ivw, axis=2)
-    misaligned = (lum_diff > _LUMA_DISAGREE_TAU) & (ivw_spread > _IVW_CHANNEL_SPREAD_TAU)
-    out = np.where(misaligned[..., np.newaxis], xa, merged)
+    # Passes disagree: keep the short, the reference geometry, for all channels so
+    # no colour fringes appear. Only as far as it has a reading, though: at its
+    # noise floor or clip the long is all there is.
+    c = c_res[..., np.newaxis]
+    out = c * ivw + (1.0 - c) * (ca * xa + (1.0 - ca) * ivw)
     # No confident input. A short clipped at the top keeps its reading — 0 there
     # turned clear film / slide highlights black. Below the noise floor an
     # unclipped long is still the best estimate — 0 there crushed the densest
@@ -577,8 +619,8 @@ def _merge_snr_rows(
     out = np.where(both_zero, fallback, out)
 
     both_zero_pix = np.all(both_zero, axis=2)
-    chunk = np.clip(out, 0, 65535).astype(np.uint16)
-    return chunk, wa, wb, both_zero_pix, c_res_eff
+    chunk = np.rint(np.clip(out, 0, 65535)).astype(np.uint16)
+    return chunk, wa, wb, both_zero_pix, c_res
 
 
 def _merge_snr(
@@ -648,15 +690,18 @@ def _merge_snr(
 
     for y0 in range(0, h, _MERGE_CHUNK_ROWS):
         y1 = min(h, y0 + _MERGE_CHUNK_ROWS)
+        pad_y0 = max(0, y0 - _GUARD_RADIUS)
+        pad_y1 = min(h, y1 + _GUARD_RADIUS)
         chunk, wa, wb, both_zero_pix, c_res_eff = _merge_snr_rows(
-            short_u[y0:y1],
-            long_u[y0:y1],
+            short_u[pad_y0:pad_y1],
+            long_u[pad_y0:pad_y1],
+            keep=slice(y0 - pad_y0, y1 - pad_y0),
             r=r,
             offset=offset,
             z_median=z_median,
             alpha=alpha_c,
             beta=beta_c,
-            long_var_scale=long_var_scale[y0:y1, np.newaxis, np.newaxis].astype(np.float32),
+            long_var_scale=long_var_scale[pad_y0:pad_y1, np.newaxis, np.newaxis].astype(np.float32),
             floor=floor,
             clip_start=clip_start,
             clip_end=clip_end,
