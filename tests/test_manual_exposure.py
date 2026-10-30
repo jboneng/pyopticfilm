@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.select import create_asic
 from pyopticfilm.scan.exposure_override import MAX_EXPOSURE_REGISTER, validate_manual_exposure
@@ -249,8 +248,10 @@ def test_scanner_scan_rejects_invalid_manual_exposure_before_opening_asic():
 # --- base session compatibility (non-GL128) -------------------------------
 
 
-def test_scanner_scan_single_pass_exposure_not_implemented_for_non_gl128():
-    scanner = Scanner.open_fake(MODEL_8200I)
+def test_scanner_scan_single_pass_exposure_not_implemented_for_gl843():
+    from pyopticfilm.device.model_7200i import MODEL_7200I
+
+    scanner = Scanner.open_fake(MODEL_7200I)
     try:
         with pytest.raises(NotImplementedError):
             scanner.scan(resolution=900, area=_TINY, apply_calib=False, single_pass_exposure=5000)

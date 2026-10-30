@@ -75,7 +75,7 @@ These matter when sizing the ASIC line buffer:
 
 1. Keep `scan_ready=False` except for the hardware-tested set (enforced by `tests/test_multi_model.py::test_scan_ready_validate_set`).
 2. Hardwareless protocol traces may be added per [scanner-validation.md](scanner-validation.md); they change the documented support level, not `scan_ready`.
-3. Lab sequence for GL845 8200i: `tools/bringup_gl845_8200i.py` (open → status → lamp → home → tiny scan → park → host calib → IR). Requires `--allow-unvalidated`; does **not** flip the gate.
+3. Lab sequence for GL845 8200i or 7600i v2: `tools/bringup_gl845_8200i.py --model 7600i-v2 --steps init,home,tiny,park` selects the latter by its USB revision. ASIC init and motor/image steps require `--allow-unvalidated`; this does **not** flip the gate.
 4. Flip **that** model’s `scan_ready` only after a successful image + park on real hardware.
 5. Sibling order after the GL128 trio (8200i SE, 8100 V2, 8300i SE): GL845 aliases (8100, 7400 v2, 7600i v2) → GL843 (incl. `swap_16bit_data` decode for 7200i) → GL842.
 

@@ -37,11 +37,22 @@ CACHE_IDENT = "pyopticfilm"
 #: v17: GL128 shading-strip clocks follow the strip width (SE / V2 dark and white strips).
 #: v18: GL128 shading strips use SilverFast's ``0x1D`` and white-strip motor table.
 #: v19: GL128 AFE probes after a throwaway strip (#124); older gains depended on idle time.
-CACHE_VERSION = 20
+CACHE_VERSION = 22
 DARK_SETTLE_S = 0.2
 WHITE_SETTLE_S = 0.5
 #: Reject host calib when dark is this bright relative to white (lamp leak).
 DARK_WHITE_MAX_RATIO = 0.5
+#: Rounds of the GL845 white-strip PGA search (measure → solve → re-measure).
+AFE_WHITE_GAIN_ROUNDS = 4
+#: White counts treated as saturated (the ADC rails just below 65535).
+AFE_WHITE_SATURATED = 64000
+#: Stop the PGA search when every channel's white p99 is within this of target.
+AFE_WHITE_TOLERANCE = 0.03
+
+
+def _pga_gain(code: int) -> float:
+    """AD9826 PGA gain for a 6-bit code (``6 / (6 - 5 * code / 63)``)."""
+    return 6.0 / (6.0 - 5.0 * int(code) / 63.0)
 
 
 def colour_shading_failure_message(reason: str) -> str:
@@ -846,33 +857,7 @@ class Calibrator:
         from pyopticfilm.scan.session import create_session
 
         session = create_session(self.asic, self.model)
-        calib_geo = compute_calib_geometry(resolution, model=self.model)
-        # Force the calib strip to match scan startx/pixels so shading applies
-        # 1:1. Everything else — line count, stagger, oversampling — stays as
-        # the calibration geometry computed it. USB calib depth stays 16-bit
-        # even when the image stream is 8-bit (GL128).
-        calib_depth = int(getattr(self.model, "usb_calib_depth", calib_geo.depth))
-        from pyopticfilm.device.sensor_lookup import (
-            dummy_pixel_for,
-            exposure_lperiod_for,
-        )
-
-        calib_geo = replace(
-            calib_geo,
-            pixels=scan_geo.pixels,
-            startx=scan_geo.startx,
-            pixel_startx=scan_geo.pixel_startx,
-            pixel_endx=scan_geo.pixel_endx,
-            optical_pixels=scan_geo.optical_pixels,
-            output_pixel_offset=scan_geo.output_pixel_offset,
-            depth=calib_depth,
-            line_bytes=scan_geo.pixels * calib_geo.channels * (calib_depth // 8),
-            disable_buffer_full_move=True,
-            exposure_lperiod=exposure_lperiod_for(
-                self.model, resolution, method=method
-            ),
-            dummy_pixel=dummy_pixel_for(self.model, resolution),
-        )
+        calib_geo = self._calib_geometry_for(scan_geo, method=method)
 
         self.asic.set_scan_method(method)
 
@@ -923,6 +908,16 @@ class Calibrator:
                 return
             self.asic.home()
 
+        white_target = getattr(self.model, "afe_white_target", None)
+        if white_target is not None and not is_gl128:
+            self._search_white_gains(
+                session,
+                calib_geo,
+                method=method,
+                target=float(white_target),
+                safe_home=_safe_home,
+            )
+
         ir_dark = getattr(self.model, "asic", "") == "GL845"
         if mode == "infrared" and not ir_dark:
             dark = np.zeros((scan_geo.pixels, 3), dtype=np.uint16)
@@ -930,12 +925,13 @@ class Calibrator:
         else:
             dark = self._capture_average(
                 session,
-                calib_geo,
+                self._dark_geometry_for(scan_geo, calib_geo, method=method),
                 method=method,
                 lamp_on=False,
                 start_motor=False,
                 settle_s=DARK_SETTLE_S,
                 label="dark",
+                reduce="mean",
             )
             _safe_home()
 
@@ -994,6 +990,129 @@ class Calibrator:
         )
         return entry
 
+    def _dark_geometry_for(
+        self, scan_geo: ScanGeometry, calib_geo: ScanGeometry, *, method: str
+    ) -> ScanGeometry:
+        """Taller strip for the dark reference when the model asks for more lines.
+
+        Read noise left in a per-column dark average repeats on every image line
+        (offset-type column banding). Lamp off, so the extra travel is harmless.
+        """
+        from pyopticfilm.scan.geometry import MM_PER_INCH
+
+        lines = int(getattr(self.model, "calib_dark_lines", 0) or 0)
+        if lines <= calib_geo.lines:
+            return calib_geo
+        asic_fn = getattr(self.model, "asic_dpi_for", None)
+        asic_dpi = int(asic_fn(scan_geo.resolution)) if callable(asic_fn) else scan_geo.resolution
+        return self._calib_geometry_for(
+            scan_geo, method=method, height_mm=lines * MM_PER_INCH / asic_dpi
+        )
+
+    def _calib_geometry_for(
+        self, scan_geo: ScanGeometry, *, method: str, height_mm: float | None = None
+    ) -> ScanGeometry:
+        """Calibration strip geometry whose columns match ``scan_geo`` 1:1."""
+        from pyopticfilm.device.sensor_lookup import dummy_pixel_for, exposure_lperiod_for
+
+        resolution = scan_geo.resolution
+        calib_geo = compute_calib_geometry(resolution, model=self.model, height_mm=height_mm)
+        # Force the calib strip to match scan startx/pixels so shading applies
+        # 1:1. Everything else — line count, stagger, oversampling — stays as
+        # the calibration geometry computed it. USB calib depth stays 16-bit
+        # even when the image stream is 8-bit (GL128).
+        calib_depth = int(getattr(self.model, "usb_calib_depth", calib_geo.depth))
+        return replace(
+            calib_geo,
+            pixels=scan_geo.pixels,
+            startx=scan_geo.startx,
+            pixel_startx=scan_geo.pixel_startx,
+            pixel_endx=scan_geo.pixel_endx,
+            optical_pixels=scan_geo.optical_pixels,
+            output_pixel_offset=scan_geo.output_pixel_offset,
+            depth=calib_depth,
+            line_bytes=scan_geo.pixels * calib_geo.channels * (calib_depth // 8),
+            disable_buffer_full_move=True,
+            exposure_lperiod=exposure_lperiod_for(self.model, resolution, method=method),
+            dummy_pixel=dummy_pixel_for(self.model, resolution),
+        )
+
+    def _search_white_gains(
+        self,
+        session: object,
+        geometry: ScanGeometry,
+        *,
+        method: str,
+        target: float,
+        safe_home: Callable[[], None],
+    ) -> None:
+        """Set AD9826 PGA codes so the white strip's bright columns land at ``target``.
+
+        SANE skips coarse gain for ADI FESET and leaves the table codes, which
+        on the 7600i v2 saturate blue on the open light path while red has
+        headroom. Uses ``gain = 6 / (6 - 5 * code / 63)``; a saturated channel
+        is backed off by a fixed step because its true level is unknown.
+        """
+        assert self.asic is not None
+        from pyopticfilm.scan.calib_gl128 import AFE_GAIN_MAX, AfeFrontend
+
+        gains = list(self.asic.last_afe_gains or (0, 0, 0))
+        offsets = tuple(self.asic.last_afe_offsets or (0, 0, 0))
+        for round_idx in range(AFE_WHITE_GAIN_ROUNDS):
+            self.asic.apply_afe_frontend(
+                AfeFrontend(offsets=offsets, gains=tuple(gains)),  # type: ignore[arg-type]
+                method=method,
+                resolution=geometry.resolution,
+            )
+            if method == "infrared" and getattr(self.model, "asic", "") != "GL845":
+                dark = np.zeros(3)
+            else:
+                dark = self._capture_average(
+                    session, geometry, method=method, lamp_on=False,
+                    start_motor=False, settle_s=DARK_SETTLE_S, label="afe dark",
+                ).mean(axis=0)
+                # Line capture steps the motor even without a feed start; the
+                # white feed must begin at home or it lands on the holder edge.
+                safe_home()
+            white = self._capture_average(
+                session, geometry, method=method, lamp_on=True,
+                start_motor=True, settle_s=WHITE_SETTLE_S, label="afe white",
+            )
+            safe_home()
+            peak = np.percentile(white.astype(np.float64), 99.0, axis=0)
+            new_gains = []
+            for c in range(3):
+                code = gains[c]
+                current = _pga_gain(code)
+                if peak[c] >= AFE_WHITE_SATURATED:
+                    wanted = current * 0.75
+                else:
+                    wanted = current * (target - dark[c]) / max(1.0, peak[c] - dark[c])
+                wanted = min(6.0, max(1.0, wanted))
+                new_gains.append(max(0, min(AFE_GAIN_MAX, round(75.6 * (1.0 - 1.0 / wanted)))))
+            logger.info(
+                "AFE white search %s round %d: gains=%s p99=%s dark=%s → %s",
+                method,
+                round_idx,
+                tuple(gains),
+                tuple(int(v) for v in peak),
+                tuple(int(v) for v in dark),
+                tuple(new_gains),
+            )
+            # One PGA code is ~1-2% here; stop once every channel is close
+            # rather than flip-flopping between neighbouring codes.
+            settled = all(
+                abs(peak[c] - target) <= AFE_WHITE_TOLERANCE * target for c in range(3)
+            )
+            if new_gains == gains or settled:
+                break
+            gains = new_gains
+        self.asic.apply_afe_frontend(
+            AfeFrontend(offsets=offsets, gains=tuple(gains)),  # type: ignore[arg-type]
+            method=method,
+            resolution=geometry.resolution,
+        )
+
     def _capture_average(
         self,
         session: object,
@@ -1004,6 +1123,7 @@ class Calibrator:
         start_motor: bool,
         settle_s: float,
         label: str,
+        reduce: str = "median",
     ) -> np.ndarray:
         assert self.asic is not None
         from pyopticfilm.scan.session import ScanSession
@@ -1024,7 +1144,9 @@ class Calibrator:
         )
         # Raw linear columns: the film-base stretch would lift dark to white's peak.
         rgb = self.pipeline.assemble(raw, geometry, expose_base=False)
-        avg = np.median(rgb.astype(np.float32), axis=0)
+        # Median rejects dust on light strips; mean is the efficient estimator
+        # for a dark frame (pure noise, ~1.25x lower than the median).
+        avg = (np.mean if reduce == "mean" else np.median)(rgb.astype(np.float32), axis=0)
         out = np.clip(np.rint(avg), 0, 65535).astype(np.uint16)
         logger.info(
             "%s calib average shape=%s mean=%.1f",

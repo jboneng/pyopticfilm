@@ -7,6 +7,9 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 from pyopticfilm.asic.motor import (
     SLOPE_TABLE_AHB,
@@ -28,13 +31,20 @@ from pyopticfilm.image import ScanImage
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
 from pyopticfilm.scan.geometry import MM_PER_INCH, ScanGeometry, compute_geometry
-from pyopticfilm.scan.pipeline import ImagePipeline
+from pyopticfilm.scan.pipeline import HOST_CALIB_BORDER_INSET, ImagePipeline
+
+if TYPE_CHECKING:
+    from pyopticfilm.scan.me_exposure import MeExposureDecision
 
 logger = get_logger(__name__)
 
 FEED_TIMEOUT_S = 60.0
 #: Feed fails early when the step counter stops advancing this long (stall).
 FEED_STALL_S = 10.0
+#: Pre-feed only when the image feed is this much slower than a low-res feed.
+PREFEED_MIN_SPEEDUP = 1.5
+#: Tiny normalized window for the pre-feed scan (a few lines, ~50 px).
+PREFEED_AREA = (0.0, 0.0, 0.05, 0.01)
 DATA_TIMEOUT_S = 30.0
 BULK_CHUNK_LINES = 8
 HOME_SCAN_PIXELS = 50
@@ -63,6 +73,8 @@ class ScanSession:
         self.regs = Gl845Registers()
         self.calibrator = calibrator
         self._lamp_requested = True
+        self.last_align_shift_ir: tuple[float, float] | None = None
+        self.last_me_debug = None
 
     def run(
         self,
@@ -78,24 +90,38 @@ class ScanSession:
         infrared: bool = False,
         align_passes: bool = True,
         single_pass_exposure: int | None = None,
-        me_short_exposure: int | None = None,  # GL128 ME only; ignored here
-        me_long_exposure: int | None = None,  # GL128 ME only; ignored here
-        me_long_mode: str = "adaptive",  # GL128 ME only; ignored here
+        me_short_exposure: int | None = None,  # GL128 and GL845 ME
+        me_long_exposure: int | None = None,  # GL128 and GL845 ME (clamped on GL845)
+        me_long_mode: str = "adaptive",  # GL128 ME only; GL845 is always adaptive
         n_passes: int = 1,  # GL128 Multi-Pass only; ignored here
     ) -> ScanImage:
-        if multi_exposure or infrared:
+        if infrared and not self.model.supports_infrared:
+            raise ValueError(f"{self.model.model} does not support infrared")
+        multi_pass_ok = getattr(self.model, "asic", "") == "GL845"
+        if (multi_exposure or infrared) and not multi_pass_ok:
             raise NotImplementedError(
                 f"Multi-exposure / combined IR scans are not implemented for "
                 f"{getattr(self.model, 'asic', '?')}"
+            )
+        if multi_exposure and not getattr(self.model, "supports_multi_exposure", False):
+            raise NotImplementedError(f"{self.model.model} has no validated multi-exposure envelope")
+        if (infrared or multi_exposure) and mode != "color":
+            raise ValueError(
+                f"Combined infrared / multi-exposure scans require mode='color', got mode={mode!r}"
+            )
+        if not multi_pass_ok and (me_short_exposure is not None or me_long_exposure is not None):
+            raise NotImplementedError(
+                "ME exposure overrides are only implemented for GL128 and GL845; "
+                f"{getattr(self.model, 'asic', '?')} does not support them."
             )
         if n_passes > 1:
             raise NotImplementedError(
                 f"Multi-Pass (n_passes > 1) is only implemented for GL128; "
                 f"{getattr(self.model, 'asic', '?')} does not support it."
             )
-        if single_pass_exposure is not None:
+        if single_pass_exposure is not None and not multi_pass_ok:
             raise NotImplementedError(
-                "Manual exposure overrides are only implemented for GL128; "
+                "Manual exposure overrides are only implemented for GL128 and GL845; "
                 f"{getattr(self.model, 'asic', '?')} does not support single_pass_exposure."
             )
         if mode == "gray":
@@ -112,17 +138,13 @@ class ScanSession:
         if geometry is None:
             geometry = compute_geometry(resolution, model=self.model, area=area)
             # Re-bind exposure for IR when the model has method-keyed LPERIOD.
-            from dataclasses import replace as dc_replace
-
-            from pyopticfilm.device.sensor_lookup import exposure_lperiod_for
-
             lperiod = exposure_lperiod_for(
                 self.model, geometry.resolution, method=method
             )
             if lperiod != geometry.exposure_lperiod:
-                geometry = dc_replace(geometry, exposure_lperiod=lperiod)
+                geometry = replace(geometry, exposure_lperiod=lperiod)
         logger.info(
-            "scan %sdpi %s pixels=%d lines=%d starty=%d bytes=%d stagger=%d",
+            "scan %sdpi %s pixels=%d lines=%d starty=%d bytes=%d stagger=%d combined_ir=%s",
             geometry.resolution,
             mode,
             geometry.pixels,
@@ -130,8 +152,287 @@ class ScanSession:
             geometry.starty,
             geometry.total_bytes,
             geometry.num_staggered_lines,
+            infrared,
         )
 
+        auto_exposure = False
+        if method == "transparency" and multi_pass_ok and not multi_exposure:
+            if single_pass_exposure is not None:
+                geometry = replace(
+                    geometry, exposure_lperiod=self._clamp_manual_exposure(single_pass_exposure)
+                )
+            else:
+                auto_exposure = bool(getattr(self.model, "auto_exposure_target", None))
+
+        if not infrared and not multi_exposure:
+            try:
+                rgb = self._acquire_pass(
+                    geometry,
+                    method=method,
+                    mode=mode,
+                    apply_calib=apply_calib,
+                    progress=progress,
+                    cancel=cancel,
+                    auto_exposure=auto_exposure,
+                )
+            except BaseException:
+                if multi_pass_ok:
+                    self._park_quietly()
+                raise
+            ir_plane = self._infrared_plane(rgb) if mode == "infrared" else None
+            return ScanImage(
+                rgb=rgb,
+                dpi=geometry.resolution,
+                device_model=f"{self.model.vendor} {self.model.model}",
+                ir=ir_plane,
+            )
+
+        return self._run_multi_pass(
+            geometry,
+            apply_calib=apply_calib,
+            progress=progress,
+            cancel=cancel,
+            multi_exposure=multi_exposure,
+            infrared=infrared,
+            align_passes=align_passes,
+            me_short_exposure=me_short_exposure,
+            me_long_exposure=me_long_exposure,
+            auto_exposure=auto_exposure,
+        )
+
+    def _clamp_manual_exposure(self, exposure: int) -> int:
+        """Keep a manual LPERIOD inside the motor envelope validated for this model."""
+        base = int(getattr(self.model, "exposure_lperiod", 14000))
+        hi = min(int(getattr(self.model, "me_long_clamp_max", base)), 0xFFFF)
+        clamped = max(base, min(hi, int(exposure)))
+        if clamped != exposure:
+            logger.warning(
+                "single_pass_exposure %d clamped to %d (validated %d..%d)", exposure, clamped, base, hi
+            )
+        return clamped
+
+    def _run_multi_pass(
+        self,
+        geometry: ScanGeometry,
+        *,
+        apply_calib: bool,
+        progress: Callable[[float], None] | None,
+        cancel: threading.Event | None,
+        multi_exposure: bool,
+        infrared: bool,
+        align_passes: bool,
+        me_short_exposure: int | None,
+        me_long_exposure: int | None,
+        auto_exposure: bool = False,
+    ) -> ScanImage:
+        """GL845 sequential passes: colour short → (IR) → (colour long), parking between.
+
+        ME planes stay linear (``expose_base=False``) against the short-exposure
+        host calib; film-base makeup runs once on the merged deliverable.
+        """
+        from pyopticfilm.pass_align import align_ir_to_rgb_result, align_pass_to_reference
+        from pyopticfilm.scan.exposure_merge import merge_exposures_result
+        from pyopticfilm.scan.me_debug import MeScanDebug
+
+        model = self.model
+        self.last_align_shift_ir = None
+        self.last_me_debug = None
+
+        exp_short = int(me_short_exposure or geometry.exposure_lperiod)
+        short_geo = replace(geometry, exposure_lperiod=exp_short)
+        n_pass = 1 + int(infrared) + int(multi_exposure)
+        pass_idx = 0
+
+        def _pass(geo: ScanGeometry, method: str, mode: str) -> np.ndarray:
+            nonlocal pass_idx
+            idx = pass_idx
+            pass_idx += 1
+            if idx > 0:
+                self._check_cancel(cancel)
+                self.asic.park()
+                self._check_cancel(cancel)
+
+            def _prog(val: float) -> None:
+                if progress is not None:
+                    progress(min(1.0, (idx + val) / n_pass))
+
+            return self._acquire_pass(
+                geo,
+                method=method,
+                mode=mode,
+                apply_calib=apply_calib,
+                progress=_prog,
+                cancel=cancel,
+                # ME colour planes stay linear for the merge; IR keeps its makeup.
+                expose_base=not (multi_exposure and method == "transparency"),
+                # Colour calib is measured at the model LPERIOD, never the long one.
+                calib_geometry=geometry if method == "transparency" else geo,
+                auto_exposure=auto_exposure and method == "transparency",
+            )
+
+        rgb_long = None
+        exp_long = None
+        decision = None
+        ir_plane = None
+        try:
+            rgb_short = _pass(short_geo, "transparency", "color")
+            if infrared:
+                ir_lperiod = exposure_lperiod_for(model, geometry.resolution, method="infrared")
+                ir_rgb = _pass(
+                    replace(geometry, exposure_lperiod=ir_lperiod), "infrared", "infrared"
+                )
+                ir_plane = self._infrared_plane(ir_rgb)
+            if multi_exposure:
+                exp_long, decision = self._select_me_long(
+                    rgb_short, exp_short, geometry.resolution, me_long_exposure
+                )
+                rgb_long = _pass(
+                    replace(geometry, exposure_lperiod=exp_long), "transparency", "color"
+                )
+        except BaseException:
+            self._park_quietly()
+            raise
+        self.asic.park()
+
+        if ir_plane is not None and align_passes:
+            ir_plane, shift = align_ir_to_rgb_result(rgb_short, ir_plane)
+            self.last_align_shift_ir = shift
+            logger.info("IR pass shift (dx, dy)=(%.3f, %.3f)", shift[0], shift[1])
+
+        primary = rgb_short
+        if rgb_long is not None and exp_long is not None:
+            align_shift_long = None
+            if align_passes:
+                _, align_shift_long = align_pass_to_reference(rgb_short, rgb_long)
+                logger.info(
+                    "ME long pass shift (dx, dy)=(%.3f, %.3f)",
+                    align_shift_long[0],
+                    align_shift_long[1],
+                )
+            # Fixed noise model only when a model pins both terms; otherwise the
+            # merge's own default (fit from the pass pair once upstream #149 lands).
+            alpha = getattr(model, "me_noise_alpha", None)
+            beta = getattr(model, "me_noise_beta", None)
+            noise = (
+                {"alpha": float(alpha), "beta": float(beta)}
+                if alpha is not None and beta is not None
+                else {}
+            )
+            merged = merge_exposures_result(
+                rgb_short,
+                rgb_long,
+                exposure_short=exp_short,
+                exposure_long=exp_long,
+                align_shift=align_shift_long or (0.0, 0.0),
+                **noise,
+            )
+            self.last_me_debug = MeScanDebug(
+                rgb_short=rgb_short,
+                rgb_long=rgb_long,
+                exposure_short=exp_short,
+                exposure_long=exp_long,
+                fusion_stats=merged.fusion_stats,
+                align_shift_long=align_shift_long,
+                align_shift_ir=self.last_align_shift_ir,
+                exposure_proposed=None if decision is None else decision.proposed,
+                exposure_reason="manual-override" if decision is None else decision.reason,
+            )
+            primary = self.pipeline.expose_film_base(
+                merged.rgb, source="me deliverable", preserve_headroom=True
+            )
+            primary = self.pipeline.clamp_border_highlights(primary)
+
+        image = ScanImage(
+            rgb=primary,
+            dpi=geometry.resolution,
+            device_model=f"{model.vendor} {model.model}",
+            ir=ir_plane,
+        )
+        if image.ir_tracks_image:
+            logger.warning(
+                "IR plane follows the picture (silver black-and-white film?); "
+                "it is not a dust map — skip IR dust removal for this frame"
+            )
+        return image
+
+    def _select_me_long(
+        self,
+        rgb_short: np.ndarray,
+        exp_short: int,
+        resolution: int,
+        me_long_exposure: int | None,
+    ) -> tuple[int, MeExposureDecision | None]:
+        """Pick the ME long LPERIOD, clamped to the model's validated envelope."""
+        from pyopticfilm.scan.me_exposure import select_long_exposure
+
+        model = self.model
+        lo = int(getattr(model, "me_long_clamp_min", exp_short))
+        hi = min(int(getattr(model, "me_long_clamp_max", 0xFFFF)), 0xFFFF)
+        if me_long_exposure is not None:
+            exp_long = max(lo, min(hi, int(me_long_exposure)))
+            if exp_long != me_long_exposure:
+                logger.warning(
+                    "ME long exposure override %d clamped to %d (validated %d..%d)",
+                    me_long_exposure,
+                    exp_long,
+                    lo,
+                    hi,
+                )
+            return exp_long, None
+        default_long = max(lo, min(hi, int(getattr(model, "exposure_long", exp_short * 3))))
+        # Meter the film, not the holder (upstream #135): same inset as the makeup.
+        region = self.pipeline._inset_slice(
+            rgb_short.shape[0], rgb_short.shape[1], HOST_CALIB_BORDER_INSET
+        )
+        decision = select_long_exposure(
+            rgb_short[region] if region is not None else rgb_short,
+            exp_short,
+            black_level=float(getattr(model, "me_black_level", 0.0)),
+            dense_percentile=float(getattr(model, "me_dense_percentile", 5.0)),
+            target_dense_dn=float(getattr(model, "me_target_dense_dn", 10000.0)),
+            adaptive_min=lo,
+            adaptive_max=hi,
+            hardware_max=hi,
+            max_ratio=float(getattr(model, "me_max_exposure_ratio", 3.0)),
+            default_long=default_long,
+        )
+        exp_long = max(lo, min(hi, int(decision.selected)))
+        logger.info(
+            "ME long exposure %ddpi: short=%d proposed=%d selected=%d reason=%s",
+            resolution,
+            exp_short,
+            decision.proposed,
+            exp_long,
+            decision.reason,
+        )
+        return exp_long, decision
+
+    @staticmethod
+    def _check_cancel(cancel: threading.Event | None) -> None:
+        if cancel is not None and cancel.is_set():
+            raise ScanCancelled("Scan cancelled between passes")
+
+    def _park_quietly(self) -> None:
+        """Return the head home after a failed pass without masking the original error."""
+        try:
+            self.asic.park()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("park after failed multi-pass scan: %s", exc)
+
+    def _acquire_pass(
+        self,
+        geometry: ScanGeometry,
+        *,
+        method: str,
+        mode: str,
+        apply_calib: bool,
+        progress: Callable[[float], None] | None = None,
+        cancel: threading.Event | None = None,
+        expose_base: bool = True,
+        calib_geometry: ScanGeometry | None = None,
+        auto_exposure: bool = False,
+    ) -> np.ndarray:
+        calib_geo = calib_geometry or geometry
         calib = None
         if apply_calib and self.calibrator is not None:
             is_gl128 = getattr(self.model, "asic", "") == "GL128"
@@ -144,24 +445,28 @@ class ScanSession:
                 # Genesys (GL845/843/842): host dark/white stretch — never the
                 # SE ``run_asic_shading`` path (those ASICs do not implement it).
                 calib = self.calibrator.ensure_host_calib(
-                    geometry,
+                    calib_geo,
                     method=method,
                     mode="infrared" if method == "infrared" else "color",
                 )
+                if calib is not None and method == "transparency":
+                    if auto_exposure:
+                        geometry = replace(
+                            geometry, exposure_lperiod=self._auto_exposure(geometry, calib)
+                        )
+                    if expose_base:
+                        calib = self._calib_for_exposure(calib, geometry, method)
 
-        try:
-            raw = self.acquire_raw(
-                geometry,
-                method=method,
-                lamp_on=True,
-                start_motor=True,
-                progress=progress,
-                cancel=cancel,
-            )
-        except BaseException:
-            if getattr(self.model, "asic", "") == "GL845":
-                self._park_quietly()
-            raise
+        if getattr(self.model, "asic", "") == "GL845":
+            geometry = self._prefeed(geometry, method=method, cancel=cancel)
+        raw = self.acquire_raw(
+            geometry,
+            method=method,
+            lamp_on=True,
+            start_motor=True,
+            progress=progress,
+            cancel=cancel,
+        )
 
         use_host = (
             calib is not None
@@ -178,26 +483,104 @@ class ScanSession:
         planar = getattr(self.asic, "usb_planar_rgb", None)
         if planar is None:
             planar = bool(getattr(self.model, "usb_planar_rgb", False))
-        rgb = self.pipeline.assemble(
-            raw, geometry, dark=dark, white=white, planar=bool(planar)
+        return self.pipeline.assemble(
+            raw,
+            geometry,
+            dark=dark,
+            white=white,
+            planar=bool(planar),
+            expose_base=expose_base,
         )
 
-        ir_plane = None
-        if mode == "infrared":
-            # CCD still delivers RGB under the IR LED; NegPy / iSRD use G.
-            ir_plane = self._infrared_plane(rgb)
+    def _prefeed(
+        self,
+        geometry: ScanGeometry,
+        *,
+        method: str,
+        cancel: threading.Event | None = None,
+    ) -> ScanGeometry:
+        """Cover most of a slow feed with a tiny low-resolution scan first.
 
-        return ScanImage(
-            rgb=rgb,
-            dpi=geometry.resolution,
-            device_model=f"{self.model.vendor} {self.model.model}",
-            ir=ir_plane,
+        The feed to the film runs on the scan slope, so its time scales with
+        ``resolution * LPERIOD`` (7200 dpi at LPERIOD 65000: ~274 s). A few-line
+        scan at the lowest resolution travels the same distance far faster and
+        stops ``prefeed_margin_steps`` short; FEEDL is relative, so the image
+        pass then feeds only the remainder.
+        """
+        model = self.model
+        margin = int(getattr(model, "prefeed_margin_steps", 0) or 0)
+        if margin <= 0:
+            return geometry
+        pre_res = min(model.resolutions_dpi)
+        fast = pre_res * exposure_lperiod_for(model, pre_res, method="transparency")
+        slow = geometry.resolution * int(geometry.exposure_lperiod)
+        pre_steps = int(geometry.starty) - margin
+        if slow <= PREFEED_MIN_SPEEDUP * fast or pre_steps <= margin:
+            return geometry
+        pre = compute_geometry(pre_res, model=model, area=PREFEED_AREA)
+        pre = replace(pre, starty=pre_steps)
+        t0 = time.monotonic()
+        self.acquire_raw(pre, method=method, lamp_on=True, start_motor=True, cancel=cancel)
+        # Line capture advances the motor by one line per scanned line.
+        moved = (
+            pre_steps
+            + int(pre.lincnt_register) * model.motor_base_ydpi // pre_res
+            + int(getattr(model, "prefeed_offset_steps", 0))
         )
+        logger.info(
+            "prefeed %d steps at %d dpi in %.1fs; image feed %d → %d",
+            moved,
+            pre_res,
+            time.monotonic() - t0,
+            geometry.starty,
+            geometry.starty - moved,
+        )
+        return replace(geometry, starty=int(geometry.starty) - moved)
+
+    def _calib_for_exposure(self, calib, geometry: ScanGeometry, method: str):
+        """Scale white when the image LPERIOD differs from the calib LPERIOD.
+
+        The CCD is linear in integration time, so the flat-field stays in
+        open-light units; makeup then lifts the frame as usual.
+        """
+        base = exposure_lperiod_for(self.model, geometry.resolution, method=method)
+        ratio = int(geometry.exposure_lperiod) / float(base)
+        if abs(ratio - 1.0) < 1e-6:
+            return calib
+        dark = calib.dark.astype(np.float32)
+        white = dark + (calib.white.astype(np.float32) - dark) * np.float32(ratio)
+        return replace(calib, white=white)
+
+    def _auto_exposure(self, geometry: ScanGeometry, calib) -> int:
+        """Pick a single-pass LPERIOD that puts this frame's film peak near the target.
+
+        Read noise is fixed per line (PGA gain does not change the input-referred
+        floor), so longer integration is the only SNR lever. A low-resolution
+        prescan of the same area measures the brightest channel.
+        """
+        model = self.model
+        base = exposure_lperiod_for(model, geometry.resolution, method="transparency")
+        target = float(getattr(model, "auto_exposure_target", 0) or 0)
+        hi = min(int(getattr(model, "me_long_clamp_max", base)), 0xFFFF)
+        if target <= 0 or hi <= base:
+            return base
+        pre = compute_geometry(min(model.resolutions_dpi), model=model, area=geometry.area)
+        raw = self.acquire_raw(pre, method="transparency", lamp_on=True, start_motor=True)
+        self.asic.park()
+        rgb = self.pipeline.assemble(raw, pre, expose_base=False)
+        dark = calib.dark.astype(np.float64).mean(axis=0)
+        peak = float(
+            (np.percentile(rgb.reshape(-1, 3).astype(np.float64), 99.5, axis=0) - dark).max()
+        )
+        headroom = (target - float(dark.max())) / max(1.0, peak)
+        exposure = int(min(hi, max(base, base * headroom)))
+        logger.info(
+            "auto exposure: prescan peak=%.0f base=%d → %d (cap %d)", peak, base, exposure, hi
+        )
+        return exposure
 
     def _infrared_plane(self, rgb):
         """Build the HxW IR sidecar: green CCD plane + optional host flatten."""
-        import numpy as np
-
         from pyopticfilm.scan.calib_gl128 import (
             flatten_ir_columns,
             flatten_ir_image_columns,
@@ -322,13 +705,6 @@ class ScanSession:
             geometry.lines,
             starty,
         )
-
-    def _park_quietly(self) -> None:
-        """Return the head home after a failed pass without masking the original error."""
-        try:
-            self.asic.park()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("park after failed multi-pass scan: %s", exc)
 
     # --- configure ------------------------------------------------------
 
