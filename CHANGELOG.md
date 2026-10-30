@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `tools/bench_me_merge.py --real DIR` scores a real short/long TIFF pair (noise, noise-free detail, dense-film colour, timing); new cases cover a black offset and row drift.
 - **Fixed multi-exposure** (GL128: 8200i SE, 8100 V2, 8300i SE). `scan(multi_exposure=True, me_long_mode="fixed")` scans the long pass at one exposure per model on every frame, as SilverFast does, instead of metering the short pass: 42000 (3× short) on the 8200i SE and 8100 V2, 60000 (4× short) on the 8300i SE, the value in that model's SilverFast ME captures. The value is the new model field `me_fixed_long_exposure` and still goes through the normal long clamp (14000–85000). Everything after the long pass is unchanged, and `last_me_debug.exposure_reason` reads `"fixed"`. The default stays `"adaptive"`; a manual `me_long_exposure` still wins. Scan Lab has a **Fixed ME long (SilverFast-style)** toggle, and its CLI takes `--me-long-mode fixed`.
   - **Hardware.** Not yet run on hardware in this mode. 42000 is the long exposure the adaptive path already uses as its floor on the 8200i SE and 8100 V2; 60000 on the 8300i SE comes from its SilverFast captures and is inside the clamp the adaptive path already scans with.
 - Add an experimental sequential color + infrared scan path for IR-capable GL845 models (8200i, 7600i v2). Covered by mock-scanner tests and supervised full-frame colour + IR runs on a 7600i v2 at 900, 1800 and 3600 dpi.
@@ -18,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ScanImage.ir_tracks_image` (and `pyopticfilm.image.infrared_tracks_image`) flags an IR plane that records the picture instead of just dust. Silver black-and-white film (HP5, Tri-X, ...) blocks IR, so dust removal on it would erase image detail. The check uses block-averaged IR-vs-visible correlation (>0.8) together with IR spread (>0.2) or, for low-contrast frames, IR spread at least half the visible spread. On a 7600i v2, HP5 Plus measured 0.76 spread / 0.999 corr / 0.995 ratio, Tri-X 400 1.36 / 0.999 / 1.047, and a colour negative 0.036 / 0.60 / 0.053. GL845 colour + IR scans log a warning when it trips; `ir` is still returned.
 
 ### Fixed
+
+- **Multi-exposure merges lost most of the long pass on real negatives, and colour shifted in dense film.** On a real 1800 dpi pair the merge barely beat the short alone.
+  - **Registration.** The long feeds at a slightly different rate from the short (-1.3 px per 1000 rows on that pair), so one translation only registered the frame centre. The long now gets a per-row warp, fitted from full-resolution tiles and resampled with Lanczos-4. The fitted noise model no longer absorbs the misregistration (alpha 13 → 4).
+  - **Black level.** The passes do not share one, so a pure ratio read the long too dark: blue ran 18 % low in the densest film. The merge now fits a gain and an offset per channel, when an offset clearly fits better. Blue is within about 1 %.
+  - **Guard.** A fixed 300 DN test, whose second condition is always true under the orange mask, dropped the long on a third of the frame. It now compares residual energy with the noise model, so about 1 % of pixels fall back.
+  - **Now.** Flat-area noise falls about 2 % in green and 22 % in blue (grain included); fine detail is 96.5 % of the short in green and 97.4 % in blue, against 97.2 % in green before. Red barely changes: the long clips it on 93 % of that frame's pixels. Output changes for every multi-exposure scan. Validated on one pair only, not yet at 3600 or 7200 dpi.
+- Multi-exposure merge output is rounded rather than truncated.
 
 - **Multi-exposure and Multi-Pass turned clipped highlights black.** Where a channel was at or above 95 % of full scale in every pass, the merge had no confident input and wrote 0, the darkest value. One clipped channel gave a hard colour error (red clipped in both passes came out `0, G, B`).
   - **Reach.** It needs a short pass that reaches about 62000 DN: slides, clear or empty holder areas, light leaks. The real negative ME fixtures never get there and merge byte-identically to before.
@@ -105,6 +113,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `merge_exposures` estimates the row warp itself unless given `align_shift` or the new `align_transform`. `FusionStats` gains `exposure_offset_per_channel`, and `exposure_ratio_*` is now the fitted gain.
+- The multi-exposure merge runs on up to 8 threads, about 3x faster: 2.1 s instead of 6.4 s for 4 MP, 14 s instead of 36 s for 38 MP.
 - **GL128 IR white strip is read moving, like SilverFast's** (8200i SE, 8300i SE). SilverFast reads the IR white strip like the colour one: DVDSET armed on a unity table with zero dark terms, and the motor running. pyopticfilm read it stationary at home, so anything sitting on the white reference at that one spot went into the IR column profile. It now uses the colour white strip's path (unity table, `MTRPWR|AGOHOME`, parks after). The IR plane is unchanged on the 8200i SE (fine streaking 0.290% vs 0.29%).
   - **IR DVDSET stays off, unlike SilverFast.** SilverFast also arms DVDSET for the IR image pass with a per-pixel IR table. That was tried and measured on the 8200i SE: no clipping (the 2026-08 reason for turning it off no longer applies), but the per-pixel table imprints the white strip's column structure, about 1.4–1.8× the fine vertical streaking of the host flatten. The IR plane keeps the host flatten.
 - **GL128 positioning feeds run under the image pass's registers, as SilverFast's do** (8200i SE, 8100 V2, 8300i SE).
