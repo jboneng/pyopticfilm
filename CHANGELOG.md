@@ -90,26 +90,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **What changes.** Both models now use the rule for each strip's own window. The 8100 V2's hand-coded 7200 ppi white override is gone; the rule gives the same `0x10`. The 8300i SE uses the rule for its dark strip and keeps its own measured white-strip clocks.
   - **Recalibration.** Calibration cache v17 discards older entries.
 - **`Scanner.calibrate(mode="infrared")` never started its strips on GL128 scanners** (8200i SE, 8300i SE). The call fell through to the GL845 calibration path, which programs a stationary white strip with motor power on (`0x02=0x10`) and never writes START (`0x0F=0`). On hardware that strip cannot produce data, and the cached result was never used by IR scans anyway. GL128 `mode="infrared"` now runs the same IR calibration every IR scan runs before its IR pass (IR AFE search and IR strips). It returns an entry with the IR white profile and IR AFE codes, does not cache it, and raises `CalibrationError` if the IR calibration is rejected. Checked on an 8200i SE: both IR strips start, the call takes about 5 s, and a colour + IR scan afterwards is unaffected.
-- **GL845/GL843/GL842 host calibration captured "dark" with the lamp on.**
-  `_configure` turned LAMPPWR back on after `lamp_off()`, and calibration
-  frames went through the film-base stretch. As a result, dark ≈ white and
-  calibrated scans had heavy vertical streaks. Dark now stays dark,
-  calibration frames are assembled linearly, and a dark frame brighter than
-  half the white is rejected. The calibration cache version is bumped, so
-  stale entries are ignored.
-- **GL845 IR calibration assumed a zero dark level.** At high IR PGA gains the
-  real offset reached 3.2–5.4k on a 7600i v2, about 8% of white. Leaving it in
-  flattened the dust contrast. IR calibration now captures a lamp-off/IR-off
-  dark frame on GL845. On a 7600i v2 sky frame, dust depth increased 13–18%,
-  and IR sky vs film base went from 0.991 to 1.001 (dyes are IR-transparent).
-- **A scan abandoned mid-run hung the GL845 until power-cycled.** A host process
-  that died mid-scan left SCAN set and data buffered, and the next session's
-  home command hung a 7600i v2. `init()` on a warm ASIC now clears SCAN, drains
-  the bulk stream and soft-resets. Cold boots skip the check.
-- **GL845 feed wait used a fixed 60 s timeout.** The feed runs on the scan slope,
-  so long LPERIODs legitimately take longer (68.7 s at 1800 dpi/65000). The
-  timeout now scales with LPERIOD, and a stall (10 s without step progress)
-  fails early.
+- **GL845/GL843/GL842 host calibration captured "dark" with the lamp on.** `_configure` turned LAMPPWR back on after `lamp_off()`, and calibration frames went through the film-base stretch. As a result, dark ≈ white and calibrated scans had heavy vertical streaks. Dark now stays dark, calibration frames are assembled linearly, and a dark frame brighter than half the white is rejected. The calibration cache version is bumped, so stale entries are ignored.
+- **GL845 IR calibration assumed a zero dark level.** At high IR PGA gains the real offset reached 3.2–5.4k on a 7600i v2, about 8% of white. Leaving it in flattened the dust contrast. IR calibration now captures a lamp-off/IR-off dark frame on GL845. On a 7600i v2 sky frame, dust depth increased 13–18%, and IR sky vs film base went from 0.991 to 1.001 (dyes are IR-transparent).
+- **A scan abandoned mid-run hung the GL845 until power-cycled.** A host process that died mid-scan left SCAN set and data buffered, and the next session's home command hung a 7600i v2. `init()` on a warm ASIC now clears SCAN, drains the bulk stream and soft-resets. Cold boots skip the check.
+- **GL845 feed wait used a fixed 60 s timeout.** The feed runs on the scan slope, so long LPERIODs legitimately take longer (68.7 s at 1800 dpi/65000). The timeout now scales with LPERIOD, and a stall (10 s without step progress) fails early.
 
 ### Changed
 
@@ -122,14 +106,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **On the 8200i SE.** Three scans each before and after landed the frame within the scanner's normal jitter (about 0.5 rows at 1800 ppi), and feed times were unchanged.
 - **GL128 dark and white shading strips write `0xA6`–`0xA9` themselves** (8200i SE, 8100 V2, 8300i SE). SilverFast writes `00 01 00 01` there on every calibration strip (AFE, dark and white) and `00 00 00 00` on feeds and the image pass. pyopticfilm wrote it only on the AFE strips, and the shading strips inherited it. When a shading run reuses the previous AFE result, the last image pass has already reset these registers to `00`, so the strips would have run with different values from SilverFast. The wire values of a normal scan are unchanged (checked on the 8200i SE: 1800 ppi colour + IR and multi-exposure).
 
-- Rework GL845 home/park to use a SANE-style reverse mini-scan and verify that
-  the motor stops. The direct AGOHOME/FEEDL seek timed out after a full-area
-  3600-dpi scan and left the motor enabled. Covered by mock tests and supervised
-  runs on a 7600i v2 (crops and full frames at 900–7200 dpi).
-- GL845 home keeps the lamp state, and image captures wait for the LED to
-  settle after it turns on. Stop failures no longer hide the original capture
-  error, and single-pass GL845 scans park the head after a failure.
-  GL843/GL842 keep their previous home/stop path.
+- Rework GL845 home/park to use a SANE-style reverse mini-scan and verify that the motor stops. The direct AGOHOME/FEEDL seek timed out after a full-area 3600-dpi scan and left the motor enabled. Covered by mock tests and supervised runs on a 7600i v2 (crops and full frames at 900–7200 dpi).
+- GL845 home keeps the lamp state, and image captures wait for the LED to settle after it turns on. Stop failures no longer hide the original capture error, and single-pass GL845 scans park the head after a failure. GL843/GL842 keep their previous home/stop path.
 
 ### Notes for integrators
 
