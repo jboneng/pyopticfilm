@@ -2,8 +2,13 @@
 
 `07b3:0c3b`, bcdDevice `0x0605` (1541). Genesys Logic GL845. Same USB ID as the
 [7600i v1](opticfilm-7600i-v1.md) (bcdDevice `0x0400`, GL843, a different driver).
-`model_for_device()` routes by bcdDevice. `tools/inspect_bcddevice.py` prints it
-for an attached unit.
+`model_for_device()` routes by bcdDevice. To check an attached unit:
+
+```bash
+python -c "from pyopticfilm.usb.device import list_devices; [print(d.device_id, hex(d.bcd_device), d.asic_hint) for d in list_devices()]"
+```
+
+A v2 prints `0x605 GL845`, a v1 `0x400 GL843`.
 
 The model is `MODEL_7600I_V2` in `device/select.py`: an instance of the 8200i model
 class (`device/model_8200i.py`) with v2-specific overrides. It shares the SANE

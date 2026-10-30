@@ -206,7 +206,8 @@ device release number (`bcdDevice`):
 `pyopticfilm.device.select.model_for_device(product_id, bcd_device)` inspects
 `bcdDevice` to disambiguate: `0x0400` resolves to `MODEL_7600I_V1`, while
 `0x0605` resolves to `MODEL_7600I_V2`. To verify `bcdDevice` on an attached
-scanner, use `tools/inspect_bcddevice.py` or inspect PyUSB device descriptors.
+scanner, print `bcd_device` and `asic_hint` from
+`pyopticfilm.usb.device.list_devices()`, or inspect PyUSB device descriptors.
 
 ### 7600i v2 bring-up status
 
