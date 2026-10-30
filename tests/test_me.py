@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pytest
 
@@ -11,7 +13,7 @@ from pyopticfilm.pass_align import align_pass_to_reference, apply_me_transform, 
 from pyopticfilm.registration.engine import estimate_shift_field
 from pyopticfilm.registration.resample import quadratic_field
 from pyopticfilm.registration.types import FieldWarpTransform
-from pyopticfilm.scan.exposure_merge import merge_exposures, merge_exposures_result
+from pyopticfilm.scan.exposure_merge import _fit_transfer, merge_exposures, merge_exposures_result
 
 
 def test_model_me_exposure_constants():
@@ -751,36 +753,50 @@ def _ramp_pair(offset: tuple[float, float, float], lo: float = 500.0, hi: float 
     return tuple(np.clip(np.rint(x), 0, 65535).astype(np.uint16) for x in noisy)
 
 
-def test_merge_snr_recovers_long_black_offset():
+def test_merge_snr_gain_ignores_long_black_offset():
     short, long = _ramp_pair((-880.0, 0.0, -1230.0))
-    result = merge_exposures_result(short, long, align_shift=(0.0, 0.0))
-    stats = result.fusion_stats
-    assert stats.exposure_offset_per_channel[0] == pytest.approx(-880.0, abs=90.0)
-    assert stats.exposure_offset_per_channel[2] == pytest.approx(-1230.0, abs=90.0)
-    assert stats.exposure_ratio_per_channel[2] == pytest.approx(3.0, abs=0.03)
+    stats = merge_exposures_result(short, long, align_shift=(0.0, 0.0)).fusion_stats
+    assert stats.exposure_ratio_per_channel[1] == pytest.approx(3.0, abs=0.03)
+    assert 2.6 < stats.exposure_ratio_per_channel[2] < 3.0
 
 
 def test_merge_snr_black_offset_keeps_dense_film_level():
     short, long = _ramp_pair((-880.0, 0.0, -1230.0))
     merged = merge_exposures(short, long, align_shift=(0.0, 0.0)).astype(np.float64)
     dense = short[:, 40:80, 2].astype(np.float64).mean()
-    assert merged[:, 40:80, 2].mean() == pytest.approx(dense, rel=0.03)
+    assert merged[:, 40:80, 2].mean() == pytest.approx(dense, rel=0.01)
 
 
-def test_merge_snr_no_offset_stays_a_pure_ratio():
-    short, long = _ramp_pair((0.0, 0.0, 0.0))
-    stats = merge_exposures_result(short, long, align_shift=(0.0, 0.0)).fusion_stats
-    assert stats.exposure_offset_per_channel == (0.0, 0.0, 0.0)
+def test_merge_snr_follows_a_ratio_that_falls_towards_black():
+    """Real passes: long/short drops near black, which no gain and offset can follow."""
+    short = np.tile(np.geomspace(200.0, 15000.0, 512)[None, :, None], (64, 1, 3))
+    long = short * (3.0 - 0.5 * np.exp(-short / 2000.0))
+    short_u = np.rint(short).astype(np.uint16)
+    merged = merge_exposures(short_u, np.rint(long).astype(np.uint16), align_shift=(0.0, 0.0)).astype(np.float64)
+    err = merged[:, 20:-4, 1] / short[:, 20:-4, 1] - 1.0
+    assert float(np.abs(err).max()) < 0.01
 
 
-def test_merge_snr_narrow_level_span_skips_offset_fit():
-    short, long = _ramp_pair((-900.0, -900.0, -900.0), lo=9000.0, hi=12000.0)
-    stats = merge_exposures_result(short, long, align_shift=(0.0, 0.0)).fusion_stats
-    assert stats.exposure_offset_per_channel == (0.0, 0.0, 0.0)
+def test_transfer_curve_is_monotonic():
+    rng = np.random.default_rng(1)
+    a = rng.uniform(150.0, 12000.0, 40000).astype(np.float32)
+    b = (a * 3.0 + rng.normal(0.0, 150.0, a.shape)).astype(np.float32)
+    gain, curve = _fit_transfer(a, b, 3.0, 131.0)
+    assert gain == pytest.approx(3.0, rel=0.01)
+    assert np.all(np.diff(curve) >= 0.0)
+    assert curve[30000] == pytest.approx(10000.0, rel=0.01)
+
+
+def test_transfer_keeps_plain_ratio_on_a_narrow_level_span():
+    rng = np.random.default_rng(2)
+    a = rng.uniform(9000.0, 12000.0, 40000).astype(np.float32)
+    gain, curve = _fit_transfer(a, a * 3.0 - 900.0, 2.9, 131.0)
+    assert gain == 2.9
+    assert curve[2900] == pytest.approx(1000.0)
 
 
 def test_merge_snr_long_hidden_by_offset_keeps_short_level():
-    """Dense film the offset pushed to the long's zero must not read as -offset/gain."""
+    """Dense film a black offset pushed to the long's zero must keep its short level."""
     short, long = _ramp_pair((-880.0, 0.0, -1230.0), lo=60.0)
     merged = merge_exposures(short, long, align_shift=(0.0, 0.0)).astype(np.float64)
     dense = short[:, :40, 2].astype(np.float64).mean()
@@ -860,7 +876,9 @@ def _sine_scene(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     return 12000.0 + 200.0 * out
 
 
-def _field_pair(coef_x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+@functools.lru_cache(maxsize=2)
+def _field_pair(terms: tuple[float, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    coef_x = np.asarray(terms)
     h, w = 1000, 1200
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
     field = quadratic_field(coef_x, xx, yy, w, h)
@@ -869,8 +887,11 @@ def _field_pair(coef_x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     return np.rint(short).astype(np.uint16), np.rint(long).astype(np.uint16), field
 
 
+_FIELD_TERMS = (0.0, 0.0, 0.0, -0.4, 0.35, 0.0)
+
+
 def test_me_transform_recovers_shift_field():
-    short, long, field = _field_pair(np.array([0.0, 0.0, 0.0, -0.4, 0.35, 0.0]))
+    short, long, field = _field_pair(_FIELD_TERMS)
     transform = estimate_me_transform(short, long)
     assert isinstance(transform, FieldWarpTransform)
     h, w = short.shape[:2]
@@ -880,7 +901,7 @@ def test_me_transform_recovers_shift_field():
 
 
 def test_me_transform_field_warp_registers_the_long():
-    short, long, _ = _field_pair(np.array([0.0, 0.0, 0.0, -0.4, 0.35, 0.0]))
+    short, long, _ = _field_pair(_FIELD_TERMS)
     aligned, var_scale = apply_me_transform(long, estimate_me_transform(short, long))
     assert var_scale.shape == (short.shape[0],)
     inner = (slice(16, -16), slice(16, -16))
@@ -890,14 +911,14 @@ def test_me_transform_field_warp_registers_the_long():
 
 
 def test_me_transform_skips_field_without_one():
-    short, long, _ = _field_pair(np.zeros(6))
+    short, long, _ = _field_pair((0.0,) * 6)
     assert not isinstance(estimate_me_transform(short, long), FieldWarpTransform)
 
 
 def test_shift_field_needs_frame_coverage():
     """Tiles in one corner say nothing about the others: no field beats a wild one."""
-    short, long, _ = _field_pair(np.array([0.0, 0.0, 0.0, -0.4, 0.35, 0.0]))
-    plane_s, plane_l = short[..., 1].astype(np.float32), long[..., 1].astype(np.float32)
+    short, long, _ = _field_pair(_FIELD_TERMS)
+    plane_s, plane_l = short[..., 1].astype(np.float32), long[..., 1].astype(np.float32).copy()
     plane_l[:, 300:] = 65000.0
     plane_l[300:] = 65000.0
     assert estimate_shift_field(plane_s, plane_l) is None

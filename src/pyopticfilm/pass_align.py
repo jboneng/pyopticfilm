@@ -50,8 +50,9 @@ _ALIGN_BAND_OUTLIER_PX = 8.0
 # softness at half-pixel rows shows as bands of detail: on a real 1800 dpi pair
 # fine detail there was 64% of the short with bilinear, 75% cubic, 86% lanczos4.
 _ME_RESAMPLER = "lanczos4"
-# Reach of that kernel's strong lobes, in px.
-_ME_RING_REACH = 2
+# Samples around a clipped reading that count as ringing, in px. Past the two taps
+# at the reading the error is tens of DN against 150-300 of short-pass noise there.
+_ME_RING_REACH = 0
 
 Shift2D = tuple[float, float]
 
@@ -205,13 +206,12 @@ def apply_me_transform(
         var_scale = row_shift_var_scale(0.0, dy, method=_ME_RESAMPLER) * x_field_var_scale(
             dx, transform.dx_coef, w, h, method=_ME_RESAMPLER
         )
-        grid = quadratic_field(transform.dx_coef, np.linspace(0.0, w - 1, 17), np.linspace(0.0, h - 1, 17)[:, None], w, h)
-        mid = float(np.median(grid))
-        reach = _ME_RING_REACH + int(np.ceil(float(np.abs(grid - mid).max())))
         if clip_level is not None and np.issubdtype(mov.dtype, np.integer):
             clipped = mov >= clip_level
             if np.any(clipped):
-                touched = row_shift_touch_mask(clipped, round(dx + mid), dy, reach=reach)
+                grid = quadratic_field(transform.dx_coef, np.linspace(0.0, w - 1, 17), np.linspace(0.0, h - 1, 17)[:, None], w, h)
+                mid = dx + float(np.median(grid))
+                touched = row_shift_touch_mask(clipped, mid, dy, reach=_ME_RING_REACH)
                 aligned[touched] = np.iinfo(mov.dtype).max
         return aligned, var_scale
     if isinstance(transform, LineWarpTransform):
