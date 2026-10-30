@@ -439,17 +439,27 @@ def row_shift_touch_mask(mask: np.ndarray, dx: float, dy_per_row: np.ndarray, *,
     """Where :func:`warp_row_shifts` output lies within ``reach`` px of a set ``mask`` sample."""
     h, w = mask.shape[:2]
     src_y = np.floor(np.arange(h, dtype=np.float64) - np.asarray(dy_per_row, dtype=np.float64)).astype(np.int64)
-    out = np.zeros(mask.shape, dtype=bool)
-    for offset in range(-reach, reach + 2):
-        out |= mask[np.clip(src_y + offset, 0, h - 1)]
     base_x = int(np.floor(-float(dx)))
-    if abs(float(dx) - round(float(dx))) >= 1e-6:
-        cols = np.arange(w)
-        wide = np.zeros(mask.shape, dtype=bool)
+    cols = np.arange(w)
+    fractional = abs(float(dx) - round(float(dx))) >= 1e-6
+    out = np.empty(mask.shape, dtype=bool)
+
+    def band(r0: int) -> None:
+        r1 = min(h, r0 + 256)
+        rows = np.zeros((r1 - r0, *mask.shape[1:]), dtype=bool)
         for offset in range(-reach, reach + 2):
-            wide |= out[:, np.clip(cols + base_x + offset, 0, w - 1)]
-        return wide
-    return out[:, np.clip(np.arange(w) + base_x, 0, w - 1)]
+            rows |= mask[np.clip(src_y[r0:r1] + offset, 0, h - 1)]
+        if fractional:
+            wide = np.zeros(rows.shape, dtype=bool)
+            for offset in range(-reach, reach + 2):
+                wide |= rows[:, np.clip(cols + base_x + offset, 0, w - 1)]
+            out[r0:r1] = wide
+        else:
+            out[r0:r1] = rows[:, np.clip(cols + base_x, 0, w - 1)]
+
+    with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
+        list(pool.map(band, range(0, h, 256)))
+    return out
 
 
 def valid_mask_translation(h: int, w: int, dx: float, dy: float) -> np.ndarray:
