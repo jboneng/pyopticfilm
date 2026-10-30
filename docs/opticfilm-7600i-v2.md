@@ -170,13 +170,13 @@ Chromogenic B&W (XP2, BW400CN) is expected to behave like colour; it is untested
   clamped to 28000–65000 and a 4.6× ratio (`me_max_exposure_ratio`). A
   `me_long_exposure` override is clamped too. The planes stay linear and the
   film-base makeup runs once on the merge.
-- The noise model is not pinned on the model, so the merge's default applies (a
-  per-scan fit once upstream #149 lands).
+- The noise model is not pinned on the model, so the merge fits it from each
+  scan's own short/long pair (`last_me_debug.fusion_stats` reports it).
 - **Known limits:**
-  - Red clips in the long pass under the orange mask. With the current merge,
-    ME was no better than auto exposure on a sky frame. The same bracket through
-    the open #148→#150 merge cut blue noise 5.64 → 4.89%, which beats auto
-    exposure.
+  - Red clips in the long pass under the orange mask. The merge before #148–#150
+    gave up the long pass there, and ME was no better than auto exposure on a sky
+    frame. The same bracket through the current merge cut blue noise
+    5.64 → 4.89%, which beats auto exposure.
   - ME shifts the film-base B/R by 2–4%: R comes from the short pass, G/B from the
     long one.
   - At 7200 dpi the short and long passes start within ~0.25 px of each other,
