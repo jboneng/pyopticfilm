@@ -317,6 +317,11 @@ class Model8200i:
     def max_area_mm(self) -> tuple[float, float]:
         return (self.x_size_ta_mm, self.y_size_ta_mm)
 
+    @property
+    def multi_exposure_resolutions_dpi(self) -> tuple[int, ...]:
+        """Resolutions where ``scan(multi_exposure=True)`` is accepted."""
+        return self.resolutions_dpi if self.supports_multi_exposure else ()
+
     def boot_register_map(self) -> dict[int, int]:
         """Init regs with sensor custom overlay and dpihw applied."""
         regs = dict(self.init_regs)

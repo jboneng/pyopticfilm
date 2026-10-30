@@ -2,7 +2,7 @@
 
 pyopticfilm uses PyUSB and libusb to talk to the scanner directly. On Windows, the Plustek vendor driver (installed with SilverFast, VueScan, or Plustek utilities) normally owns the device. You must bind **WinUSB** (or libusbK) on the scanner’s USB interface so libusb can open and claim it.
 
-This guide applies to all supported OpticFilm models (`07b3:…`). **Scanning is validated on the OpticFilm 8200i SE** (`07b3:1825`), **OpticFilm 8100 (V2)** (`07b3:1824`), **OpticFilm 8300i SE** (`07b3:181f`), **and OpticFilm 7600i v1** (`07b3:0c3b`, bcdDevice 4.00); other models may open for status and register probes only.
+This guide applies to all supported OpticFilm models (`07b3:…`). **Scanning is validated on the OpticFilm 8200i SE** (`07b3:1825`), **OpticFilm 8100 (V2)** (`07b3:1824`), **OpticFilm 8300i SE** (`07b3:181f`), **OpticFilm 7600i v1** (`07b3:0c3b`, bcdDevice 4.00), **and OpticFilm 7600i v2** (`07b3:0c3b`, bcdDevice 6.05); other models may open for status and register probes only.
 
 ## Prerequisites
 
@@ -30,6 +30,7 @@ This guide applies to all supported OpticFilm models (`07b3:…`). **Scanning is
    | OpticFilm 8100 (V2) | `07B3 1824` | GL128 — scan-ready (no IR) |
    | OpticFilm 8300i SE | `07B3 181F` | GL128 — scan-ready (IR capable) |
    | OpticFilm 7600i v1 | `07B3 0C3B` | GL843 — scan-ready (bcdDevice 4.00; IR capable) |
+   | OpticFilm 7600i v2 | `07B3 0C3B` | GL845 — scan-ready (bcdDevice 6.05; IR capable) |
    | OpticFilm 8200i | `07B3 130D` | GL845 — probe only |
    | Other OpticFilm | `07B3 0Cxx` / `07B3 130C` | See README hardware table |
 
@@ -78,7 +79,7 @@ Close SilverFast, VueScan, and Plustek utilities before binding or opening the d
 
 - Check USB cable and power; wait for the scanner to finish booting.
 - Confirm the device appears in Zadig with `07B3` vendor ID.
-- For scanning, you need an **8200i SE** (`07b3:1825`), **8100 (V2)** (`07b3:1824`), **8300i SE** (`07b3:181f`), or **7600i v1** (`07b3:0c3b`, bcdDevice 4.00). Other OpticFilm PIDs are listed but not scan-validated.
+- For scanning, you need an **8200i SE** (`07b3:1825`), **8100 (V2)** (`07b3:1824`), **8300i SE** (`07b3:181f`), **7600i v1** (`07b3:0c3b`, bcdDevice 4.00), or **7600i v2** (`07b3:0c3b`, bcdDevice 6.05). Other OpticFilm PIDs are listed but not scan-validated.
 - Run `find_devices()` as above to see what libusb enumerates.
 
 ### `NoBackendError` / no USB backend

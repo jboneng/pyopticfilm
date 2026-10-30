@@ -15,6 +15,7 @@ _LOCK_FOLDERS = {
     "plustek-opticfilm-8100-v2": "opticfilm_8100_v2",
     "plustek-opticfilm-8300i-se": "opticfilm_8300i_se",
     "plustek-opticfilm-7600i-v1": "opticfilm_7600i_v1",
+    "plustek-opticfilm-7600i-v2": "opticfilm_7600i_v2",
 }
 
 

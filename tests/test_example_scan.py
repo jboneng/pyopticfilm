@@ -13,6 +13,7 @@ import pytest
 from pyopticfilm.device.model_7600i_v1 import MODEL_7600I_V1
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
+from pyopticfilm.device.select import MODEL_7600I_V2
 from pyopticfilm.image import ScanImage
 
 _EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "scan.py"
@@ -67,6 +68,7 @@ def _run_example(monkeypatch, tmp_path: Path, model, answers: list[str]) -> tupl
         (MODEL_8100_V2, ["1", "1800", "y"], True, False),  # no IR prompt
         (MODEL_7600I_V1, ["1", "1440"], False, False),  # no ME prompt; IR not offered at 1440
         (MODEL_7600I_V1, ["1", "3600", "y"], False, True),  # IR at 3600
+        (MODEL_7600I_V2, ["1", "1800", "y", "y"], True, True),  # GL845 ME + IR
     ],
 )
 def test_example_scans_default_frame_with_model_options(monkeypatch, tmp_path, model, answers, multi_exposure, infrared):

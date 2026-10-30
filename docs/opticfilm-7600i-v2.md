@@ -13,10 +13,9 @@ A v2 prints `0x605 GL845`, a v1 `0x400 GL843`.
 The model is `MODEL_7600I_V2` in `device/select.py`: an instance of the 8200i model
 class (`device/model_8200i.py`) with v2-specific overrides. It shares the SANE
 GL846-derived 8200i register, sensor and motor tables and the `ScanSession`
-(`scan/session.py`) path. **`scan_ready` is `False`.** Scanning, calibration and
-home/park are gated until the maintainer signs off. Lab runs use
-`tools/bringup_gl845_8200i.py --model 7600i-v2 --allow-unvalidated`, or a
-`Scanner` with `_allow_unvalidated_scan = True` and `arm_bringup_motor()`.
+(`scan/session.py`) path. It is hardware-tested (`scan_ready=True`), with lock
+oracles in `tests/model_lock/opticfilm_7600i_v2/`. `Scanner.open()` scans,
+calibrates and homes it without a lab override.
 
 Unless marked otherwise, every number below was measured on one physical 7600i v2.
 
@@ -140,7 +139,8 @@ white → re-home.
   until a power cycle. `Gl845.init()` now checks a warm ASIC for this first:
   it clears SCAN, drains the bulk stream and soft-resets. Cold boots skip the
   check, which keeps the 8200i golden trace intact.
-- **Recovery** from `is_motor_enabled=True` / not at home:
+- **Recovery** from `is_motor_enabled=True` / not at home: `scanner.warmup()`
+  (init + home), or
   `tools/bringup_gl845_8200i.py --model 7600i-v2 --allow-unvalidated --steps init,home`.
 
 ## Infrared
@@ -243,7 +243,4 @@ Independent reviews (filmscanner.info) report an effective resolution of about
 
 ## Open work
 
-1. **Sign-off:** the checklist in [scanner-validation.md](scanner-validation.md) has
-   been run (results there). After maintainer approval, set `scan_ready=True` and
-   add `tests/model_lock/opticfilm_7600i_v2/`.
-2. **Chromogenic B&W:** confirm that the IR detector does not flag it.
+- **Chromogenic B&W:** confirm that the IR detector does not flag it.
