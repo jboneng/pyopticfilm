@@ -394,9 +394,9 @@ class MockScannerTransport(FakeUsbTransport):
 class MockFilmLoaderTransport(MockScannerTransport):
     """Fake OpticFilm 135i: holder sensor, loader moves and lit toggle-mode lines.
 
-    ``0x32`` bit 2 reads high while :attr:`holder_present`. ``HOMESNR`` reads
-    :attr:`at_home` (the loaded position) while ``0x32`` bit 1 is clear and
-    :attr:`holder_present` while it is set. A START with the motor off is a
+    ``HOMESNR`` reads :attr:`at_home` (the loaded position) while ``0x32``
+    bit 1 is clear and :attr:`holder_present` while it is set, and ``0x32``
+    bit 2 reads the same. A START with the motor off is a
     stationary strip (stays home, data ready); a reverse move (``0x02``
     bit 2) ends at the loader home. Bulk data is flat per line type:
     :attr:`dark_level` with the lamp off, otherwise :attr:`visible_level` on
@@ -415,15 +415,18 @@ class MockFilmLoaderTransport(MockScannerTransport):
 
     def _status_byte(self) -> int:
         v = super()._status_byte() & ~_R.STATUS_HOMESNR
-        armed = not self.registers.get(0x32, 0) & 0x02
-        if (self.at_home if armed else self.holder_present):
+        if self._homesnr_level():
             v |= _R.STATUS_HOMESNR
         return v & 0xFF
+
+    def _homesnr_level(self) -> bool:
+        armed = not self.registers.get(0x32, 0) & 0x02
+        return bool(self.at_home if armed else self.holder_present)
 
     def _before_register_read(self, addr: int) -> None:
         if addr == 0x32:
             value = self.registers.get(0x32, 0) & ~0x04 & 0xFF
-            self.registers[0x32] = value | (0x04 if self.holder_present else 0x00)
+            self.registers[0x32] = value | (0x04 if self._homesnr_level() else 0x00)
         super()._before_register_read(addr)
 
     def _after_register_write(self, addr: int, value: int) -> None:

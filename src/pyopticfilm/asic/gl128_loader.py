@@ -13,10 +13,9 @@ usbmon captures of a 135i and the Plustek model INI
   to the loader sensor (``HOMESNR``); a frame is one forward feed from there;
   the image pass parks with ``AGOHOME``. There is no host-side motor stop:
   only the armed loader sensor ends a reverse seek early.
-* **Sensors**: ``0x32`` bit 2 is the holder in the slot. ``HOMESNR`` reads
-  the loaded position while ``0x32`` bit 1 is clear (stop armed) and "holder
-  in the slot" while it is set, so every check sets bit 1 for the reading it
-  needs.
+* **Sensors**: ``HOMESNR`` reads the loaded position while ``0x32`` bit 1 is
+  clear (stop armed) and "holder in the slot" while it is set, so every check
+  sets bit 1 for the reading it needs. ``0x32`` bit 2 follows it, armed too.
 * **Light**: the white lamp is ``0x03`` bit 4, the IR LED ``0x32`` bit 5 and
   the toggle bit ``0x19`` bit 3. ``0x37`` is never written after boot.
   ``0x32`` also carries the timing-set bit (7) and the loader outputs (0-4),
@@ -45,13 +44,13 @@ from pyopticfilm.device.tables_135i import (
     EJECT_EVENT,
     EJECT_LED_REGS,
     EJECT_REG_09,
-    HOLDER_SENSOR_MASK,
     HOLDER_SENSOR_REG,
     LOADER_DELAY_S,
     LOADER_EJECT_STEPS,
     LOADER_HOME_SENSOR_BIT,
     LOADER_LOAD_FORWARD_STEPS,
     LOADER_LOAD_REVERSE_STEPS,
+    LOADER_RECOVERY_SEEK_STEPS,
     LPERIOD_BASE,
     STATUS2_MOTMFLG,
     STATUS2_REG,
@@ -86,6 +85,8 @@ from pyopticfilm.scan.calib_gl128_loader import (
     AHB_SHADING_IR,
     AHB_SHADING_VISIBLE,
     SHADING_LINES,
+    SHADING_WHITE_TARGET_IR,
+    SHADING_WHITE_TARGET_VISIBLE,
     lit_channel_means,
     measured_shading_table,
     optical_black_means,
@@ -217,11 +218,15 @@ class Gl128Loader(Gl128):
     # --- holder -----------------------------------------------------------
 
     def holder_present(self) -> bool:
-        """True while a film holder is in the loader slot (``0x32`` bit 2 high)."""
+        """True while a film holder is in the loader slot, wherever it sits.
+
+        Reads ``HOMESNR`` with the stop disarmed: armed, it and ``0x32`` bit 2
+        read 0 for a holder off the loader home. Idle only, since the read
+        briefly disarms the stop.
+        """
         if not self._initialized:
             self.init()
-        value = int(self.protocol.read_register(HOLDER_SENSOR_REG)) & 0xFF
-        return bool(value & HOLDER_SENSOR_MASK)
+        return self._homesnr(armed=False)
 
     def _set_home_stop(self, *, armed: bool) -> None:
         """``0x32`` bit 1: clear arms the loader stop (``HOMESNR`` = loaded position), set disarms it."""
@@ -267,7 +272,7 @@ class Gl128Loader(Gl128):
     def poll_loader(self) -> str | None:
         """One idle sample of the loader: ``"inserted"``, ``"removed"``, ``"eject"`` or ``None``.
 
-        The holder sensor (``0x32`` bit 2) going present is an
+        The holder sensor (:meth:`holder_present`) going present is an
         insert and going absent a removal; interrupt byte ``0x48`` is the
         eject button (``holder eject``). The first call only records the
         sensor state.
@@ -331,13 +336,15 @@ class Gl128Loader(Gl128):
     def eject_holder(self, *, timeout_s: float = 30.0) -> None:
         """Push the holder out, in the vendor's order (``holder eject``, QuickScan).
 
-        1. arm the stop (``0x32`` bit 1 clear) and, off the loader home, home first;
+        1. arm the stop (``0x32`` bit 1 clear) and, off the loader home, seek
+           back to it straight away (no inward inch: that is the generic home);
         2. holder LED (``36=fc``, ``33=8e``);
         3. disarm the stop: ``HOMESNR`` now reads "holder in the slot";
         4. only with a holder in: ``09 |= 08``, 3600 steps forward, ``09=00``.
 
         From the loader home 3600 steps bring the holder out; from a frame
-        position they would not.
+        position they would not. The seek reaches the whole loader travel,
+        since a failed park can leave the holder at the end of a strip.
         """
         self._require_motor_enabled()
         if not self._initialized:
@@ -346,8 +353,8 @@ class Gl128Loader(Gl128):
             logger.info("GL128 loader eject: no holder in the slot")
             return
         self._set_home_stop(armed=True)
-        if not self.read_status_reliable().is_at_home and not self._feed_in_then_seek_home(timeout_s=timeout_s):
-            raise AsicError("Loader sensor stayed set after the one-inch feed; holder position unknown, not ejecting.")
+        if not self.read_status_reliable().is_at_home:
+            self._seek_home(steps=LOADER_RECOVERY_SEEK_STEPS, timeout_s=timeout_s)
         for address, value in EJECT_LED_REGS:
             self._write(address, value)
         self._set_home_stop(armed=False)
@@ -425,9 +432,8 @@ class Gl128Loader(Gl128):
         end = self._wait_move(timeout_s=timeout_s, until_home=False, steps=steps)
         logger.info("GL128 loader moved %d steps (status 0x%02x)", steps, int(end.raw) & 0xFF)
 
-    def _seek_home(self, *, timeout_s: float = 30.0) -> None:
+    def _seek_home(self, *, steps: int = LOADER_LOAD_REVERSE_STEPS, timeout_s: float = 30.0) -> None:
         """Reverse seek to the loader sensor (``insert 35mm carrier``, second feed)."""
-        steps = LOADER_LOAD_REVERSE_STEPS
         regs = dict(_REVERSE_SEEK_REGS)
         regs.update(self._move_regs(steps, reverse=True))
         self._start_move(regs, use_slow_slope=True)
@@ -535,7 +541,12 @@ class Gl128Loader(Gl128):
             logger.error("GL128 loader stop_motor: %s (holder position unknown)", exc)
 
     def home(self, *, timeout_s: float = 30.0, wait: bool = True) -> None:
-        """Bring a holder in the slot back to the loader home (:meth:`_feed_in_then_seek_home`)."""
+        """Bring a holder in the slot back to the loader home.
+
+        Normally :meth:`_feed_in_then_seek_home`. After a lost park the holder
+        may sit at the end of a strip, where another inch would pass the
+        captured travel, so it seeks straight back.
+        """
         del wait
         self._require_motor_enabled()
         if self.is_at_home():
@@ -543,6 +554,10 @@ class Gl128Loader(Gl128):
             return
         if not self._homesnr(armed=False):
             logger.info("GL128 loader home: no holder in the slot, nothing to move")
+            return
+        if not self._park_ok:
+            self._set_home_stop(armed=True)
+            self._seek_home(steps=LOADER_RECOVERY_SEEK_STEPS, timeout_s=timeout_s)
             return
         if not self._feed_in_then_seek_home(timeout_s=timeout_s):
             raise AsicError(
@@ -832,8 +847,8 @@ class Gl128Loader(Gl128):
         time.sleep(0.5)
         white_raw = self.acquire_shading_strip(resolution=resolution, dvdset=True, **window)
         white_vis, white_ir = strip_column_means(white_raw, pixels=n, lines=SHADING_LINES)
-        gains_vis = shading_gains_from_white(white_vis)
-        gains_ir = shading_gains_from_white(white_ir)
+        gains_vis = shading_gains_from_white(white_vis, target=SHADING_WHITE_TARGET_VISIBLE)
+        gains_ir = shading_gains_from_white(white_ir, target=SHADING_WHITE_TARGET_IR)
 
         strip_ok, reason = validate_color_shading_strip(dark_vis, white_vis, acquire_width=n)
         ok = strip_ok

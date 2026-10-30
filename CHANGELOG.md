@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Per-resolution settings:** the two sensor timing sets, the RGB+IR (toggle) and colour scan overlays, and the window and line-period rules.
   - **Loader:** the holder sensor, load, eject and frame-feed constants.
   - **Session:** `Gl128Loader` and `Gl128LoaderScanSession` drive the loader and RGB+IR toggle mode, replaying the VueScan programs:
-    - `Scanner.holder_present()`, `load_holder()` and `eject_holder()` (in the vendor's order, homing first when the holder is off the loader home), and `home()` as the vendor's home: one inch in, then the reverse seek only once the loader sensor has cleared;
+    - `Scanner.holder_present()`, `load_holder()` and `eject_holder()` (in the vendor's order, seeking back first when the holder is off the loader home), and `home()` as the vendor's home: one inch in, then the reverse seek only once the loader sensor has cleared;
     - `scan(frame=n)` feeds to 35 mm frame `n` of the loaded holder; `area` is normalised over that frame's slot;
     - `scan(frame=None)` scans the whole strip in one pass, as VueScan's panorama preview does (feed 6414, 66600 steps);
     - every pass scans a visible and an IR line per output line, so `scan(infrared=True)` returns RGB and IR from one pass, registered to the same line;

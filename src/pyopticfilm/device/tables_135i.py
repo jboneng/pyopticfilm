@@ -137,14 +137,15 @@ def feedl_for_move(steps: int) -> int:
 # Loader
 # --------------------------------------------------------------------------
 
-#: Holder sensor: GPIO ``0x32`` bit 2, high while a holder is in the slot.
-#: The one bit that follows the holder in every reading: ``insert 35mm
-#: carrier`` (``0x43`` -> ``0x07``), QuickScan (``0x43`` -> ``0x05``), and on
-#: a 135i before init (``0xc2`` empty, ``0xc6`` holder in) and after it
-#: (``0x1b`` empty). Bit 6 is not an input: after the init table's ``0x1F``
+#: GPIO register with the loader outputs, the IR LED and the holder bits.
+#: Bit 2 changes with ``HOMESNR`` and ``0x100`` bit 7 in every reading, so it
+#: follows the arm state too (:data:`LOADER_HOME_SENSOR_BIT`): with the stop
+#: disarmed it is the holder in the slot, armed it reads 0 off the loader
+#: home. ``insert 35mm carrier`` (``0x43`` -> ``0x07``), QuickScan (``0x43`` ->
+#: ``0x05``), a 135i before init (``0xc2`` empty, ``0xc6`` holder in) and after
+#: it (``0x1b`` empty). Bit 6 is not an input: after the init table's ``0x1F``
 #: it reads 0 with the slot empty.
 HOLDER_SENSOR_REG = 0x32
-HOLDER_SENSOR_MASK = 0x04
 #: Second status register: ``MOTMFLG`` (bit 1) while the motor still turns.
 STATUS2_REG = 0x100
 STATUS2_MOTMFLG = 0x02
@@ -177,6 +178,10 @@ PANORAMA_HEIGHT_STEPS = 66600
 #: steps from home, past the INI ``PageSize`` height of 72000 (10 in). A feed
 #: plus the image pass must end inside it.
 LOADER_TRAVEL_STEPS = PANORAMA_FEED_STEPS + 5609 * 12
+#: Reverse seek off the loader home in an eject or after a lost park. The
+#: load's 72000 stops ~1700 short from the end of a strip; ``FEEDL`` here is
+#: the whole travel, and the armed sensor still ends the seek.
+LOADER_RECOVERY_SEEK_STEPS = LOADER_TRAVEL_STEPS + 510
 #: ``LoaderHomeSensorReg = 0x32,0x02,0``: an output that selects what
 #: ``HOMESNR`` (``0x101`` bit 3) reads. Cleared, the loader stop is armed and
 #: ``HOMESNR`` reads a narrow band around the loaded position; set, it reads

@@ -32,15 +32,16 @@ from pyopticfilm.scan.calib_gl128 import (
     IR_SHADING_WHITE_CLIP_FRAC,
     IR_SHADING_WHITE_CLIP_LEVEL,
     IR_SHADING_WHITE_MEAN_MIN,
-    SHADING_GAIN_TARGET,
     declared_shading_size,
     pack_shading_table,
 )
 
 #: Shading banks: bank 10 shades the first line of each pair (IR), bank 26
-#: the second (visible). In both 135i previews VueScan's final ``0x10014000``
-#: table carries unbalanced gains (median R/G/B 18515 / 25249 / 21385) that
-#: undo the IR line's cast, and ``0x10034000`` flat ones (~29400).
+#: the second (visible). In the panorama capture each table divides out its
+#: own line to 0.03 % across the sensor, against 5 % for the other line.
+#: VueScan's AFE gains balance the visible line, so in the white strip the IR
+#: line reads cast (G/R ~0.73, neutral 0.96 at gain 0) and the visible one
+#: neutral (~1.0, cast 1.27 at gain 0); hence unbalanced gains in bank 10.
 AHB_SHADING_IR = 0x10014000
 AHB_SHADING_VISIBLE = 0x10034000
 #: Room between the two banks; one table may not be larger.
@@ -53,6 +54,10 @@ SHADING_GAIN_UNITY = 0x4000
 #: tables are ``0xFFFF``).
 SHADING_GAIN_MIN = SHADING_GAIN_UNITY // 4
 SHADING_GAIN_MAX = 0xFFFF
+#: White level each bank's gains aim for: ``gain = target * 0x4000 / white``
+#: reproduces both captured tables (0xF000 and 0x16000 to within 0.03 %).
+SHADING_WHITE_TARGET_IR = 0xF000
+SHADING_WHITE_TARGET_VISIBLE = 0x16000
 
 #: Sensor lines in the dark and white strips (``LINCNT = 256`` in both
 #: previews): 256 dark lines, or 128 IR + 128 visible lines in toggle mode.
@@ -90,8 +95,10 @@ def split_toggle_lines(raw: bytes | bytearray | memoryview, *, line_bytes: int, 
     Every line pair is an IR line followed by a visible line of the same size.
     In VueScan's whole two-line AFE probes, at gain 0 line 0 is neutral
     (channel spread ~4 %) and line 1 carries the lamp's green cast (G/R ~1.25);
-    VueScan then sizes its gains to balance line 1. Returns two flat,
-    C-contiguous ``uint8`` arrays of ``pairs * line_bytes`` bytes each.
+    VueScan then sizes its gains to balance line 1. The same gains give line 0
+    G/R ~0.73 and line 1 ~1.0, so neutrality does not identify the IR line once
+    gains are set. Returns two flat, C-contiguous ``uint8`` arrays of
+    ``pairs * line_bytes`` bytes each.
     """
     need = 2 * int(line_bytes) * int(pairs)
     if len(raw) < need:
@@ -147,17 +154,17 @@ def lit_channel_means(strip: bytes, *, pixels: int) -> tuple[float, float, float
     return (float(best[0]), float(best[1]), float(best[2]))
 
 
-def shading_gain_for_white(white_unity: float, *, target: int = SHADING_GAIN_TARGET) -> int:
+def shading_gain_for_white(white_unity: float, *, target: int) -> int:
     """Gain that lifts the unity-table white reading ``white_unity`` to ``target``."""
     gain = round(float(target) * SHADING_GAIN_UNITY / max(1.0, float(white_unity)))
     return max(SHADING_GAIN_MIN, min(SHADING_GAIN_MAX, gain))
 
 
-def shading_gains_from_white(white: Sequence[Sequence[int]]) -> list[tuple[int, int, int]]:
-    """Per-pixel RGB gains for a unity-table white strip."""
+def shading_gains_from_white(white: Sequence[Sequence[int]], *, target: int) -> list[tuple[int, int, int]]:
+    """Per-pixel RGB gains for one bank's unity-table white strip."""
     out: list[tuple[int, int, int]] = []
     for row in white:
-        g = [shading_gain_for_white(row[c]) for c in range(3)]
+        g = [shading_gain_for_white(row[c], target=target) for c in range(3)]
         out.append((g[0], g[1], g[2]))
     return out
 

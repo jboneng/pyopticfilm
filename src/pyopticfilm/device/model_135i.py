@@ -49,7 +49,7 @@ and the Plustek model INI for this scanner (:mod:`pyopticfilm.device.tables_135i
     (``0x10014000``) and a visible bank (``0x10034000``).
 
 **Loader**
-    Holder sensor ``0x32`` bit 2 (high = holder present); ``0x32`` bit 1
+    Holder in the slot: ``HOMESNR`` with ``0x32`` bit 1 set. ``0x32`` bit 1
     selects what ``HOMESNR`` reads (clear: loaded position, set: holder in
     the slot). Load and home = 1 inch forward, then a reverse seek of up to
     10 inches to the loader sensor; eject = 3600 steps on interrupt byte

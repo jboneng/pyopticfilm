@@ -948,13 +948,19 @@ one sensor line and `LINCNT` counts two lines per output line:
 The IR line comes first. VueScan's two-line AFE probes were captured whole:
 at gain 0, line 0 is neutral (channel spread ~4 %) and line 1 carries the
 lamp's green cast (G/R ~1.25); after VueScan's gains, line 1 is the balanced
-one. The QuickScan 600 dpi IR scans agree (even rows neutral).
+one. The same two lines keep their order through the white strip, where the
+gains make line 0 read G/R ~0.73 and line 1 ~1.0 (panorama capture; line 0's
+ratio falls 0.958 → 0.726 and line 1's 1.267 → 0.956, the same 0.76 factor).
+So neutrality identifies the IR line only at gain 0. The QuickScan 600 dpi IR
+scans agree (even rows neutral).
 
 Shading has two banks: `0xD0 = 10` (`0x10014000`, IR, the first line of each
-pair) and `0xD1 = 26` (`0x10034000`, visible). VueScan's final `0x10014000`
-table has unbalanced gains (median R/G/B 18515 / 25249 / 21385) that undo the
-IR line's cast; the `0x10034000` gains are flat (~29400). The toggle
-`PIXELGAIN` has six values (visible RGB + IR). The
+pair) and `0xD1 = 26` (`0x10034000`, visible). In the panorama capture each
+final table divides out its own white line to 0.03 % across the sensor (5 %
+against the other line), with `gain = target · 0x4000 / white`: target
+`0xF000` on `0x10014000` (median gains R/G/B 17615 / 24098 / 20442, undoing
+the cast the AFE gains put on the IR line) and `0x16000` on `0x10034000`
+(about 28400). The toggle `PIXELGAIN` has these six values, three per bank. The
 shading blob layout is the SE's (`calib_gl128.unpack_shading_table` decodes
 both banks exactly). The IR line arrives as three channels; which channel
 (or average) to use for the IR plane is a host choice.
@@ -963,7 +969,7 @@ both banks exactly). The IR line arrives as three channels; which channel
 
 | Event | Registers | Evidence |
 |---|---|---|
-| Holder in | GPIO `0x32` bit 2 goes high (`0x43` → `0x07`; QuickScan `0x43` → `0x05`; a 135i before init `0xc2` → `0xc6`, after init `0x1b` empty). Bit 6 only toggles in the VueScan capture | `insert 35mm carrier`, 12.78 s; tester readings |
+| Holder in | GPIO `0x32` bit 2 goes high with the stop disarmed (it follows `HOMESNR`; `0x43` → `0x07`; QuickScan `0x43` → `0x05`; a 135i before init `0xc2` → `0xc6`, after init `0x1b` empty). Bit 6 only toggles in the VueScan capture | `insert 35mm carrier`, 12.78 s; tester readings |
 | `HOMESNR` | `0x32` bit 1 clear (stop armed): a narrow band around the loaded position; set: holder in the slot | tester readings, QuickScan eject |
 | Load | after 0.5 s (`LoaderDelayTime`): forward 1 inch (`HomeCarriageStep[0]`), then `0x02 = 0x1C` (MTRREV) up to 10 inches back until status `HOMESNR` | FEEDL 6690, then 71490 ending on status `d8` |
 | Frame positioning | forward from the loader home, `0x02 = 0x18` | 6438, 17190, 27942 (pitch 10752); panorama 6414; 7200 scan 17631 |
@@ -994,14 +1000,14 @@ half.
 
 | Step | What runs | Evidence |
 |---|---|---|
-| Holder | `holder_present()`: `0x32` bit 2 high. `is_at_home()`: `HOMESNR` with `0x32` bit 1 cleared, then restored. `eject_requested()`: interrupt byte `0x48` | `insert 35mm carrier`, `holder eject`, tester readings |
+| Holder | `holder_present()`: `HOMESNR` with `0x32` bit 1 set, then restored (`0x32` bit 2 and `0x100` bit 7 follow the same arm state). `is_at_home()`: `HOMESNR` with `0x32` bit 1 cleared, then restored. `eject_requested()`: interrupt byte `0x48` | `insert 35mm carrier`, `holder eject`, tester readings |
 | Load | `load_holder()`: 0.5 s, clear `0x32` bit 1, 7200 forward (load ramp); reverse seek until `HOMESNR` (`0x1C = 0`, exposure 30000, `0x8A`–`0x92 = 0`) only when `HOMESNR` dropped and the motor is idle (`0x101` bit 0, `0x100` bit 1), otherwise eject | insert, both feeds |
-| Eject | `eject_holder()`: the QuickScan order above (home first when off the loader home) | `holder eject`, QuickScan capture |
-| Home | `home()`: the load's two moves (1 inch in, then the reverse seek) when a holder is in the slot and off the loader home; no move with the slot empty | insert, both feeds |
+| Eject | `eject_holder()`: the QuickScan order above; off the loader home, a reverse seek straight back, `FEEDL` = the 73722-step travel | `holder eject`, QuickScan capture |
+| Home | `home()`: the load's two moves (1 inch in, then the reverse seek) when a holder is in the slot and off the loader home; after a lost park, the eject's seek alone; no move with the slot empty | insert, both feeds |
 | AFE | probe 35–547 (2 lines) at offsets `0x80`/`0xFF`, full-width strip, probe pair again; `DPISET = 1200`, `LPERIOD = 10807 + px/4`, `0x2B` `0x01`/`0x04`, `0xA5 = 0x01`, `0xAB = 0x30`, `0xA6`–`0xA9 = 00 01 00 01` | both previews |
 | Dark | lamp, toggle bit and IR LED off; 256 lines through the scan window, `0xA3 = 1` | both previews |
 | White | lamp, toggle bit and IR LED on; 256 lines with `0x01 = 0x23`, motor off | both previews |
-| Shading | per-pixel dark, unity `0x4000`, then gains `0xFFFF · 0x4000 / white`; even lines (IR) fill `0x10014000`, odd lines (visible) `0x10034000`; `split_toggle_lines` returns the odd lines as the image and the even lines as IR | both previews (21064 bytes per bank at 1728 px) |
+| Shading | per-pixel dark, unity `0x4000`, then gains `target · 0x4000 / white`; even lines (IR, target `0xF000`) fill `0x10014000`, odd lines (visible, target `0x16000`) `0x10034000`; `split_toggle_lines` returns the odd lines as the image and the even lines as IR | both previews (21064 bytes per bank at 1728 px) |
 | Frame feed | from the loader home, `FEEDL = 6438 + 10752 · frame` (+ the crop offset), under the image registers with `0x01 = 0x22`, `0x05 = 0x48`, `0xA6`–`0xA9 = 0` | every positioning feed |
 | Strip (panorama) | `scan(frame=None)`: `FEEDL = 6414` (+ crop offset), a slot 66600 steps tall (5550 line pairs at 600 dpi) | panorama preview |
 | Image | `0x01 = 0x23`, `0x02 = 0x30`, `0x33 = 0x0E`, `0xAF = 0xFF`, scan motor tables after the feed; first chunk announced on `wIndex 0x08`, the rest on `0x00` | every image pass |

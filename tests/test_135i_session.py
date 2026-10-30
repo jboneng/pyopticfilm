@@ -163,9 +163,10 @@ def test_eject_off_home_homes_first(scanner, rec):
     rec.at_home = False
     rec.starts.clear()
     scanner.eject_holder()
-    assert [(_u(s, 0x3D, 3), s[0x02]) for s in rec.starts] == [(6690, 0x18), (71490, 0x1C), (3090, 0x18)]
-    forward, reverse, eject = rec.starts
-    assert forward[0x32] & 0x02 == 0 and reverse[0x32] & 0x02 == 0
+    # No inward inch, and FEEDL covers the whole travel from the end of a strip.
+    assert [(_u(s, 0x3D, 3), s[0x02]) for s in rec.starts] == [(MODEL_135I.loader_travel_steps(), 0x1C), (3090, 0x18)]
+    reverse, eject = rec.starts
+    assert reverse[0x32] & 0x02 == 0
     assert eject[0x32] & 0x02 == 0x02
 
 
@@ -187,7 +188,7 @@ def test_eject_button_reads_interrupt_byte(scanner, rec):
 # --- loader sensors ---------------------------------------------------------------
 
 
-def test_holder_sensor_is_0x32_bit2(scanner, rec):
+def test_holder_sensor_reads_disarmed(scanner, rec):
     scanner.asic.init()
     rec.holder_present = False
     # Measured on a 135i after the init table: 0x32 = 0x1b with the slot empty (bit 6 clear).
@@ -195,6 +196,17 @@ def test_holder_sensor_is_0x32_bit2(scanner, rec):
     assert scanner.holder_present() is False
     rec.holder_present = True
     assert scanner.holder_present() is True
+
+
+def test_holder_seen_off_home_with_the_stop_armed(scanner, rec):
+    asic = scanner.asic
+    asic.init()
+    asic._set_home_stop(armed=True)
+    rec.at_home = False
+    # Armed at a frame position, 0x32 bit 2 reads 0 as HOMESNR does.
+    assert not scanner.protocol.read_register(0x32) & 0x04
+    assert scanner.holder_present() is True
+    assert not scanner.protocol.read_register(0x32) & 0x02  # still armed
 
 
 def test_at_home_reads_homesnr_with_the_stop_armed(scanner, rec):
@@ -220,6 +232,17 @@ def test_home_feeds_in_before_the_reverse_seek(scanner, rec):
     scanner.home()
     assert [(_u(s, 0x3D, 3), s[0x02], s[0x32] & 0x02) for s in rec.starts] == [(6690, 0x18, 0), (71490, 0x1C, 0)]
     assert scanner.asic.is_at_home()
+
+
+def test_home_after_a_lost_park_seeks_straight_back(scanner, rec):
+    asic = scanner.asic
+    asic.init()
+    rec.at_home = False
+    asic._park_ok = False
+    rec.starts.clear()
+    scanner.home()
+    assert [(_u(s, 0x3D, 3), s[0x02], s[0x32] & 0x02) for s in rec.starts] == [(MODEL_135I.loader_travel_steps(), 0x1C, 0)]
+    assert asic._park_ok is True
 
 
 def test_home_does_not_seek_while_the_sensor_stays_set(scanner, rec, monkeypatch):
@@ -363,10 +386,11 @@ def test_1200_preview_programs_match_capture(scanner, rec):
     assert (AHB_SHADING_IR, AHB_SHADING_VISIBLE) == (0x10014000, 0x10034000)
     assert all(len(blob) == 21064 for _, blob in shading)
     assert _words(shading[0][1])[1] == SHADING_GAIN_UNITY
-    # The IR bank is sized on the IR line (mock IR white 30000, visible ~41000).
+    # Each bank has its own white target (mock IR white 30000, visible 40000-42000).
     ir_gain = unpack_shading_table(shading[2][1])[100]["gain"]
     vis_gain = unpack_shading_table(shading[3][1])[100]["gain"]
-    assert len(set(ir_gain)) == 1 and min(ir_gain) > max(vis_gain)
+    assert ir_gain == [round(0xF000 * SHADING_GAIN_UNITY / rec.ir_level)] * 3
+    assert vis_gain == [round(0x16000 * SHADING_GAIN_UNITY / v) for v in rec.visible_level]
     # Scan motor tables after the feed: the INI ramp clamped at 4666.
     motor = [blob for a, blob in rec.ahb if a in (R.AHB_SCAN_MOTOR_0, R.AHB_SCAN_MOTOR_1, R.AHB_SCAN_MOTOR_2)]
     assert len(motor) == 3 and all(_words(b) == scan_motor_table(4666) for b in motor)
