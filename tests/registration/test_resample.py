@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pyopticfilm.registration.resample import (
     fill_shift_border,
+    row_shift_var_scale,
     warp_cubic,
     warp_integer,
     warp_row_shifts,
@@ -47,6 +49,49 @@ def test_fill_shift_border_uses_interior():
     out[:, 4] = 50  # donor at 2*|dx|
     filled = fill_shift_border(out, dx=2.0, dy=0.0)
     assert np.all(filled[:, :2] == 50)
+
+
+def _row_wave(h: int, w: int, offset: np.ndarray | float = 0.0) -> np.ndarray:
+    rows = np.arange(h, dtype=np.float64)[:, None] + (offset[:, None] if isinstance(offset, np.ndarray) else offset)
+    return (20000.0 + 8000.0 * np.sin(2.0 * np.pi * rows / 23.0)) * np.ones((h, w))
+
+
+@pytest.mark.parametrize("method", ["cubic", "lanczos3", "lanczos4"])
+def test_warp_row_shifts_undoes_row_drift(method: str):
+    h = 240
+    dy = np.linspace(-2.0, 2.0, h)
+    src = np.rint(_row_wave(h, 8)).astype(np.uint16)
+    out = warp_row_shifts(src, 0.0, dy, method=method)
+    # dst(y) = src(y - dy[y])
+    err = np.abs(out[8:-8].astype(np.float64) - _row_wave(h, 8, -dy)[8:-8])
+    assert err.max() < 50.0
+
+
+def test_warp_row_shifts_rejects_unknown_method():
+    with pytest.raises(ValueError):
+        warp_row_shifts(np.zeros((4, 4), dtype=np.uint16), 0.0, np.zeros(4), method="nearest")
+
+
+def test_warp_row_shifts_chunking_does_not_change_output():
+    src = (np.arange(80 * 16 * 3) % 4093).reshape(80, 16, 3).astype(np.uint16)
+    dy = np.linspace(-1.3, 2.2, 80)
+    one = warp_row_shifts(src, 0.4, dy, method="lanczos4", chunk_rows=80)
+    many = warp_row_shifts(src, 0.4, dy, method="lanczos4", chunk_rows=32)
+    assert np.array_equal(one, many)
+
+
+@pytest.mark.parametrize("method", ["linear", "cubic", "lanczos4"])
+def test_row_shift_var_scale_matches_measured_noise(method: str):
+    rng = np.random.default_rng(3)
+    src = rng.normal(0.0, 1.0, size=(400, 400)).astype(np.float32)
+    dy = np.full(400, 0.5)
+    out = warp_row_shifts(src, 0.25, dy, method=method)
+    predicted = row_shift_var_scale(0.25, dy, method=method)
+    assert predicted[0] == pytest.approx(float(out[16:-16, 16:-16].var()), rel=0.05)
+
+
+def test_row_shift_var_scale_is_one_on_integer_rows():
+    assert np.allclose(row_shift_var_scale(0.0, np.full(8, 2.0), method="lanczos4"), 1.0)
 
 
 def test_warp_row_shifts_identity():

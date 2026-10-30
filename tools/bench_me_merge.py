@@ -189,8 +189,9 @@ def run_case(case: Case, versions: dict[str, ModuleType], seeds: int) -> dict[st
     texture = case.drift != 0.0
     truth = _scene(texture=texture)
     drift = _drift_per_row(case)
-    long_dy = -case.shift[1] - drift if texture else -case.shift[1]
-    long_truth = _scene(-case.shift[0], long_dy, texture=texture) * case.r * np.asarray(case.gain)
+    # The merge remaps dst(x) = long(x - s), so the long is the scene at x + s.
+    long_dy = case.shift[1] + drift if texture else case.shift[1]
+    long_truth = _scene(case.shift[0], long_dy, texture=texture) * case.r * np.asarray(case.gain)
     long_truth = long_truth + np.asarray(case.offset)
     transform = None
     if texture:

@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pyopticfilm.pass_align import align_pass_to_reference
+from pyopticfilm.pass_align import align_pass_to_reference, apply_me_transform, estimate_me_transform
+from pyopticfilm.registration.types import Transform
 
 _FULL_SCALE = 65535.0
 
@@ -138,13 +139,18 @@ def merge_exposures(
     exposure_short: int = 14000,
     exposure_long: int = 42000,
     align_shift: tuple[float, float] | tuple[int, int] | None = None,
+    align_transform: Transform | None = None,
     alpha: float | None = None,
     beta: float | None = None,
 ) -> np.ndarray:
     """Fuse short and long RGB negatives into one uint16 frame (SNR / IVW).
 
-    With ``alpha`` and ``beta`` both given, they set the noise model; otherwise
-    it is fitted from this pass pair (see :func:`_fit_pg_noise_from_pair`).
+    ``align_transform`` registers the long (see
+    :func:`~pyopticfilm.pass_align.estimate_me_transform`, which runs when
+    neither it nor ``align_shift`` is given); ``align_shift`` is a plain
+    bilinear translation. With ``alpha`` and ``beta`` both given, they set the
+    noise model; otherwise it is fitted from this pass pair (see
+    :func:`_fit_pg_noise_from_pair`).
     """
     return merge_exposures_result(
         short,
@@ -152,6 +158,7 @@ def merge_exposures(
         exposure_short=exposure_short,
         exposure_long=exposure_long,
         align_shift=align_shift,
+        align_transform=align_transform,
         alpha=alpha,
         beta=beta,
     ).rgb
@@ -164,6 +171,7 @@ def merge_exposures_result(
     exposure_short: int = 14000,
     exposure_long: int = 42000,
     align_shift: tuple[float, float] | tuple[int, int] | None = None,
+    align_transform: Transform | None = None,
     alpha: float | None = None,
     beta: float | None = None,
 ) -> MergeResult:
@@ -177,14 +185,20 @@ def merge_exposures_result(
     if exposure_long <= 0 or exposure_short <= 0:
         raise ValueError("exposure values must be positive")
 
-    long_u, shift_used = align_pass_to_reference(short_u, long_u, shift=align_shift)
+    if align_shift is None and align_transform is None:
+        align_transform = estimate_me_transform(short_u, long_u)
+    if align_transform is not None:
+        long_u, var_scale = apply_me_transform(long_u, align_transform, clip_level=_SNR_CLIP_END)
+    else:
+        long_u, shift_used = align_pass_to_reference(short_u, long_u, shift=align_shift)
+        var_scale = np.full(short_u.shape[0], _linear_shift_var_scale(shift_used))
     usb_ratio = exposure_long / float(exposure_short)
 
     rgb, stats = _merge_snr(
         short_u,
         long_u,
         usb_ratio=usb_ratio,
-        long_var_scale=_linear_shift_var_scale(shift_used),
+        long_var_scale=var_scale,
         alpha=alpha,
         beta=beta,
         floor=_SNR_FLOOR,
@@ -367,7 +381,7 @@ def _pass_variances(
     r: np.ndarray,
     alpha: np.ndarray,
     beta: np.ndarray,
-    long_var_scale: float,
+    long_var_scale: float | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-pixel noise variance of the short and of the long in short scale."""
     va = alpha * np.maximum(xa, 0.0) + beta
@@ -442,7 +456,7 @@ def _merge_snr_rows(
     z_median: float,
     alpha: np.ndarray,
     beta: np.ndarray,
-    long_var_scale: float,
+    long_var_scale: np.ndarray,
     floor: float,
     clip_start: float,
     clip_end: float,
@@ -502,7 +516,7 @@ def _merge_snr(
     long_u: np.ndarray,
     *,
     usb_ratio: float,
-    long_var_scale: float,
+    long_var_scale: np.ndarray,
     alpha: float | None,
     beta: float | None,
     floor: float,
@@ -514,12 +528,14 @@ def _merge_snr(
     Processed in row bands so peak memory stays O(chunk) not O(full frame float32).
     ``alpha``/``beta`` both given set the noise model; otherwise it is fitted
     per channel from the pair, with the module defaults where the fit fails.
+    ``long_var_scale`` is the long's resampling variance factor per row.
     """
     a_sub, b_sub = _subsample_for_stats(short_u, long_u)
     a_sub = a_sub.astype(np.float32)
     b_sub = b_sub.astype(np.float32)
     r = np.maximum(_estimate_exposure_ratio(a_sub, b_sub, usb_ratio=usb_ratio), 1e-12)
     n_ch = short_u.shape[2]
+    mean_var_scale = float(np.mean(long_var_scale))
     if alpha is not None and beta is not None:
         alpha_c = np.full(n_ch, float(alpha))
         beta_c = np.full(n_ch, float(beta))
@@ -529,7 +545,7 @@ def _merge_snr(
             a_sub,
             b_sub,
             r=r,
-            long_var_scale=long_var_scale,
+            long_var_scale=mean_var_scale,
             floor=floor,
             clip_start=clip_start,
         )
@@ -543,7 +559,7 @@ def _merge_snr(
         r=r,
         alpha=alpha_c,
         beta=beta_c,
-        long_var_scale=long_var_scale,
+        long_var_scale=mean_var_scale,
         floor=floor,
         clip_start=clip_start,
         clip_end=clip_end,
@@ -567,7 +583,7 @@ def _merge_snr(
             z_median=z_median,
             alpha=alpha_c,
             beta=beta_c,
-            long_var_scale=long_var_scale,
+            long_var_scale=long_var_scale[y0:y1, np.newaxis, np.newaxis].astype(np.float32),
             floor=floor,
             clip_start=clip_start,
             clip_end=clip_end,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.pass_align import align_pass_to_reference
@@ -643,3 +644,99 @@ def test_merge_snr_noise_fit_unbiased_at_high_read_noise():
     assert stats.noise_fitted == (True, True, True)
     assert np.allclose(stats.noise_alpha, 1.0, rtol=0.08)
     assert np.allclose(stats.noise_beta, 4096.0, rtol=0.1)
+
+
+def _detailed_rgb(h: int = 1400, w: int = 1000, seed: int = 11) -> np.ndarray:
+    """Band-limited random detail, the kind of texture phase correlation locks on."""
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(size=(h, w))
+    spectrum = np.fft.rfft2(noise)
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.rfftfreq(w)[None, :]
+    spectrum *= np.exp(-((fy**2 + fx**2) / (2.0 * 0.05**2)))
+    plane = np.fft.irfft2(spectrum, s=(h, w))
+    plane = (plane - plane.mean()) / plane.std()
+    return np.stack([plane * s + m for s, m in ((1500, 9000), (1000, 6000), (500, 3000))], axis=2)
+
+
+def _drifted(rgb: np.ndarray, dy_per_row: np.ndarray) -> np.ndarray:
+    """``rgb`` with content at ``y + dy[y]``, by Fourier-free row interpolation."""
+    h = rgb.shape[0]
+    src = np.arange(h, dtype=np.float64) + dy_per_row
+    lo = np.clip(np.floor(src).astype(int), 0, h - 2)
+    t = (src - lo)[:, None, None]
+    return (1.0 - t) * rgb[lo] + t * rgb[lo + 1]
+
+
+def test_estimate_me_transform_recovers_row_drift():
+    from pyopticfilm.pass_align import estimate_me_transform
+    from pyopticfilm.registration.types import LineWarpTransform
+
+    rgb = _detailed_rgb()
+    h = rgb.shape[0]
+    drift = np.linspace(4.0, 1.0, h)  # mean 2.5 px, range 3 px
+    transform = estimate_me_transform(rgb.astype(np.uint16), _drifted(rgb, drift).astype(np.uint16))
+    assert isinstance(transform, LineWarpTransform)
+    assert np.abs(transform.dy_per_row - drift).max() < 0.15
+
+
+def test_estimate_me_transform_stays_translation_without_drift():
+    from pyopticfilm.pass_align import estimate_me_transform
+    from pyopticfilm.registration.types import TranslationTransform
+
+    rgb = _detailed_rgb()
+    transform = estimate_me_transform(rgb.astype(np.uint16), _drifted(rgb, np.full(rgb.shape[0], 3.0)).astype(np.uint16))
+    assert isinstance(transform, TranslationTransform)
+    assert transform.dy == pytest.approx(3.0, abs=0.1)
+
+
+def test_estimate_me_transform_small_frame_falls_back_to_translation():
+    from pyopticfilm.pass_align import estimate_me_transform
+    from pyopticfilm.registration.types import TranslationTransform
+
+    arr = np.full((128, 128, 3), 5000, dtype=np.uint16)
+    assert isinstance(estimate_me_transform(arr, arr), TranslationTransform)
+
+
+def test_merge_with_row_transform_keeps_detail_at_frame_ends():
+    from pyopticfilm.pass_align import estimate_me_transform
+
+    rgb = _detailed_rgb()
+    h = rgb.shape[0]
+    long = _drifted(rgb, np.linspace(3.0, -3.0, h)) * 3.0
+    short_u = rgb.astype(np.uint16)
+    long_u = long.astype(np.uint16)
+    fixed = merge_exposures(short_u, long_u, align_transform=estimate_me_transform(short_u, long_u))
+    plain = merge_exposures(short_u, long_u, align_shift=(0.0, 0.0))
+    top = (slice(40, 240), slice(40, -40))
+    err_fixed = np.abs(fixed[top].astype(np.float64) - rgb[top]).mean()
+    err_plain = np.abs(plain[top].astype(np.float64) - rgb[top]).mean()
+    assert err_fixed < 0.5 * err_plain
+
+
+def test_merge_defaults_to_estimating_the_transform():
+    rgb = _detailed_rgb()
+    h = rgb.shape[0]
+    short_u = rgb.astype(np.uint16)
+    long_u = (_drifted(rgb, np.linspace(3.0, -3.0, h)) * 3.0).astype(np.uint16)
+    default = merge_exposures(short_u, long_u)
+    plain = merge_exposures(short_u, long_u, align_shift=(0.0, 0.0))
+    top = (slice(40, 240), slice(40, -40))
+    assert np.abs(default[top].astype(np.float64) - rgb[top]).mean() < np.abs(
+        plain[top].astype(np.float64) - rgb[top]
+    ).mean()
+
+
+def test_apply_me_transform_ringing_at_clip_edge_reads_as_clipped():
+    from pyopticfilm.pass_align import apply_me_transform
+    from pyopticfilm.registration.types import LineWarpTransform
+
+    long = np.full((64, 8, 3), 30000, dtype=np.uint16)
+    long[32:] = 65535
+    transform = LineWarpTransform(0.0, np.full(64, 0.5))
+    plain, _ = apply_me_transform(long, transform)
+    guarded, _ = apply_me_transform(long, transform, clip_level=62000)
+    # Without the guard the lobes dip below full scale inside the clip.
+    assert plain[32:40, 0, 0].min() < 65535
+    assert np.all(guarded[33:] == 65535)
+    assert np.all(guarded[20:26] == 30000)

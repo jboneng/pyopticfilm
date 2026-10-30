@@ -44,7 +44,7 @@ class TranslationTransform:
 
 @dataclass(frozen=True)
 class LineWarpTransform:
-    """Constant dx with a per-row dy profile (Multi-Pass banded path)."""
+    """Constant dx with a per-row dy profile (banded Multi-Pass, ME row drift)."""
 
     dx: float
     dy_per_row: np.ndarray  # length H, float64
@@ -144,3 +144,15 @@ class RegistrationOptions:
     fractional_resampler: str = "cubic"  # cubic | linear
     #: Row chunk height for separable fractional warps (peak RAM control).
     warp_chunk_rows: int = 512
+    #: ME row drift: full-resolution tile grid (rows x columns) and tile side.
+    drift_tile_rows: int = 6
+    drift_tile_cols: int = 3
+    drift_tile_side: int = 384
+    #: Tiles below this phase-correlation response carry too little detail.
+    drift_min_response: float = 0.1
+    #: Residual past the integer seed a tile may report (long frames drift further).
+    drift_max_residual: float = 8.0
+    drift_min_tiles: int = 6
+    #: Top-to-bottom drift below this (px) stays a plain translation.
+    drift_min_range_px: float = 0.15
+    drift_outlier_px: float = 0.25

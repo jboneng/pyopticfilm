@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 
 from pyopticfilm.logging import get_logger
@@ -398,6 +401,105 @@ def _refine_translation(
                 dy += ddy2
 
     return dx, dy
+
+
+def _fit_row_line(rows: np.ndarray, dys: np.ndarray, outlier_px: float) -> tuple[float, float, np.ndarray] | None:
+    """Least-squares ``dy = slope * row + intercept``, dropping outlier tiles."""
+    keep = np.ones(rows.shape, dtype=bool)
+    slope = intercept = 0.0
+    for _ in range(4):
+        if int(np.count_nonzero(keep)) < 3:
+            return None
+        slope, intercept = np.polyfit(rows[keep], dys[keep], 1)
+        resid = np.abs(dys - (slope * rows + intercept))
+        spread = 1.4826 * float(np.median(resid[keep]))
+        next_keep = resid <= max(outlier_px, 3.0 * spread)
+        if np.array_equal(next_keep, keep):
+            break
+        keep = next_keep
+    return float(slope), float(intercept), keep
+
+
+def estimate_row_drift(
+    reference: np.ndarray,
+    moving: np.ndarray,
+    seed: tuple[float, float],
+    *,
+    options: RegistrationOptions | None = None,
+) -> LineWarpTransform | None:
+    """Fit ``dy(row)`` for an ME pass pair; ``None`` when a translation is enough.
+
+    The long pass feeds at a slightly different rate from the short, so a single
+    translation only registers the frame centre. Full-resolution tiles around the
+    integer ``seed`` give the sub-pixel residual; a robust line through them gives
+    the profile. A downsampled band correlate cannot resolve drift this small.
+    """
+    opt = options or RegistrationOptions()
+    ref = np.asarray(reference)
+    mov = np.asarray(moving)
+    h, w = ref.shape[:2]
+    side = opt.drift_tile_side
+    if ref.shape[:2] != mov.shape[:2] or h < 2 * side or w < side:
+        return None
+    idx, idy = round(seed[0]), round(seed[1])
+    origins = [
+        (int(y0), int(x0))
+        for y0 in np.linspace(0, h - side, opt.drift_tile_rows)
+        for x0 in np.linspace(0, w - side, opt.drift_tile_cols + 2)[1:-1]
+    ]
+
+    def measure(origin: tuple[int, int]) -> tuple[float, float, float, float] | None:
+        y0, x0 = origin
+        hit = _roi_residual(
+            ref,
+            mov,
+            y0,
+            x0,
+            side,
+            side,
+            idx,
+            idy,
+            RegistrationMode.MULTI_EXPOSURE,
+            plane_force=None,
+            upsample=opt.subpixel_factor,
+        )
+        if hit is None:
+            return None
+        ddx, ddy, resp = hit
+        if resp < opt.drift_min_response or max(abs(ddx), abs(ddy)) > opt.drift_max_residual:
+            return None
+        return y0 + side / 2.0, idx + ddx, idy + ddy, resp
+
+    with ThreadPoolExecutor(max_workers=min(len(origins), os.cpu_count() or 1)) as pool:
+        tiles = [t for t in pool.map(measure, origins) if t is not None]
+    if len(tiles) < opt.drift_min_tiles:
+        return None
+    arr = np.asarray(tiles, dtype=np.float64)
+    fit = _fit_row_line(arr[:, 0], arr[:, 2], opt.drift_outlier_px)
+    if fit is None:
+        return None
+    slope, intercept, keep = fit
+    if int(np.count_nonzero(keep)) < opt.drift_min_tiles:
+        return None
+    kept_rows = arr[keep, 0]
+    # Two thirds of the frame must be covered, or the slope extrapolates too far.
+    if float(kept_rows.max() - kept_rows.min()) < 2.0 * h / 3.0 - side:
+        return None
+    dy_per_row = slope * np.arange(h, dtype=np.float64) + intercept
+    if float(np.ptp(dy_per_row)) < opt.drift_min_range_px:
+        return None
+    dx = float(np.median(arr[keep, 1]))
+    if should_snap_to_integer(dx, 0.0, eps=opt.snap_frac_eps):
+        dx = float(round(dx))
+    logger.info(
+        "registration: ME row drift dx=%.2f dy(row)=%.2f..%.2f from %d/%d tiles",
+        dx,
+        float(dy_per_row[0]),
+        float(dy_per_row[-1]),
+        int(np.count_nonzero(keep)),
+        len(origins),
+    )
+    return line_warp_from_profile(dx, dy_per_row)
 
 
 def estimate_banded(

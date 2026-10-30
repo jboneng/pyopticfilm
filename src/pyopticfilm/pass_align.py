@@ -13,14 +13,23 @@ import numpy as np
 from pyopticfilm.registration.engine import (
     apply_transform,
     estimate_banded,
+    estimate_row_drift,
     estimate_translation,
 )
 from pyopticfilm.registration.models import band_shift_profile
 from pyopticfilm.registration.phase import phase_correlate_shift
+from pyopticfilm.registration.resample import (
+    row_shift_var_scale,
+    warp_integer,
+    warp_row_shifts,
+)
 from pyopticfilm.registration.resample import warp_shift as _warp_shift_impl
 from pyopticfilm.registration.types import (
+    LineWarpTransform,
     RegistrationMode,
     RegistrationOptions,
+    Transform,
+    TranslationTransform,
 )
 
 _ALIGN_PROBE_WIDTH = 1024
@@ -31,6 +40,12 @@ _ALIGN_SANITY_MAX_FRAC = 0.5
 _ALIGN_BAND_COUNT = 8
 _ALIGN_BAND_MIN_HEIGHT = 256
 _ALIGN_BAND_OUTLIER_PX = 8.0
+# ME long-pass kernel. Row drift sweeps every sub-pixel phase down the frame, so
+# softness at half-pixel rows shows as bands of detail: on a real 1800 dpi pair
+# fine detail there was 64% of the short with bilinear, 75% cubic, 86% lanczos4.
+_ME_RESAMPLER = "lanczos4"
+# Reach of that kernel's strong lobes, in px.
+_ME_RING_REACH = 2
 
 Shift2D = tuple[float, float]
 
@@ -104,6 +119,79 @@ def estimate_pass_shift(reference: np.ndarray, moving: np.ndarray) -> Shift2D:
     if not result.accepted:
         return (0.0, 0.0)
     return result.shift
+
+
+def estimate_me_transform(reference: np.ndarray, moving: np.ndarray) -> Transform:
+    """Registration of an ME pass: translation plus row drift when there is any."""
+    options = _default_options()
+    result = estimate_translation(
+        reference,
+        moving,
+        RegistrationMode.MULTI_EXPOSURE,
+        options=options,
+    )
+    if not result.accepted:
+        return TranslationTransform(0.0, 0.0)
+    drift = estimate_row_drift(reference, moving, result.shift, options=options)
+    return result.transform if drift is None else drift
+
+
+def transform_mean_shift(transform: Transform) -> Shift2D:
+    """Representative ``(dx, dy)`` of a transform, for logs and debug fields."""
+    if isinstance(transform, LineWarpTransform):
+        return float(transform.dx), float(np.mean(transform.dy_per_row))
+    return float(transform.dx), float(transform.dy)
+
+
+def _grow_mask(mask: np.ndarray, axis: int, reach: int) -> None:
+    """Dilate a bool mask in place by ``reach`` samples along ``axis``."""
+    for _ in range(reach):
+        fwd = [slice(None)] * mask.ndim
+        back = [slice(None)] * mask.ndim
+        fwd[axis], back[axis] = slice(1, None), slice(None, -1)
+        grown = mask.copy()
+        grown[tuple(fwd)] |= mask[tuple(back)]
+        grown[tuple(back)] |= mask[tuple(fwd)]
+        mask[:] = grown
+
+
+def apply_me_transform(
+    moving: np.ndarray,
+    transform: Transform,
+    *,
+    clip_level: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Warp an ME pass with :data:`_ME_RESAMPLER`.
+
+    Returns ``(aligned, var_scale)``: the warp and its per-row noise variance
+    factor (see :func:`~pyopticfilm.registration.resample.row_shift_var_scale`).
+
+    The kernel rings at a hard clip edge, which can pull a clipped reading below
+    the clip and pass it as valid. With ``clip_level``, anything within the
+    kernel's reach of a reading at that level is written at full scale, so the
+    merge's clip confidence rejects it.
+    """
+    mov = np.asarray(moving)
+    h = mov.shape[0]
+    if isinstance(transform, LineWarpTransform):
+        dx, dy = float(transform.dx), np.asarray(transform.dy_per_row, dtype=np.float64)
+    else:
+        dx, dy = float(transform.dx), np.full(h, float(transform.dy))
+        if abs(dx - round(dx)) < 1e-6 and abs(dy[0] - round(dy[0])) < 1e-6:
+            return warp_integer(mov, round(dx), round(float(dy[0]))), np.ones(h)
+    aligned = warp_row_shifts(mov, dx, dy, method=_ME_RESAMPLER)
+    var_scale = row_shift_var_scale(dx, dy, method=_ME_RESAMPLER)
+    if clip_level is not None and np.issubdtype(mov.dtype, np.integer):
+        clipped = mov >= clip_level
+        if np.any(clipped):
+            # Bilinear taps cover both neighbours of each sample: any non-zero
+            # result is a pixel that touches a clipped reading.
+            touched = warp_row_shifts(clipped.astype(np.uint16), dx, dy, method="linear") > 0
+            _grow_mask(touched, 0, _ME_RING_REACH)
+            if abs(dx - round(dx)) >= 1e-6:
+                _grow_mask(touched, 1, _ME_RING_REACH)
+            aligned[touched] = np.iinfo(mov.dtype).max
+    return aligned, var_scale
 
 
 def align_pass_to_reference(
