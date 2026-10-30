@@ -168,6 +168,41 @@ def test_merge_snr_both_zero_stays_black():
     assert result.fusion_stats.zero_weight_fraction == 1.0
 
 
+def test_merge_snr_below_floor_keeps_long_reading():
+    """Dense film under the noise floor in both passes: long scaled, not black."""
+    short = np.full((4, 4, 3), 40, dtype=np.uint16)
+    long = np.full((4, 4, 3), 120, dtype=np.uint16)
+    result = merge_exposures_result(short, long, align_shift=(0, 0))
+    assert np.all(result.rgb == 40)
+    assert result.fusion_stats is not None
+    assert result.fusion_stats.zero_weight_fraction == 1.0
+
+
+def test_merge_snr_no_step_at_noise_floor():
+    """Long one DN either side of the floor (131 DN) lands one short-scale DN apart."""
+    short = np.array([[[43] * 3, [44] * 3]], dtype=np.uint16)
+    long = np.array([[[129] * 3, [132] * 3]], dtype=np.uint16)
+    result = merge_exposures_result(short, long, align_shift=(0, 0))
+    assert result.rgb[0, 0, 0] == 43
+    assert result.rgb[0, 1, 0] == 44
+
+
+def test_merge_snr_per_channel_ratio_keeps_hue_across_long_clip():
+    """Green 3% hotter in the long pass: per-channel r keeps G/R flat with tone."""
+    ramp = np.linspace(5000, 21000, 64 * 64, dtype=np.float64).reshape(64, 64)
+    short = np.repeat(ramp[..., None], 3, axis=2)
+    long = np.clip(short * np.array([3.0, 3.09, 3.0]), 0, 65535)
+    result = merge_exposures_result(
+        short.astype(np.uint16), long.astype(np.uint16), align_shift=(0, 0)
+    )
+    assert result.fusion_stats is not None
+    per_channel = result.fusion_stats.exposure_ratio_per_channel
+    assert per_channel is not None
+    assert np.allclose(per_channel, (3.0, 3.09, 3.0), atol=0.005)
+    rgb = result.rgb.astype(np.float64)
+    assert np.allclose(rgb[..., 1] / rgb[..., 0], 1.0, atol=0.002)
+
+
 def test_merge_snr_clipped_in_both_keeps_short_level():
     """Clipped short and long: no confident input, but the pixel is bright, not black."""
     short = np.full((4, 4, 3), 65535, dtype=np.uint16)

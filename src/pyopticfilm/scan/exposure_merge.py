@@ -40,7 +40,10 @@ class FusionStats:
     zero_weight_pixels: int
     total_pixels: int
     mean_residual_confidence: float | None = None
+    #: Mean of :attr:`exposure_ratio_per_channel`.
     exposure_ratio_used: float | None = None
+    #: Long/short ratio applied to each of R, G, B.
+    exposure_ratio_per_channel: tuple[float, ...] | None = None
 
     @property
     def zero_weight_fraction(self) -> float:
@@ -216,28 +219,38 @@ def _estimate_exposure_ratio(
     *,
     usb_ratio: float,
     full_scale: float = _FULL_SCALE,
-) -> float:
-    """Robust median long/short ratio on mid-tone pixels; fall back to USB ratio."""
+) -> np.ndarray:
+    """Robust per-channel median long/short ratio on mid-tone pixels.
+
+    One shared ratio leaves any per-channel gain mismatch in the merge, which
+    then shifts hue with tone as the weight moves from long to short near the
+    long clip. A channel with too few mid-tones takes the luma ratio, or the
+    USB ratio when luma has too few as well.
+    """
     lo = 0.01 * full_scale
     hi = 0.85 * full_scale
-    valid = (a > lo) & (a < hi) & (b_raw > lo) & (b_raw < hi)
-    if int(np.count_nonzero(valid)) >= 1000:
-        ratios = b_raw[valid] / np.maximum(a[valid], 1e-12)
-        return float(np.median(ratios))
     la = a.mean(axis=2)
     lb = b_raw.mean(axis=2)
-    valid2 = (la > lo) & (la < hi) & (lb > lo) & (lb < hi)
-    if int(np.count_nonzero(valid2)) < 100:
-        return float(usb_ratio)
-    ratios = lb[valid2] / np.maximum(la[valid2], 1e-12)
-    return float(np.median(ratios))
+    valid_lum = (la > lo) & (la < hi) & (lb > lo) & (lb < hi)
+    if int(np.count_nonzero(valid_lum)) >= 100:
+        fallback = float(np.median(lb[valid_lum] / np.maximum(la[valid_lum], 1e-12)))
+    else:
+        fallback = float(usb_ratio)
+    ratios = np.full(a.shape[2], fallback, dtype=np.float32)
+    for c in range(a.shape[2]):
+        ac = a[..., c]
+        bc = b_raw[..., c]
+        valid = (ac > lo) & (ac < hi) & (bc > lo) & (bc < hi)
+        if int(np.count_nonzero(valid)) >= 1000:
+            ratios[c] = np.median(bc[valid] / np.maximum(ac[valid], 1e-12))
+    return ratios
 
 
 def _estimate_z_median(
     short_u: np.ndarray,
     long_u: np.ndarray,
     *,
-    r: float,
+    r: np.ndarray,
     alpha: float,
     beta: float,
     floor: float,
@@ -251,9 +264,8 @@ def _estimate_z_median(
     xb = b_raw / r
     lum_xa = a.mean(axis=2)
     lum_xb = xb.mean(axis=2)
-    lum_b_raw = b_raw.mean(axis=2)
     va_lum = alpha * np.maximum(lum_xa, 0.0) + beta
-    vb_lum = (alpha * np.maximum(lum_b_raw, 0.0) + beta) / (r * r)
+    vb_lum = ((alpha * np.maximum(b_raw, 0.0) + beta) / (r * r)).mean(axis=2)
     z = (lum_xa - lum_xb) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
     return float(np.median(z))
 
@@ -262,7 +274,7 @@ def _merge_snr_rows(
     short_rows: np.ndarray,
     long_rows: np.ndarray,
     *,
-    r: float,
+    r: np.ndarray,
     z_median: float,
     alpha: float,
     beta: float,
@@ -284,9 +296,8 @@ def _merge_snr_rows(
 
     lum_xa = xa.mean(axis=2)
     lum_xb = xb.mean(axis=2)
-    lum_b_raw = b_raw.mean(axis=2)
     va_lum = alpha * np.maximum(lum_xa, 0.0) + beta
-    vb_lum = (alpha * np.maximum(lum_b_raw, 0.0) + beta) / (r * r)
+    vb_lum = vb.mean(axis=2)
     z = (lum_xa - lum_xb) / np.sqrt(np.maximum(va_lum + vb_lum, 1e-12))
     z_local = z - z_median
     c_res = _residual_confidence(z_local)
@@ -307,11 +318,15 @@ def _merge_snr_rows(
     ivw_spread = np.max(ivw, axis=2) - np.min(ivw, axis=2)
     misaligned = (lum_diff > _LUMA_DISAGREE_TAU) & (ivw_spread > _IVW_CHANNEL_SPREAD_TAU)
     out = np.where(misaligned[..., np.newaxis], xa, merged)
-    # No confident input: black at the noise floor, but a short clipped at the
-    # top keeps its reading — 0 there turned clear film / slide highlights black.
-    # Test against clip_start: confidence already reads as zero a few DN below
-    # clip_end, and the noise floor is nowhere near it.
-    out = np.where(both_zero, np.where(a >= clip_start, xa, 0.0), out)
+    # No confident input. A short clipped at the top keeps its reading — 0 there
+    # turned clear film / slide highlights black. Below the noise floor an
+    # unclipped long is still the best estimate — 0 there crushed the densest
+    # areas to black one DN under the floor. Only a short at the floor against
+    # a clipped long (no usable reading) goes to 0. Test against clip_start:
+    # confidence already reads as zero a few DN below clip_end, and the noise
+    # floor is nowhere near it.
+    fallback = np.where(a >= clip_start, xa, np.where(b_raw < clip_start, xb, 0.0))
+    out = np.where(both_zero, fallback, out)
 
     both_zero_pix = np.all(both_zero, axis=2)
     chunk = np.clip(out, 0, 65535).astype(np.uint16)
@@ -334,7 +349,7 @@ def _merge_snr(
     Processed in row bands so peak memory stays O(chunk) not O(full frame float32).
     """
     a_sub, b_sub = _subsample_for_stats(short_u, long_u)
-    r = max(
+    r = np.maximum(
         _estimate_exposure_ratio(
             a_sub.astype(np.float32),
             b_sub.astype(np.float32),
@@ -388,7 +403,8 @@ def _merge_snr(
         zero_weight_pixels=zero_count,
         total_pixels=total_pixels,
         mean_residual_confidence=c_res_sum / max(total_pixels, 1),
-        exposure_ratio_used=float(r),
+        exposure_ratio_used=float(r.mean()),
+        exposure_ratio_per_channel=tuple(float(v) for v in r),
     )
     return out, stats
 
@@ -491,13 +507,10 @@ def merge_n_passes(
         acc = weights[0] * xs[0]
         w_sum = weights[0].copy()
         all_zero_conf = cs[0] <= 1e-6
-        # clip_start, not clip_end: confidence is already ~0 a few DN below clip_end.
-        all_clipped = xs[0] >= _SNR_CLIP_START
         for x, c, w_i in zip(xs[1:], cs[1:], weights[1:], strict=True):
             acc += w_i * x
             w_sum += w_i
             all_zero_conf &= c <= 1e-6
-            all_clipped &= x >= _SNR_CLIP_START
         merged = acc / np.maximum(w_sum, 1e-12)
         # Every frame's weight collapsed to zero at a pixel (e.g. all
         # flagged outlier) — fall back to the plain mean rather than a
@@ -506,12 +519,12 @@ def merge_n_passes(
         if np.any(no_weight):
             plain_mean = np.mean(np.stack(xs, axis=0), axis=0)
             merged = np.where(no_weight, plain_mean, merged)
-        # Black only at the noise floor; clipped in every frame keeps the clip level.
-        if np.any(all_clipped):
-            clipped_mean = np.mean(np.stack(xs, axis=0), axis=0)
-            merged = np.where(all_zero_conf, np.where(all_clipped, clipped_mean, 0.0), merged)
-        else:
-            merged = np.where(all_zero_conf, 0.0, merged)
+        # No confident frame (below the noise floor or clipped in every
+        # frame): the plain mean keeps the reading — 0 here crushed the
+        # densest areas to black one DN under the floor.
+        if np.any(all_zero_conf):
+            plain_mean = np.mean(np.stack(xs, axis=0), axis=0)
+            merged = np.where(all_zero_conf, plain_mean, merged)
 
         out[y0:y1] = np.clip(merged, 0, 65535).astype(np.uint16)
         conf_mean_pixel = np.mean(np.stack(cs, axis=0), axis=0)
