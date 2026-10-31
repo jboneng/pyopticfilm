@@ -51,7 +51,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from pyopticfilm.device.gl128_common import LADDER_LINCNT_BY_DPI, SCAN_REGS, Gl128Common
+from pyopticfilm.device.gl128_common import (
+    ALL_PPI,
+    INIT_REGS,
+    LADDER_LINCNT_BY_DPI,
+    LPERIOD_BY_DPI,
+    MEMORY_LAYOUT_REGS,
+    REGISTER_DPISET,
+    SCAN_REGS,
+    Gl128Common,
+)
 from pyopticfilm.device.tables_8300i_se import (
     SLOPE_TABLE_FAST,
     SLOPE_TABLE_SLOW,
@@ -229,6 +238,19 @@ class Model8300iSE(Gl128Common):
     )
     sensor_custom_regs: Mapping[int, int] = field(
         default_factory=lambda: dict(_SCAN_REGS_8300I)
+    )
+    # Cold-boot capture: the SE boot blast and memory layout (0x36 per firmware,
+    # docs §10.7); LPERIOD follows the shared window rule at every measured PPI.
+    # Declared here because the OpticFilm 135i has its own.
+    resolutions_dpi: tuple[int, ...] = ALL_PPI
+    register_dpiset_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(REGISTER_DPISET)
+    )
+    lperiod_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(LPERIOD_BY_DPI))
+    feed_steps_per_inch: int = 14400
+    init_regs: Mapping[int, int] = field(default_factory=lambda: dict(INIT_REGS))
+    memory_layout_regs: Mapping[int, int] = field(
+        default_factory=lambda: dict(MEMORY_LAYOUT_REGS)
     )
     # Every capture: 0x8C[0x10] = 0x8C[0x13] = 0x0E at boot, then 0x0E and 0x0D
     # before each scan pass. Scanning at 0x0E runs the motor fast, rattles and

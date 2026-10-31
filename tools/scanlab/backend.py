@@ -20,7 +20,7 @@ from pyopticfilm.scan.bringup import (
 )
 from pyopticfilm.scanner import Scanner
 from pyopticfilm.usb.device import UsbDeviceInfo, list_devices
-from pyopticfilm.usb.fake import MockScannerTransport
+from pyopticfilm.usb.fake import MockFilmLoaderTransport, MockScannerTransport
 from pyopticfilm.usb.protocol import GenesysUsbProtocol
 from pyopticfilm.usb.trace import RecordingTransport, UsbTransaction, format_usb_log_line
 
@@ -78,11 +78,15 @@ def apply_lab_hw_override(scanner: Scanner, target: LabTarget) -> None:
     """Unlock scan/home/park for real USB when the lab override is on.
 
     Does not flip ``model.scan_ready``. No-op for mock opens (``open_fake``
-    already sets ``_allow_unvalidated_scan``).
+    already sets ``_allow_unvalidated_scan``). On film-loader models (135i
+    bring-up) it also arms motor moves, so load, eject, frame feeds and scans
+    can run; flatbed GL128 models stay disarmed.
     """
     if target.mock or not target.allow_unvalidated:
         return
     scanner._allow_unvalidated_scan = True
+    if is_film_loader(target.model):
+        scanner.arm_bringup_motor()
 
 
 def apply_lab_decode_layout(scanner: Scanner, target: LabTarget) -> None:
@@ -99,6 +103,11 @@ def apply_lab_motor_acoustic(scanner: Scanner, target: LabTarget) -> None:
     if asic is None:
         return
     asic.image_slope_slow = bool(target.slow_image_slope)
+
+
+def is_film_loader(model: FilmModel) -> bool:
+    """True for film-loader models (OpticFilm 135i): load / eject / frame controls."""
+    return bool(getattr(model, "film_loader", False))
 
 
 def multi_pass_allowed_at(model: FilmModel, dpi: int) -> bool:
@@ -182,13 +191,22 @@ def lab_scan_kwargs(
     dpi: int,
     kind: str,
     crop_norm: tuple[float, float, float, float] | None,
+    frame: int | None = 0,
 ) -> dict:
     """``Scanner.scan`` kwargs that stay inside a motor-safe window.
 
     SE uses capture-proven ``bringup_scan_geometry`` / crop clamps. Unvalidated
     non-SE models never get full-TA ``area=None`` — Lab uses a short Y strip
     (and clamps rubber-band crops) so high-PPI Scan cannot grind the carriage.
+    Film loaders (135i) scan one frame slot: ``area`` is a crop of that slot,
+    and ``frame`` picks the frame of the loaded holder (``None``: the whole
+    strip, with ``area`` a crop of the strip).
     """
+    if is_film_loader(model):
+        area = None
+        if kind == "scan" and crop_norm is not None:
+            area = image_crop_to_scan_area(model, crop_norm)
+        return {"resolution": dpi, "area": area, "frame": None if frame is None else int(frame)}
     if is_gl128_opticfilm(model):
         if kind == "prescan" or crop_norm is None:
             geometry, _ = bringup_scan_geometry(model, dpi, profile="preview_safe")
@@ -217,8 +235,8 @@ def lab_crop_scan_meta(
     dpi: int,
     crop_norm: tuple[float, float, float, float],
 ) -> dict | None:
-    """Crop geometry meta for Scan Lab status (GL128 cropped scans only)."""
-    if not is_gl128_opticfilm(model):
+    """Crop geometry meta for Scan Lab status (GL128 flatbed cropped scans only)."""
+    if not is_gl128_opticfilm(model) or is_film_loader(model):
         return None
     area = image_crop_to_scan_area(model, crop_norm)
     _geometry, meta = crop_scan_geometry(model, dpi, area)
@@ -310,7 +328,8 @@ def open_lab_scanner(
     """Open mock USB, or a plugged-in scanner wrapped in a recording transport."""
     listener = on_usb
     if target.mock:
-        rec = RecordingTransport(MockScannerTransport(), listener=listener)
+        inner = MockFilmLoaderTransport() if is_film_loader(target.model) else MockScannerTransport()
+        rec = RecordingTransport(inner, listener=listener)
         scanner = Scanner.open_fake(target.model, rec)
         apply_lab_decode_layout(scanner, target)
         apply_lab_motor_acoustic(scanner, target)
@@ -357,6 +376,13 @@ def device_banner(target: LabTarget, info: UsbDeviceInfo | None = None) -> str:
     extra = f" {info.device_id}" if info is not None else ""
     layout = "planar" if target.usb_planar else "chunky"
     if not model_is_scan_ready(target.model):
+        if target.allow_unvalidated and is_film_loader(target.model):
+            return (
+                f"REAL hardware — {target.model.model}{extra}. "
+                "HW gate OVERRIDDEN — loader motor ARMED: load, eject, frame "
+                "feeds and scans move the film holder. Unverified on this model; "
+                f"scan_ready stays False. USB RGB={layout}."
+            )
         if target.allow_unvalidated:
             return (
                 f"REAL hardware — {target.model.model}{extra}. "

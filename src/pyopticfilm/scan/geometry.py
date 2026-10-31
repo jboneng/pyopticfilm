@@ -135,6 +135,14 @@ def compute_geometry(
     if x2 <= x1 or y2 <= y1:
         raise ValueError("Invalid scan area")
 
+    if getattr(model, "film_loader", False):
+        return _film_loader_geometry(
+            resolution,
+            model=model,
+            box=(x1, y1, x2, y2),
+            area=None if area is None else (x1, y1, x2, y2),
+        )
+
     tl_x_mm = model.x_offset_ta_mm + x1 * model.x_size_ta_mm
     tl_y_mm = model.y_offset_ta_mm + y1 * model.y_size_ta_mm
     width_mm = (x2 - x1) * model.x_size_ta_mm
@@ -151,6 +159,106 @@ def compute_geometry(
         area_y1=y1,
         is_default_full_frame=full_frame,
         area=None if full_frame else (x1, y1, x2, y2),
+    )
+
+
+def compute_strip_geometry(
+    resolution: int,
+    *,
+    model: FilmModel,
+    area: tuple[float, float, float, float] | None = None,
+) -> ScanGeometry:
+    """Film loaders (135i): geometry over the whole strip (the panorama slot).
+
+    ``area`` is normalised over ``model.frame_slot_mm(strip=True)``.
+    """
+    if resolution not in model.resolutions_dpi:
+        raise ValueError(f"Unsupported resolution {resolution}")
+    if not getattr(model, "film_loader", False):
+        raise ValueError(f"{model.model} has no film loader")
+    x1, y1, x2, y2 = area if area is not None else (0.0, 0.0, 1.0, 1.0)
+    x1, y1 = max(0.0, min(1.0, x1)), max(0.0, min(1.0, y1))
+    x2, y2 = max(0.0, min(1.0, x2)), max(0.0, min(1.0, y2))
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Invalid scan area")
+    return _film_loader_geometry(
+        resolution,
+        model=model,
+        box=(x1, y1, x2, y2),
+        area=None if area is None else (x1, y1, x2, y2),
+        strip=True,
+    )
+
+
+def _film_loader_geometry(
+    resolution: int,
+    *,
+    model: FilmModel,
+    box: tuple[float, float, float, float],
+    area: tuple[float, float, float, float] | None,
+    strip: bool = False,
+) -> ScanGeometry:
+    """Geometry of a toggle-mode pass over one frame slot of a film loader (135i).
+
+    ``box`` is normalised over :meth:`~pyopticfilm.device.model_135i.Model135i.frame_slot_mm`
+    (the panorama slot with ``strip``).
+    The window is in the timing set's sensor units from STRPIXEL 35. Every
+    output line is a visible and an IR sensor line, so ``LINCNT`` and the
+    bulk line count are twice the line pairs (:attr:`ScanGeometry.lincnt_per_line`
+    is 2) and :attr:`ScanGeometry.line_bytes` is one sensor line. ``starty``
+    is the feed offset of the crop inside the slot.
+    """
+    x1, y1, x2, y2 = box
+    asic_dpi = int(model.asic_dpi_for(resolution))
+    host_downsample = max(1, asic_dpi // int(resolution))
+    _width_mm, height_mm = model.frame_slot_mm(strip=strip)
+    units = int(model.sensor_units_per_pixel(resolution))
+    full_pixels = int(model.full_width_units(resolution)) // units
+    first = round(x1 * full_pixels)
+    pixels = (round(x2 * full_pixels) - first) // 2 * 2
+    if pixels < 16:
+        raise ValueError("Scan width too small")
+    pixel_startx, _ = model.image_window(resolution)
+    pixel_startx += first * units
+    optical_pixels = pixels * units
+    lines = round((y2 - y1) * height_mm * asic_dpi / MM_PER_INCH)
+    margin = int(model.image_line_margin(resolution))
+    if lines <= margin:
+        raise ValueError("Scan height too small")
+    per_line = int(model.image_lincnt_per_line)
+    pairs = lines + margin
+    shift_r = _scaled_ld_shift(model.ld_shift_r, asic_dpi, model)
+    shift_g = _scaled_ld_shift(model.ld_shift_g, asic_dpi, model)
+    shift_b = _scaled_ld_shift(model.ld_shift_b, asic_dpi, model)
+    return ScanGeometry(
+        resolution=resolution,
+        pixels=pixels,
+        lines=lines,
+        startx=first,
+        starty=round(y1 * int(model.frame_slot_steps(strip=strip))),
+        pixel_startx=pixel_startx,
+        pixel_endx=pixel_startx + optical_pixels,
+        optical_pixels=optical_pixels,
+        register_dpiset=int(model.register_dpiset_by_dpi[resolution]),
+        output_pixel_offset=0,
+        shift_r=shift_r,
+        shift_g=shift_g,
+        shift_b=shift_b,
+        optical_line_count=pairs * per_line,
+        line_bytes=pixels * 3 * 2,
+        channels=3,
+        depth=16,
+        exposure_lperiod=int(model.line_period_for(resolution, span=optical_pixels)),
+        dummy_pixel=int(model.dummy_by_dpi[asic_dpi]),
+        register_lincnt=pairs * per_line,
+        lincnt_per_line=per_line,
+        y_oversample=1,
+        area_y1=float(y1),
+        is_default_full_frame=area is None,
+        area=area,
+        host_downsample=host_downsample,
+        usb_end_drop=0,
+        frame_lines=lines,
     )
 
 

@@ -4,18 +4,25 @@
 from __future__ import annotations
 
 from pyopticfilm.device.gl128_common import (
+    ALL_PPI,
     GL128_DIVERGENT_FIELDS,
     GL128_SHARED_FIELDS,
+    INIT_REGS,
+    LPERIOD_BY_DPI,
+    MEMORY_LAYOUT_REGS,
+    REGISTER_DPISET,
     Gl128Common,
     dataclass_field_names,
 )
+from pyopticfilm.device.model_135i import MODEL_135I, Model135i
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2, Model8100V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE, Model8200iSE
 from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE, Model8300iSE
 from pyopticfilm.device.protocol import Gl128Model
 
-_LEAVES = (MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE)
-_LEAF_CLASSES = (Model8200iSE, Model8100V2, Model8300iSE)
+_LEAVES = (MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE, MODEL_135I)
+_LEAF_CLASSES = (Model8200iSE, Model8100V2, Model8300iSE, Model135i)
+_FLATBED_LEAVES = (MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE)
 
 
 def _value(model: object, name: str) -> object:
@@ -42,6 +49,9 @@ def test_siblings_do_not_subclass_each_other():
     assert not isinstance(MODEL_8100_V2, Model8200iSE)
     assert not isinstance(MODEL_8300I_SE, Model8200iSE)
     assert not isinstance(MODEL_8300I_SE, Model8100V2)
+    for sibling in (Model8200iSE, Model8100V2, Model8300iSE):
+        assert not issubclass(Model135i, sibling)
+        assert not isinstance(MODEL_135I, sibling)
     for model in _LEAVES:
         assert isinstance(model, Gl128Common)
         assert isinstance(model, Gl128Model)
@@ -50,7 +60,59 @@ def test_siblings_do_not_subclass_each_other():
 def test_shared_fields_are_equal_on_all_siblings():
     for name in sorted(GL128_SHARED_FIELDS):
         values = [_value(m, name) for m in _LEAVES]
-        assert values[0] == values[1] == values[2], name
+        assert all(v == values[0] for v in values), name
+
+
+def test_fields_split_for_the_135i_keep_the_flatbed_values():
+    # Declared per leaf since the 135i was added; the 8200i SE / 8100 V2 /
+    # 8300i SE keep the values they shared before.
+    for model in _FLATBED_LEAVES:
+        assert model.resolutions_dpi == ALL_PPI
+        assert dict(model.register_dpiset_by_dpi) == REGISTER_DPISET
+        assert dict(model.lperiod_by_dpi) == LPERIOD_BY_DPI
+        assert model.feed_steps_per_inch == 14400
+        assert dict(model.init_regs) == INIT_REGS
+        assert dict(model.memory_layout_regs) == MEMORY_LAYOUT_REGS
+        assert len(model.boot_blobs()) == 2
+        assert model.boot_writes_layout_and_gpo() is True
+        assert model.boot_vendor_steps() == ()
+        assert model.boot_uploads_tables() is True
+
+
+def test_135i_divergent_fields_match_capture_catalog():
+    m = MODEL_135I
+    assert m.name == "plustek-opticfilm-135i"
+    assert m.model == "OpticFilm 135i"
+    assert m.usb_product_id == 0x1436
+    assert m.supports_infrared is True
+    assert m.scan_ready is False
+    assert m.resolutions_dpi == (7200, 3600, 1800, 1200, 900, 720, 600, 300, 150)
+    # vuescan open: 29 values differ from the SE boot blast, plus 0x114/0x115.
+    se_diff = {a for a in INIT_REGS if INIT_REGS[a] != m.init_regs[a]}
+    assert len(se_diff) == 29
+    assert set(m.init_regs) - set(INIT_REGS) == {0x114, 0x115}
+    assert (m.asic_clock_boot_0x8c, m.asic_clock_scan_0x8c, m.asic_boot_0x0b) == (0x0D, 0x0E, 0x6C)
+    assert (m.memory_layout_regs[0xD0], m.memory_layout_regs[0xD1]) == (0x0A, 0x1A)
+    assert m.feed_steps_per_inch == 7200
+    assert (m.exposure_lperiod, m.exposure_short) == (14000, 14000)
+    assert m.image_lincnt_per_line == 2
+    assert m.usb_image_lincnt_half_lines is False
+    assert dict(m.shading_linesel_by_dpi) == {}
+    for dpi, (dpiset, lperiod, dummy, clk) in {
+        600: (200, 11023, 0x0A, 0x23),
+        1200: (400, 11239, 0x0D, 0x0B),
+        7200: (1200, 15991, 0x17, 0x01),
+    }.items():
+        assert m.register_dpiset_by_dpi[dpi] == dpiset
+        assert m.lperiod_by_dpi[dpi] == lperiod
+        assert m.line_period_for(dpi) == lperiod
+        assert m.dummy_by_dpi[dpi] == dummy
+        assert m.pixel_clock_for_image(dpi) == clk
+    assert m.slope_table_fast()[0] == 64817
+    assert m.slope_table_slow()[0] == 34482
+    assert m.boot_blobs() == ()
+    assert m.boot_writes_layout_and_gpo() is False
+    assert m.boot_uploads_tables() is False
 
 
 def test_divergent_fields_match_capture_catalog():

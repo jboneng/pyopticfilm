@@ -200,14 +200,6 @@ def _feed_setup_regs(scan_regs: Mapping[int, int] | None, *, final_positioning: 
     setup[0xAF] = _FINAL_FEED_REG_AF if final_positioning else _REFERENCE_FEED_REG_AF
     return setup
 
-#: Two 34-byte blobs the Windows driver writes to ``0x000FFF00`` and
-#: ``0x000FFF01`` before the register blast. Their meaning is unknown; they are
-#: replayed byte-for-byte because boot is not reproducible without them.
-_BOOT_BLOB_ADDR_A = 0x000FFF00
-_BOOT_BLOB_ADDR_B = 0x000FFF01
-_BOOT_BLOB_A = bytes(34)
-_BOOT_BLOB_B = bytes(32) + bytes((0x33, 0x00))
-
 #: ``0x0B`` top bits select the clock and must agree with ``0x8C``; bit 3
 #: enables DRAM. After the boot clock the vendor toggles DRAM enable off and on
 #: with ``0x13=0x0F`` in between, and the next register blast puts ``0x13``
@@ -1283,26 +1275,48 @@ class Gl128:
         """Replay the captured cold-boot sequence.
 
         The Windows driver performs no soft reset and never writes ``0x0E``-
-        ``0x10``, so neither does this.
+        ``0x10``, so neither does this. Model hooks select the parts that differ
+        by model: the AHB blobs, the memory layout and GPO blocks, and extra
+        vendor traffic before the frontend init.
         """
         del cold
-        self.protocol.write_ahb(_BOOT_BLOB_ADDR_A, _BOOT_BLOB_A)
-        self.protocol.write_ahb(_BOOT_BLOB_ADDR_B, _BOOT_BLOB_B)
+        for addr, blob in self.model.boot_blobs():
+            self.protocol.write_ahb(int(addr), bytes(blob))
         self._write_many(dict(self.model.init_regs))
         self._write_clock(int(self.model.asic_clock_boot_0x8c))
         dram = int(self.model.asic_boot_0x0b)
         self._write(_REG_CLK_DRAM, dram & ~_DRAM_ENABLE)
         self._write(_REG_0x13, _DRAM_INIT_0x13)
         self._write(_REG_CLK_DRAM, dram | _DRAM_ENABLE)
-        self._write_many(dict(self.model.memory_layout_regs))
+        layout_and_gpo = self.model.boot_writes_layout_and_gpo()
+        if layout_and_gpo:
+            self._write_many(dict(self.model.memory_layout_regs))
+        self._run_boot_vendor_steps()
         self.set_frontend_init()
-        self._write_many(dict(self.model.gpo_regs))
+        if layout_and_gpo:
+            self._write_many(dict(self.model.gpo_regs))
         logger.info(
             "GL128 boot: %d init + %d layout + %d gpo registers",
             len(self.model.init_regs),
             len(self.model.memory_layout_regs),
             len(self.model.gpo_regs),
         )
+
+    def _run_boot_vendor_steps(self) -> None:
+        """Replay :meth:`Gl128Common.boot_vendor_steps` for this model."""
+        for step in self.model.boot_vendor_steps():
+            kind = step[0]
+            if kind == "out":
+                _, value, index, data = step
+                self.protocol.write_vendor(int(value), int(index), bytes(data))
+            elif kind == "in":
+                _, value, index, length = step
+                self.protocol.read_vendor(int(value), int(index), int(length))
+            elif kind == "reg":
+                _, address, value = step
+                self._write(int(address), int(value))
+            else:
+                raise AsicError(f"unknown GL128 boot step {step!r}")
 
     def _write_clock(self, value: int) -> None:
         self.protocol.write_0x8c(0x10, value)
@@ -1330,7 +1344,8 @@ class Gl128:
         if self._initialized and not force:
             return
         self.asic_boot()
-        self.upload_tables(resolution=max(self.model.resolutions_dpi))
+        if self.model.boot_uploads_tables():
+            self.upload_tables(resolution=max(self.model.resolutions_dpi))
         self.last_afe = None
         self.last_afe_dpi = None
         self.image_pass_since_init = False

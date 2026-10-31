@@ -44,6 +44,15 @@ Mock frames are **not** film. The fake USB layer fills RGB16 with a deterministi
 pattern (`R=x`, `G=y`, `B=x XOR y`) so the pipeline and UI can be checked without
 a scanner.
 
+**OpticFilm 135i (film loader) on MOCK:** pick `OpticFilm 135i (GL128)`. A
+**Frame** selector and **Load holder** / **Eject holder** buttons appear under
+**PPI**. Click **Load holder**, choose a **Frame**, then **Prescan** / **Scan**;
+**IR (same pass)** returns the IR plane from the same pass. The 135i mock
+(`MockFilmLoaderTransport`) simulates the holder sensor and loader moves and
+returns flat levels (lamp-off dark, a visible level and a lower IR level)
+instead of the XY pattern, so calibration validates and the Prescan is a flat
+field.
+
 ## Quick start (real scan-ready: 8200i SE / 8100 V2 / 8300i SE / 7600i v1)
 
 1. Bind the scanner for libusb (Windows: WinUSB via Zadig — see windows-setup).
@@ -86,14 +95,15 @@ scan-ready GL128 **8100 (V2)** (`07b3:1824`).
 |---------|---------|
 | **Device** | Connected Plustek scanners first, then every known model. |
 | **Run against MOCK** | On (default): fake USB. Off: open the selected connected device. |
-| **Override safety HW gate** | Off (default). On: after a warning, unlock scan/home/park on real USB for models with `scan_ready=False`. Does not flip `scan_ready`. |
+| **Override safety HW gate** | Off (default). On: after a warning, unlock scan/home/park on real USB for models with `scan_ready=False`. On the 135i it also arms the loader motor. Does not flip `scan_ready`. |
 | **Apply calib** | **On** (default). ASIC shading before colour prescan/scan; first run at each PPI/geometry measures once, then reuses `~/.cache/pyopticfilm/calib_v2.json`. Forced off when **Override safety HW gate** is on. |
 | **Clear calib cache** | Deletes cached shading entries; next scan re-measures at home. |
 | **USB planar RGB** | Off = chunky `RGBRGB…` (default). On = planar planes — try this if Prescan is rainbow-striped. |
 | **Slow image slope** | Off (default). On: shading/slow motor ramp on the image pass (feeds stay fast). |
 | **Refresh devices** | Re-enumerate USB and rebuild the device list. |
 | **PPI** | Resolutions from the selected model’s `resolutions_dpi` (Scan only; Prescan uses a fixed low dpi). |
-| **IR pass** | After colour Scan, run a second infrared pass (disabled if the model has no IR). |
+| **IR pass** | After colour Scan, run a second infrared pass (disabled if the model has no IR). On the 135i it reads **IR (same pass)**: RGB and IR come from one pass. |
+| **Frame / Load holder / Eject holder** | Film loader (135i) only. **Frame** (0 = first) is the 35 mm frame Prescan and Scan feed to; a crop is drawn inside that frame's slot. **Load holder** pulls an inserted holder in to the loader home; **Eject holder** pushes it out. |
 | **Multi-exposure (ME)** | GL128 / hardware-tested models: short + adaptive long colour passes. Disabled at 7200 dpi, together with **Passes** (Multi-Pass); both reset when you pick 7200. Long clamp is 14k–85k. Fallback 42000. Host SNR/IVW merge into ``rgb``. Bracket planes on ``Scanner.last_me_debug`` (not ``ScanImage``). |
 | **Fixed ME long (SilverFast-style)** | With ME on: scan the long pass at the model's fixed exposure (`me_long_mode="fixed"`: 42000 on the 8200i SE / 8100 V2, 60000 on the 8300i SE) instead of metering the short pass. Still clamped to 14k–85k. The USB log's ``ME long exposure`` line shows ``(fixed)``. A manual **ME long exposure** wins over it. CLI: ``--me-long-mode fixed`` (requires ``--multi-exposure``). |
 | **Manual exposure overrides** | GL128 debug/testing only — see [Manual exposure overrides](#manual-exposure-overrides) below. |
@@ -257,6 +267,24 @@ with `python -m tools.register_reference` after editing the catalog.
   an optional acoustic probe (feeds stay fast).
 - 8100 V2 has no IR; leave **IR pass** off on that model. 8200i SE and 8300i SE
   support IR.
+
+### OpticFilm 135i (film loader)
+
+- Prescan and uncropped Scan cover one frame slot (frame pitch 37.9 mm × full
+  sensor width) of the chosen **Frame**; a rubber-band crop is a crop of that
+  slot. A frame whose pass would end past the 10-inch loader travel is refused.
+- **Whole strip (panorama)** scans the whole strip in one pass (feed 6414, 66600
+  steps, as VueScan's panorama preview); a crop is then a crop of the strip.
+- Multi-exposure and Multi-Pass run as on the flatbed GL128 models (not at
+  7200 dpi); each pass is a fresh feed, and the IR plane comes from the first
+  short pass. The long exposure is filled in (no 135i multi-exposure capture).
+- `scan_ready=False`: on real USB the loader stays locked until **Override
+  safety HW gate** is on. For the 135i the override also arms the loader motor
+  (the banner says **loader motor ARMED**), so **Load holder**, **Eject
+  holder**, Prescan and Scan move the film holder. Flatbed GL128 models are
+  not armed by the override. Not yet run on 135i hardware: keep a hand near
+  the power switch. The override turns **Apply calib** off; the 135i
+  calibration strips are stationary, so it can be turned back on.
 
 ### Unvalidated non-scan-ready (GL845 8100 / aliases, …)
 

@@ -29,9 +29,16 @@ def test_run_scan_accepts_positional_signal_args():
 
 
 def test_run_prescan_accepts_positional_signal_args():
-    # request_prescan = pyqtSignal(object, bool)
+    # request_prescan = pyqtSignal(object, bool, int)
     positional, keyword_only = _method_args("run_prescan")
-    assert positional == ["target", "apply_calib"]
+    assert positional == ["target", "apply_calib", "frame"]
+    assert keyword_only == []
+
+
+def test_run_holder_accepts_positional_signal_args():
+    # request_holder = pyqtSignal(object, str)
+    positional, keyword_only = _method_args("run_holder")
+    assert positional == ["target", "action"]
     assert keyword_only == []
 
 

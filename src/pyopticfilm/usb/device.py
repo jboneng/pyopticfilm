@@ -34,6 +34,9 @@ PID_OPTICFILM_8100_V2 = 0x1824
 # OpticFilm 8300i SE (GL128) — scan-ready in this release (IR capable)
 PID_OPTICFILM_8300I_SE = 0x181F
 
+# OpticFilm 135i (GL128, film loader, RGB+IR) — probe-only until hardware sign-off
+PID_OPTICFILM_135I = 0x1436
+
 # Other SANE genesys :complete OpticFilm PIDs (probe-only until validated)
 PID_OPTICFILM_7200 = 0x0807
 PID_OPTICFILM_7200I = 0x0C04
@@ -50,6 +53,7 @@ SUPPORTED_IDS: frozenset[tuple[int, int]] = frozenset(
         (VID_PLUSTEK, PID_OPTICFILM_8200I_SE),
         (VID_PLUSTEK, PID_OPTICFILM_8100_V2),
         (VID_PLUSTEK, PID_OPTICFILM_8300I_SE),
+        (VID_PLUSTEK, PID_OPTICFILM_135I),
         (VID_PLUSTEK, PID_OPTICFILM_7200),
         (VID_PLUSTEK, PID_OPTICFILM_7200I),
         (VID_PLUSTEK, PID_OPTICFILM_7200_V2),

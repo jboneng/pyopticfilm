@@ -6,10 +6,12 @@ from __future__ import annotations
 from typing import Any
 
 from pyopticfilm.asic.gl128 import Gl128
+from pyopticfilm.asic.gl128_loader import Gl128Loader
 from pyopticfilm.asic.gl842 import Gl842
 from pyopticfilm.asic.gl843 import Gl843
 from pyopticfilm.asic.gl843_v1 import Gl843V1
 from pyopticfilm.asic.gl845 import Gl845
+from pyopticfilm.device.model_135i import MODEL_135I
 from pyopticfilm.device.model_7200 import MODEL_7200
 from pyopticfilm.device.model_7200i import MODEL_7200_V2, MODEL_7200I
 from pyopticfilm.device.model_7300 import MODEL_7300, MODEL_7400_V1
@@ -23,6 +25,7 @@ from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
 from pyopticfilm.device.protocol import FilmModel
 from pyopticfilm.exceptions import UnsupportedDeviceError
 from pyopticfilm.usb.device import (
+    PID_OPTICFILM_135I,
     PID_OPTICFILM_7200,
     PID_OPTICFILM_7200_V2,
     PID_OPTICFILM_7200I,
@@ -84,6 +87,7 @@ KNOWN_MODELS: tuple[FilmModel, ...] = (
     MODEL_8200I_SE,
     MODEL_8100_V2,
     MODEL_8300I_SE,
+    MODEL_135I,
 )
 
 __all__ = [
@@ -138,6 +142,8 @@ def model_for_device(product_id: int, bcd_device: int = 0) -> FilmModel:
         return MODEL_8100_V2
     if product_id == PID_OPTICFILM_8300I_SE:
         return MODEL_8300I_SE
+    if product_id == PID_OPTICFILM_135I:
+        return MODEL_135I
     raise UnsupportedDeviceError(f"No model mapping for product_id=0x{product_id:04x}")
 
 
@@ -150,6 +156,8 @@ def create_asic(protocol: GenesysUsbProtocol, model: FilmModel) -> Any:
     """Return the ASIC driver for ``model``."""
     asic = getattr(model, "asic", "")
     if asic == "GL128":
+        if getattr(model, "film_loader", False):
+            return Gl128Loader(protocol, model)  # type: ignore[arg-type]
         return Gl128(protocol, model)  # type: ignore[arg-type]
     if asic == "GL845":
         return Gl845(protocol, model)

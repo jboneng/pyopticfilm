@@ -46,10 +46,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from pyopticfilm.device.gl128_common import (
+    ALL_PPI,
     DUMMY_BY_DPI,
+    INIT_REGS,
     LADDER_LINCNT_BY_DPI,
+    LPERIOD_BY_DPI,
+    MEMORY_LAYOUT_REGS,
     PIXEL_CLOCK_BY_DPI,
     PIXEL_CLOCK_LONG_BY_DPI,
+    REGISTER_DPISET,
     SCAN_REGS,
     SHADING_LINESEL_BY_DPI,
     Gl128Common,
@@ -136,6 +141,19 @@ class Model8200iSE(Gl128Common):
     )
     dummy_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(DUMMY_BY_DPI))
     sensor_custom_regs: Mapping[int, int] = field(default_factory=lambda: dict(SCAN_REGS))
+    #: Session 02 cold boot / session 13 ladder: the same values as the 8100 V2
+    #: and 8300i SE (``docs/gl128-model-comparison.md`` §3), declared here
+    #: because the OpticFilm 135i has its own.
+    resolutions_dpi: tuple[int, ...] = ALL_PPI
+    register_dpiset_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(REGISTER_DPISET)
+    )
+    lperiod_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(LPERIOD_BY_DPI))
+    feed_steps_per_inch: int = 14400
+    init_regs: Mapping[int, int] = field(default_factory=lambda: dict(INIT_REGS))
+    memory_layout_regs: Mapping[int, int] = field(
+        default_factory=lambda: dict(MEMORY_LAYOUT_REGS)
+    )
     #: Clock written through ``0x8C`` to indices ``0x10`` and ``0x13``: once at
     #: boot, then boot value followed by scan value before every scan pass.
     #: ``0x0C`` for both in every SE capture (V2: ``0x0E``/``0x0C``,

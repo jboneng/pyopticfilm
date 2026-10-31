@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pyopticfilm.device.protocol import DEFAULT_GL845_MOTOR, MotorProfile
 
@@ -305,6 +305,12 @@ GL128_DIVERGENT_FIELDS: frozenset[str] = frozenset(
         "usb_image_lincnt_half_lines",
         "image_lincnt_per_line",
         "shading_linesel_by_dpi",
+        "resolutions_dpi",
+        "register_dpiset_by_dpi",
+        "lperiod_by_dpi",
+        "feed_steps_per_inch",
+        "init_regs",
+        "memory_layout_regs",
     }
 )
 
@@ -314,7 +320,6 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "vendor",
         "asic",
         "usb_vendor_id",
-        "resolutions_dpi",
         "bpp_gray",
         "bpp_color",
         "usb_image_depth",
@@ -344,8 +349,6 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "full_frame_output_inches",
         "y_oversampled",
         "stagger_y_by_dpi",
-        "register_dpiset_by_dpi",
-        "lperiod_by_dpi",
         "output_pixel_offset_by_dpi",
         "register_dpihw",
         "exposure_long",
@@ -361,7 +364,6 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "me_black_level",
         "motor_base_ydpi",
         "optical_resolution",
-        "feed_steps_per_inch",
         "max_feed_mm",
         "feed_to_reference_steps",
         "feed_to_scan_top_steps",
@@ -370,12 +372,25 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "scan_window_end_steps",
         "max_travel_end_steps",
         "motor_profile",
-        "init_regs",
         "frontend_regs",
         "gpo_regs",
-        "memory_layout_regs",
     }
 )
+
+#: Two 34-byte blobs the 8200i SE / 8100 V2 / 8300i SE Windows driver writes to
+#: ``0x000FFF00`` and ``0x000FFF01`` before the register blast. Their meaning
+#: is unknown; they are replayed byte-for-byte because boot on those models is
+#: not reproducible without them.
+BOOT_BLOBS: tuple[tuple[int, bytes], ...] = (
+    (0x000FFF00, bytes(34)),
+    (0x000FFF01, bytes(32) + bytes((0x33, 0x00))),
+)
+
+#: One step of a model's extra boot traffic between the DRAM strobe and the
+#: frontend init: ``("out", wValue, wIndex, data)`` sends a vendor control OUT,
+#: ``("in", wValue, wIndex, length)`` a vendor control IN (result unused), and
+#: ``("reg", address, value)`` a single register write.
+BootStep = tuple[Any, ...]
 
 
 def dataclass_field_names(cls: type[Any]) -> frozenset[str]:
@@ -391,11 +406,15 @@ class Gl128Common:
     classes add identity and the :data:`GL128_DIVERGENT_FIELDS` knobs.
     """
 
+    #: Flatbed film carriage (8200i SE / 8100 V2 / 8300i SE). A film-loader
+    #: leaf (OpticFilm 135i) sets this to ``True`` to select the loader ASIC
+    #: driver, session and geometry.
+    film_loader: ClassVar[bool] = False
+
     vendor: str = "PLUSTEK"
     asic: str = "GL128"
     usb_vendor_id: int = 0x07B3
 
-    resolutions_dpi: tuple[int, ...] = ALL_PPI
     bpp_gray: tuple[int, ...] = (16,)
     bpp_color: tuple[int, ...] = (16,)
     usb_image_depth: int = 16
@@ -436,11 +455,6 @@ class Gl128Common:
     stagger_y_by_dpi: Mapping[int, tuple[int, ...]] = field(
         default_factory=lambda: dict(STAGGER_BY_DPI)
     )
-    register_dpiset_by_dpi: Mapping[int, int] = field(
-        default_factory=lambda: dict(REGISTER_DPISET)
-    )
-    #: Full-frame ``LPERIOD`` by PPI (same on every model); see :meth:`line_period_for`.
-    lperiod_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(LPERIOD_BY_DPI))
     output_pixel_offset_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(OUTPUT_PIXEL_OFFSET)
     )
@@ -464,7 +478,6 @@ class Gl128Common:
     me_black_level: float = 0.0
     motor_base_ydpi: int = 7200
     optical_resolution: int = 7200
-    feed_steps_per_inch: int = 14400
     max_feed_mm: float = 50.0
     feed_to_reference_steps: int = 28292
     feed_to_scan_top_steps: int = 13128
@@ -477,18 +490,20 @@ class Gl128Common:
     #: sizing keeps :attr:`scan_window_end_steps`.
     max_travel_end_steps: int = 27648
     motor_profile: MotorProfile = DEFAULT_GL845_MOTOR
-    init_regs: Mapping[int, int] = field(default_factory=lambda: dict(INIT_REGS))
     frontend_regs: Mapping[int, int] = field(default_factory=lambda: dict(FRONTEND_REGS))
     gpo_regs: Mapping[int, int] = field(default_factory=lambda: dict(GPO_REGS))
-    memory_layout_regs: Mapping[int, int] = field(
-        default_factory=lambda: dict(MEMORY_LAYOUT_REGS)
-    )
 
     if TYPE_CHECKING:
         name: str
         model: str
         usb_product_id: int
         supports_infrared: bool
+        resolutions_dpi: tuple[int, ...]
+        register_dpiset_by_dpi: Mapping[int, int]
+        lperiod_by_dpi: Mapping[int, int]
+        feed_steps_per_inch: int
+        init_regs: Mapping[int, int]
+        memory_layout_regs: Mapping[int, int]
         feed_to_scan_steps: int
         max_image_lincnt_by_feed2: Mapping[int, int]
         ladder_feed2_steps: int
@@ -727,6 +742,34 @@ class Gl128Common:
         regs.update(self.memory_layout_regs)
         return regs
 
+    def boot_blobs(self) -> tuple[tuple[int, bytes], ...]:
+        """AHB writes sent before the register blast (:data:`BOOT_BLOBS`)."""
+        return BOOT_BLOBS
+
+    def boot_writes_layout_and_gpo(self) -> bool:
+        """Whether boot writes the memory layout block and the GPO block."""
+        return True
+
+    def boot_vendor_steps(self) -> tuple[BootStep, ...]:
+        """Extra boot traffic between the DRAM strobe and the frontend init."""
+        return ()
+
+    def boot_uploads_tables(self) -> bool:
+        """Whether ``init()`` uploads the motor slope and scan motor tables."""
+        return True
+
+    def firmware_register_overrides(self, firmware: str | None) -> dict[int, int]:
+        """Boot register changes for a unit reporting USB serial ``firmware``.
+
+        The vendor driver keeps two register sets for the 8200i SE / 8100 V2 /
+        8300i SE: ``VID_07b3&PID_xxxx-20241113`` (:data:`INIT_REGS`) and the
+        plain ``VID_07b3&PID_xxxx`` set, which differs only in ``0x36``.
+        ``None`` (serial not readable) keeps the boot map unchanged.
+        """
+        if firmware is None or firmware.strip() == GL128_FIRMWARE_CURRENT:
+            return {}
+        return {0x36: GL128_REG36_LEGACY_FIRMWARE}
+
 
 #: USB serial-number string (``iSerialNumber``) of current GL128 firmware. The
 #: vendor driver loads its ``VID_07b3&PID_xxxx-20241113`` register set for this
@@ -742,12 +785,14 @@ def gl128_firmware_variant(model: Any, firmware: str | None) -> Any:
     """Return ``model`` with the vendor's per-firmware ``0x36`` for this unit.
 
     ``firmware`` is the USB serial-number string. ``None`` (not readable) keeps
-    the model unchanged; non-GL128 models are always returned unchanged.
+    the model unchanged; non-GL128 models are always returned unchanged. The
+    per-model rule is :meth:`Gl128Common.firmware_register_overrides`.
     """
-    if not isinstance(model, Gl128Common) or firmware is None:
+    if not isinstance(model, Gl128Common):
         return model
-    if firmware.strip() == GL128_FIRMWARE_CURRENT:
+    overrides = model.firmware_register_overrides(firmware)
+    if not overrides:
         return model
     regs = dict(model.init_regs)
-    regs[0x36] = GL128_REG36_LEGACY_FIRMWARE
+    regs.update(overrides)
     return replace(model, init_regs=regs)

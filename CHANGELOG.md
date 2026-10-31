@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **OpticFilm 135i** (`07b3:1436`, GL128) model, `Model135i` / `MODEL_135I`, not scan-ready. The 135i is a motorised film loader that scans RGB and IR in one pass. The leaf carries what its VueScan captures and the Plustek model data for this scanner show:
+  - **Boot:** its own boot register map, clocks and GPIO requests. `init()` replays the captured open sequence.
+  - **Motor:** tables generated from the model's motor curve, which reproduce every captured table word for word.
+  - **Per-resolution settings:** the two sensor timing sets, the RGB+IR (toggle) and colour scan overlays, and the window and line-period rules.
+  - **Loader:** the holder sensor, load, eject and frame-feed constants.
+  - **Session:** `Gl128Loader` and `Gl128LoaderScanSession` drive the loader and RGB+IR toggle mode, replaying the VueScan programs:
+    - `Scanner.holder_present()`, `load_holder()` and `eject_holder()` (in the vendor's order, seeking back first when the holder is off the loader home), and `home()` as the vendor's home: one inch in, then the reverse seek only once the loader sensor has cleared;
+    - `scan(frame=n)` feeds to 35 mm frame `n` of the loaded holder; `area` is normalised over that frame's slot;
+    - `scan(frame=None)` scans the whole strip in one pass, as VueScan's panorama preview does (feed 6414, 66600 steps);
+    - every pass scans a visible and an IR line per output line, so `scan(infrared=True)` returns RGB and IR from one pass, registered to the same line;
+    - calibration at the loader home fills a visible and an IR shading bank, and `calibrate(mode="infrared")` runs the same calibration as `"color"`;
+    - multi-exposure and Multi-Pass work as on the flatbed GL128 models (not at 7200 dpi), one feed per pass; the long exposure is filled in, since there is no 135i multi-exposure capture;
+    - `Scanner.watch_loader(stop=...)` polls the holder sensor and eject button like VueScan, loading on insert and ejecting on the button.
+
+    `Scanner.open_fake(MODEL_135I)` runs all of it against the new `MockFilmLoaderTransport`, and Scan Lab's MOCK mode has Frame, Whole strip, Load holder and Eject holder controls. On real USB, Scan Lab's **Override safety HW gate** also arms the 135i loader motor for bring-up. Setup goldens: `tests/traces/python/135i/`.
+
+  The model stays `scan_ready=False`: on real hardware `scan()`, `calibrate()`, `home()`, `park()`, `load_holder()` and `eject_holder()` stay locked unless the motor is armed for bring-up (`Scanner.arm_bringup_motor()`). Nothing here has run on 135i hardware yet. Details: `docs/gl128-model-comparison.md` §11.
 - **Fixed multi-exposure** (GL128: 8200i SE, 8100 V2, 8300i SE). `scan(multi_exposure=True, me_long_mode="fixed")` scans the long pass at one exposure per model on every frame, as SilverFast does, instead of metering the short pass: 42000 (3× short) on the 8200i SE and 8100 V2, 60000 (4× short) on the 8300i SE, the value in that model's SilverFast ME captures. The value is the new model field `me_fixed_long_exposure` and still goes through the normal long clamp (14000–85000). Everything after the long pass is unchanged, and `last_me_debug.exposure_reason` reads `"fixed"`. The default stays `"adaptive"`; a manual `me_long_exposure` still wins. Scan Lab has a **Fixed ME long (SilverFast-style)** toggle, and its CLI takes `--me-long-mode fixed`.
   - **Hardware.** Not yet run on hardware in this mode. 42000 is the long exposure the adaptive path already uses as its floor on the 8200i SE and 8100 V2; 60000 on the 8300i SE comes from its SilverFast captures and is inside the clamp the adaptive path already scans with.
 - Add a sequential color + infrared scan path for IR-capable GL845 models. Covered by mock-scanner tests and supervised full-frame colour + IR runs on a 7600i v2 at 900, 1800 and 3600 dpi. The 8200i shares the path, but it has not run on that model, which stays gated.
@@ -137,6 +154,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - from `pyopticfilm.scan.calib_gl128`: `adaptive_afe_white_target`, `AFE_WHITE_TARGET_SF` / `_MIN` / `_MAX`, `AFE_OFFSET_MIN`, `AFE_GAIN_COARSE_DIVISOR` and `COLOR_AFE_SESSION04_OFFSETS`;
   - from `pyopticfilm.asic.gl128`: `IR_AFE_FALLBACK_GAINS`, `IR_AFE_FALLBACK_OFFSETS` and `IR_AFE_HEALTHY_MEAN`.
 - `search_afe_codes` and `AfeSearchConfig` remain for GL845.
+- GL128 family for the 135i:
+  - Six fields move from `Gl128Common` to the per-leaf divergent catalog, each declared on every leaf: `resolutions_dpi`, `register_dpiset_by_dpi`, `lperiod_by_dpi`, `feed_steps_per_inch`, `init_regs`, `memory_layout_regs`. The 8200i SE, 8100 V2 and 8300i SE keep their values.
+  - `Gl128.asic_boot()` / `init()` read new `Gl128Common` hooks: `boot_blobs()`, `boot_writes_layout_and_gpo()`, `boot_vendor_steps()`, `boot_uploads_tables()`.
+  - `gl128_firmware_variant()` now delegates to `firmware_register_overrides()`.
+  - New `GenesysUsbProtocol.write_vendor()` / `read_vendor()`.
+  - `MockScannerTransport` accepts GPIO (`0x8A`/`0x8B`) requests; `FakeUsbTransport` has an `interrupt_queue` read by `read_intr()`.
+  - New class flag `Gl128Common.film_loader` (`False`; `True` on `Model135i`) selects `pyopticfilm.asic.gl128_loader.Gl128Loader` in `create_asic`, `pyopticfilm.scan.session_gl128_loader.Gl128LoaderScanSession` in `create_session`, and the frame-slot geometry in `compute_geometry`.
+  - `Gl128ScanSession._bulk_index(geometry, *, first)` picks each image chunk's `wIndex`; the flatbed models are unchanged.
+  - `Scanner.scan(..., frame=0)`: any `frame` other than 0 raises `ValueError` on models without a film loader.
+  - `clamp_me_long()` uses a model's `me_long_exposure_cap(resolution)` when it has one (135i); the flatbed models keep `64000 · oversample`.
 - `Gl128Common.line_period_for(resolution, *, span=None)` takes the window span (`END − STR`, native pixels) and defaults to SilverFast's full frame. New in `pyopticfilm.device.gl128_common`: `lperiod_for_window`, `lperiod_for_line`, `LPERIOD_BASE` and `FULL_FRAME_SPAN_NATIVE`. `lperiod_by_dpi` is now one shared full-frame table on `Gl128Common`, no longer declared per model.
 - `Gl128.position_for_full_frame_scan(..., scan_regs=None)` takes the image pass's register set; both feeds then run under it. Without it the fixed feed recipe is used.
 - `Gl128Common.shading_strip_clocks(resolution, *, dvdset, span=None)` takes the strip window span and defaults to SilverFast's full frame. New in `pyopticfilm.device.gl128_common`: `shading_clocks_for_window`. Removed: the `shading_dark_dummy_by_dpi` / `shading_dark_pixel_clock_a_by_dpi` / `shading_dark_pixel_clock_b_by_dpi` fields and the `SHADING_DARK_*_BY_DPI` tables.

@@ -27,7 +27,7 @@ from pyopticfilm.scan.calibrate import CalibEntry, Calibrator, default_cache_pat
 from pyopticfilm.scan.exposure_override import validate_manual_exposure, validate_n_passes
 from pyopticfilm.scan.me_exposure import validate_me_long_mode
 from pyopticfilm.usb.device import UsbDeviceHandle
-from pyopticfilm.usb.fake import FakeDeviceHandle, MockScannerTransport
+from pyopticfilm.usb.fake import FakeDeviceHandle, MockFilmLoaderTransport, MockScannerTransport
 from pyopticfilm.usb.protocol import GenesysUsbProtocol, UsbTransport
 
 logger = get_logger(__name__)
@@ -117,7 +117,12 @@ class Scanner:
         if inner is None:
             from pyopticfilm.usb.fake_gl843_v1 import SimulatedGl843V1Transport
 
-            inner = SimulatedGl843V1Transport() if isinstance(model, Model7600iV1) else MockScannerTransport()
+            if isinstance(model, Model7600iV1):
+                inner = SimulatedGl843V1Transport()
+            elif getattr(model, "film_loader", False):
+                inner = MockFilmLoaderTransport()
+            else:
+                inner = MockScannerTransport()
         handle = FakeDeviceHandle.for_model(model)
         protocol = GenesysUsbProtocol(inner)
         scanner = cls(handle, protocol, model=model, calib_cache=calib_cache)
@@ -232,11 +237,16 @@ class Scanner:
         IR calibration every IR scan runs before its IR pass (IR AFE + IR white
         strip) and returns it without caching it; it raises
         :class:`~pyopticfilm.exceptions.CalibrationError` when rejected.
+
+        Film-loader models (OpticFilm 135i) calibrate visible and IR together,
+        so ``mode="infrared"`` runs the same calibration as ``"color"``.
         """
         self._ensure_scan_ready()
         self._ensure_open()
         if isinstance(self._model, Model7600iV1):
             raise NotImplementedError(f"{self._model.model} calibrates within each scan")
+        if getattr(self._model, "film_loader", False) and mode == "infrared":
+            mode = "color"
         if not self._asic._initialized:
             self._asic.init()
             if not self._asic.is_at_home():
@@ -292,7 +302,19 @@ class Scanner:
         me_long_exposure: int | None = None,
         me_long_mode: MeLongMode = "adaptive",
         n_passes: int = 1,
+        frame: int | None = 0,
     ) -> ScanImage:
+        """Scan one image.
+
+        ``frame`` (0-based) picks the 35 mm frame of a loaded holder on
+        film-loader models (OpticFilm 135i); ``area`` is then normalised over
+        that frame's slot. ``frame=None`` scans the whole strip (panorama),
+        with ``area`` normalised over the strip. Other models accept only
+        ``frame=0``.
+        """
+        loader = bool(getattr(self._model, "film_loader", False))
+        if not loader and frame != 0:
+            raise ValueError(f"{self._model.model} has no film loader: frame must be 0")
         # Fail fast on bad manual-exposure input before touching the ASIC.
         validate_manual_exposure(single_pass_exposure, label="single_pass_exposure")
         validate_manual_exposure(me_short_exposure, label="me_short_exposure")
@@ -333,6 +355,8 @@ class Scanner:
             "me_long_mode": me_long_mode,
             "n_passes": n_passes,
         }
+        if loader:
+            run_kwargs["frame"] = None if frame is None else int(frame)
         if on_status is not None:
             on_status("scanning")
         session = create_session(self._asic, self._model, self._calibrator)
@@ -341,6 +365,77 @@ class Scanner:
         self._last_multi_pass_debug = getattr(session, "last_multi_pass_debug", None)
         self._last_align_shift_ir = getattr(session, "last_align_shift_ir", None)
         return image
+
+    def holder_present(self) -> bool:
+        """Film-loader models: True while a film holder is in the loader."""
+        self._ensure_open()
+        return bool(self._loader().holder_present())
+
+    def load_holder(self, *, timeout_s: float = 60.0) -> None:
+        """Film-loader models: pull an inserted holder in and park it at the loader home."""
+        self._ensure_scan_ready()
+        self._ensure_open()
+        self._loader().load_holder(timeout_s=timeout_s)
+
+    def eject_holder(self, *, timeout_s: float = 30.0) -> None:
+        """Film-loader models: push the film holder out of the loader."""
+        self._ensure_scan_ready()
+        self._ensure_open()
+        self._loader().eject_holder(timeout_s=timeout_s)
+
+    def watch_loader(
+        self,
+        *,
+        stop: threading.Event,
+        on_event: Callable[[str], None] | None = None,
+        auto_load: bool = True,
+        auto_eject: bool = True,
+        interval_s: float = 0.19,
+    ) -> None:
+        """Film-loader models: poll the loader until ``stop`` is set, as VueScan does.
+
+        Every ``interval_s`` (VueScan: about 190 ms) the holder sensor and the
+        interrupt endpoint are sampled. Events passed to ``on_event``:
+        ``"inserted"``, ``"removed"``, ``"eject"`` (the eject button), and,
+        with ``auto_load`` / ``auto_eject``, ``"loaded"`` / ``"load_failed"``
+        and ``"ejected"`` / ``"eject_failed"`` after the move. Run it on its
+        own thread and stop it before scanning: it uses the same USB handle.
+        """
+        self._ensure_open()
+        asic = self._loader()
+        if not asic._initialized:
+            asic.init()
+        asic._holder_seen = None
+
+        def emit(event: str) -> None:
+            logger.info("loader event: %s", event)
+            if on_event is not None:
+                on_event(event)
+
+        while not stop.is_set():
+            event = asic.poll_loader()
+            if event is not None:
+                emit(event)
+            if event == "inserted" and auto_load:
+                try:
+                    self.load_holder()
+                    emit("loaded")
+                except (AsicError, PlustekError) as exc:
+                    logger.warning("loader auto-load failed: %s", exc)
+                    emit("load_failed")
+            elif event == "eject" and auto_eject:
+                try:
+                    self.eject_holder()
+                    emit("ejected")
+                except (AsicError, PlustekError) as exc:
+                    logger.warning("loader auto-eject failed: %s", exc)
+                    emit("eject_failed")
+            stop.wait(interval_s)
+
+    def _loader(self) -> Any:
+        if not getattr(self._model, "film_loader", False):
+            raise PlustekError(f"{self._model.model} has no film loader")
+        return self._asic
 
     def arm_bringup_motor(self) -> None:
         """Enable GL128 motor moves (default on for scan-ready GL128).

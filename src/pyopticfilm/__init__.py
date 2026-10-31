@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pyopticfilm._version import __version__
+from pyopticfilm.device.model_135i import MODEL_135I, Model135i
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2, Model8100V2
 from pyopticfilm.device.model_8200i import MODEL_8200I, Model8200i
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE, Model8200iSE
@@ -27,6 +28,7 @@ from pyopticfilm.scanner import Scanner, ScanStatus
 
 __all__ = [
     "KNOWN_MODELS",
+    "MODEL_135I",
     "MODEL_8100_V2",
     "MODEL_8200I",
     "MODEL_8200I_SE",
@@ -35,6 +37,7 @@ __all__ = [
     "CalibrationError",
     "DeviceNotFoundError",
     "DriverBindingError",
+    "Model135i",
     "Model8100V2",
     "Model8200i",
     "Model8200iSE",

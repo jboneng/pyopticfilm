@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from pyopticfilm.device.model_135i import MODEL_135I
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
@@ -29,6 +30,9 @@ _CASES = (
     ("8300i_se", MODEL_8300I_SE, 1200),
     ("8300i_se", MODEL_8300I_SE, 1800),
     ("8300i_se", MODEL_8300I_SE, 7200),
+    ("135i", MODEL_135I, 600),
+    ("135i", MODEL_135I, 1200),
+    ("135i", MODEL_135I, 7200),
 )
 
 

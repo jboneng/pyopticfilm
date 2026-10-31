@@ -77,8 +77,13 @@ def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
     """
     lo = int(model.me_long_clamp_min)
     hi = int(model.me_long_clamp_max)
-    oversample = max(1, int(model.oversample_for(resolution)))
-    hi = min(hi, _ME_CHANNEL_EXPOSURE_MAX * oversample)
+    cap_fn = getattr(model, "me_long_exposure_cap", None)
+    if callable(cap_fn):
+        # Models whose scan motor word is not ``exposure / oversample`` (135i).
+        hi = min(hi, int(cap_fn(resolution)))
+    else:
+        oversample = max(1, int(model.oversample_for(resolution)))
+        hi = min(hi, _ME_CHANNEL_EXPOSURE_MAX * oversample)
     return min(max(int(exp_long), lo), hi)
 
 
@@ -960,6 +965,12 @@ class Gl128ScanSession(ScanSession):
             return full_lines * line
         return min(line, remaining)
 
+    def _bulk_index(self, geometry: ScanGeometry, *, first: bool) -> int:
+        """``wIndex`` of a chunk announce: RAM for calibration, the image stream otherwise."""
+        del first
+        r = self.se_regs
+        return r.BULK_INDEX_RAM if geometry.disable_buffer_full_move else r.BULK_INDEX_IMAGE
+
     def _acquire(
         self,
         geometry: ScanGeometry,
@@ -971,14 +982,8 @@ class Gl128ScanSession(ScanSession):
         del wait_feed  # GL128 feeds synchronously in _configure
         self._wait_data(cancel)
 
-        r = self.se_regs
         proto = self.asic.protocol
         total = geometry.total_bytes
-        index = (
-            r.BULK_INDEX_RAM
-            if geometry.disable_buffer_full_move
-            else r.BULK_INDEX_IMAGE
-        )
 
         chunk_max = max(1, int(getattr(self.model, "image_read_chunk_bytes", IMAGE_CHUNK_BYTES)))
         read_exact = (
@@ -1001,7 +1006,7 @@ class Gl128ScanSession(ScanSession):
                 remaining = total - got
                 want = self._chunk_bytes(geometry, remaining, chunk_max)
                 p0 = time.perf_counter()
-                proto.bulk_read_begin(want, index=index)
+                proto.bulk_read_begin(want, index=self._bulk_index(geometry, first=got == 0))
                 self._bulk_stream_active = True
                 try:
                     chunk = read_exact(want)

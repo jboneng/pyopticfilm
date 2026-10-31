@@ -33,6 +33,7 @@ from tools.scanlab.backend import (
     device_banner,
     format_crop_status,
     format_scan_window_note,
+    is_film_loader,
     lab_crop_scan_meta,
     lab_scan_kwargs,
     lab_scan_needs_motor_warning,
@@ -138,6 +139,39 @@ class ScanLabWindow(QMainWindow):
         form.addWidget(QLabel("PPI"))
         self.ppi = QComboBox()
         form.addWidget(self.ppi)
+
+        # Film-loader controls (OpticFilm 135i); hidden for flatbed models.
+        self.loader_box = QWidget()
+        loader_layout = QVBoxLayout(self.loader_box)
+        loader_layout.setContentsMargins(0, 0, 0, 0)
+        frame_row = QHBoxLayout()
+        frame_row.addWidget(QLabel("Frame"))
+        self.frame = QSpinBox()
+        self.frame.setRange(0, 5)
+        self.frame.setToolTip(
+            "35 mm frame of the loaded holder (0 = first). Prescan and Scan "
+            "feed to this frame; a crop is drawn inside its frame slot."
+        )
+        frame_row.addWidget(self.frame)
+        loader_layout.addLayout(frame_row)
+        self.whole_strip = QCheckBox("Whole strip (panorama)")
+        self.whole_strip.setToolTip(
+            "Prescan / Scan the whole film strip in one pass, as VueScan's panorama "
+            "preview does (feed 6414, 66600 steps). A crop is then drawn on the strip."
+        )
+        self.whole_strip.toggled.connect(lambda on: self.frame.setEnabled(not on))
+        loader_layout.addWidget(self.whole_strip)
+        holder_row = QHBoxLayout()
+        self.btn_load_holder = QPushButton("Load holder")
+        self.btn_load_holder.setToolTip("Pull an inserted film holder in and park it at the loader home.")
+        self.btn_load_holder.clicked.connect(lambda: self._on_holder("load"))
+        self.btn_eject_holder = QPushButton("Eject holder")
+        self.btn_eject_holder.clicked.connect(lambda: self._on_holder("eject"))
+        holder_row.addWidget(self.btn_load_holder)
+        holder_row.addWidget(self.btn_eject_holder)
+        loader_layout.addLayout(holder_row)
+        self.loader_box.setVisible(False)
+        form.addWidget(self.loader_box)
 
         self.ir_pass = QCheckBox("IR pass (second scan)")
         self.ir_pass.toggled.connect(self._on_ir_pass_toggled)
@@ -320,6 +354,7 @@ class ScanLabWindow(QMainWindow):
         self._worker.failed.connect(self._on_failed)
         self._worker.busy_changed.connect(self._on_busy)
         self._worker.calib_cleared.connect(self._on_calib_cleared)
+        self._worker.holder_done.connect(self.statusBar().showMessage)
 
         self._worker.forensic_line.connect(self.forensic_tab.append_timeline_line)
         self._worker.forensic_status_ready.connect(self.forensic_tab.set_status)
@@ -387,6 +422,9 @@ class ScanLabWindow(QMainWindow):
         self.ir_pass.setEnabled(bool(getattr(target.model, "supports_infrared", False)))
         if not self.ir_pass.isEnabled():
             self.ir_pass.setChecked(False)
+        loader = is_film_loader(target.model)
+        self.loader_box.setVisible(loader)
+        self.ir_pass.setText("IR (same pass)" if loader else "IR pass (second scan)")
         is_gl128 = getattr(target.model, "asic", "") == "GL128"
         was_connected = getattr(self.forensic_tab, "_is_connected", False)
         self._worker.close_scanner()
@@ -677,6 +715,8 @@ class ScanLabWindow(QMainWindow):
                 "This unlocks unverified scan/home/park pipelines against real "
                 "hardware. Motors and the lamp can move on models that are not "
                 "hardware-validated (scan_ready stays False).\n\n"
+                "On the OpticFilm 135i this also arms the loader motor: Load "
+                "holder, Eject holder, Prescan and Scan move the film holder.\n\n"
                 "Keep a hand near the power switch. Continue only if you intend "
                 "to run bring-up on a connected OpticFilm.",
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
@@ -974,7 +1014,25 @@ class ScanLabWindow(QMainWindow):
         self._worker.request_prescan.emit(
             target,
             self.apply_calib.isChecked(),
+            -1 if self._frame_value(target) is None else self._frame_value(target),
         )
+
+    def _frame_value(self, target: LabTarget) -> int | None:
+        """Frame for the next pass: ``None`` = whole strip (film loaders only)."""
+        if not is_film_loader(target.model):
+            return 0
+        return None if self.whole_strip.isChecked() else int(self.frame.value())
+
+    def _on_holder(self, action: str) -> None:
+        target = self._resolved_target()
+        if target is None:
+            return
+        self.statusBar().showMessage("Loading holder…" if action == "load" else "Ejecting holder…")
+        self._worker.request_forensic_mark_phase.emit(
+            f"BUTTON: {action} holder clicked",
+            {"model": target.model.model, "mock": target.mock},
+        )
+        self._worker.request_holder.emit(target, action)
 
     def _on_scan(self) -> None:
         target = self._resolved_target()
@@ -1037,7 +1095,9 @@ class ScanLabWindow(QMainWindow):
                 "override_hw_gate": self.override_hw_gate.isChecked(),
             },
         )
-        scan_kw = lab_scan_kwargs(target.model, dpi=dpi, kind="scan", crop_norm=crop)
+        scan_kw = lab_scan_kwargs(
+            target.model, dpi=dpi, kind="scan", crop_norm=crop, frame=self._frame_value(target)
+        )
         self._worker.request_scan.emit(
             ScanRequest(
                 target=target,
@@ -1264,6 +1324,10 @@ class ScanLabWindow(QMainWindow):
         self.usb_planar.setEnabled(not busy)
         self.slow_image_slope.setEnabled(not busy)
         self.btn_open_capture.setEnabled(not busy)
+        self.frame.setEnabled(not busy and not self.whole_strip.isChecked())
+        self.whole_strip.setEnabled(not busy)
+        self.btn_load_holder.setEnabled(not busy)
+        self.btn_eject_holder.setEnabled(not busy)
         self.forensic_tab.set_busy(busy)
         self.forensic_tab.setEnabled(not busy)
 

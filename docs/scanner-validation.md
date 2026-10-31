@@ -314,12 +314,24 @@ The 8100 V2 and 8300i SE are capture-derived siblings of the 8200i SE (shared
 `Gl128Common` tables). They do not subclass the SE model class. The 8300i SE
 has IR and is hardware-tested (`scan_ready=True`).
 
+The OpticFilm 135i (`07b3:1436`) is a fourth GL128 leaf, `scan_ready=False`.
+Its boot is checked against the VueScan `vuescan open` capture, and its motor
+tables and per-resolution registers against the captured passes, in
+`tests/test_135i_model.py`. Its film loader and RGB+IR toggle mode run in
+`Gl128Loader` / `Gl128LoaderScanSession`; `tests/test_135i_session.py` checks
+the load, eject, calibration strips, shading banks, frame feeds, image pass
+and end-of-pass writes against the captures over `MockFilmLoaderTransport`,
+which `Scanner.open_fake` uses for this model
+(`docs/gl128-model-comparison.md` §11.8).
+
 CI goldens for ASIC `init()` + `Gl128ScanSession._configure()` (motors gated)
 live at:
 
 - `tests/traces/python/8200i_se/{1200,1800,7200}_rgb16_setup.json`
 - `tests/traces/python/8100_v2/{1200,1800,7200}_rgb16_setup.json`
 - `tests/traces/python/8300i_se/{1200,1800,7200}_rgb16_setup.json`
+- `tests/traces/python/135i/{600,1200,7200}_rgb16_setup.json` (the captured
+  resolutions; loader session over `MockFilmLoaderTransport`)
 
 Regenerate after an intentional GL128 setup-register change:
 

@@ -98,6 +98,25 @@ def test_apply_lab_hw_override_real_only():
     real_unlocked = with_hw_override(real_locked, True)
     apply_lab_hw_override(scanner, real_unlocked)
     assert scanner._allow_unvalidated_scan is True
+    # Flatbed GL128 / other models: the override never arms motor moves.
+    scanner.arm_bringup_motor.assert_not_called()
+
+
+def test_apply_lab_hw_override_arms_film_loader_motor():
+    from pyopticfilm.device.model_135i import MODEL_135I
+
+    scanner = MagicMock()
+    scanner._allow_unvalidated_scan = False
+    locked = with_mock_mode(LabTarget(label="r", model=MODEL_135I, device_id="id"), False)
+    apply_lab_hw_override(scanner, locked)
+    scanner.arm_bringup_motor.assert_not_called()
+    apply_lab_hw_override(scanner, with_mock_mode(with_hw_override(locked, True), True))
+    scanner.arm_bringup_motor.assert_not_called()
+
+    apply_lab_hw_override(scanner, with_hw_override(locked, True))
+    assert scanner._allow_unvalidated_scan is True
+    scanner.arm_bringup_motor.assert_called_once_with()
+    assert "loader motor ARMED" in device_banner(with_hw_override(locked, True))
 
 
 def test_apply_lab_decode_layout_sets_planar():
@@ -246,3 +265,39 @@ def test_resolve_ir_pass_unchecked_leaves_n_passes_untouched():
     assert resolve_ir_pass_and_n_passes(
         ir_pass_checked=False, n_passes=5, changed="ir_pass"
     ) == (False, 5)
+
+
+def test_film_loader_lab_kwargs_and_mock(tmp_path, monkeypatch):
+    from pyopticfilm.device.model_135i import MODEL_135I
+    from pyopticfilm.usb.fake import MockFilmLoaderTransport
+    from tools.scanlab.backend import (
+        LabTarget,
+        is_film_loader,
+        lab_crop_scan_meta,
+        lab_scan_kwargs,
+        multi_pass_allowed_at,
+        open_lab_scanner,
+    )
+
+    assert is_film_loader(MODEL_135I) and not is_film_loader(MODEL_8200I_SE)
+    # Prescan: the whole frame slot of the chosen frame; no flatbed bring-up geometry.
+    assert lab_scan_kwargs(MODEL_135I, dpi=1200, kind="prescan", crop_norm=None, frame=2) == {
+        "resolution": 1200,
+        "area": None,
+        "frame": 2,
+    }
+    # Scan crop: display X is mirrored back to the slot.
+    kw = lab_scan_kwargs(MODEL_135I, dpi=1200, kind="scan", crop_norm=(0.0, 0.2, 0.25, 0.6))
+    assert kw["area"] == pytest.approx((0.75, 0.2, 1.0, 0.6))
+    assert lab_crop_scan_meta(MODEL_135I, dpi=1200, crop_norm=(0.0, 0.2, 0.25, 0.6)) is None
+    assert lab_scan_kwargs(MODEL_135I, dpi=600, kind="prescan", crop_norm=None, frame=None)["frame"] is None
+    assert multi_pass_allowed_at(MODEL_135I, 1200) is True
+    assert multi_pass_allowed_at(MODEL_135I, 7200) is False
+
+    monkeypatch.setattr("pyopticfilm.scanner.default_cache_path", lambda: tmp_path / "calib.json")
+    scanner, rec = open_lab_scanner(LabTarget(label="135i", model=MODEL_135I))
+    try:
+        assert isinstance(rec.inner, MockFilmLoaderTransport)
+        assert scanner.holder_present()
+    finally:
+        scanner.close()
