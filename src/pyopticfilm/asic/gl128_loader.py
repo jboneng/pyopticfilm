@@ -549,7 +549,9 @@ class Gl128Loader(Gl128):
 
         Normally :meth:`_feed_in_then_seek_home`. After a lost park the holder
         may sit at the end of a strip, where another inch would pass the
-        captured travel, so it seeks straight back.
+        captured travel, so it seeks straight back. With a good park flag this
+        still feeds that inch: for a holder deep in the strip use
+        :meth:`eject_holder`.
         """
         del wait
         self._require_motor_enabled()
