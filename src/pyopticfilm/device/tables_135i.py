@@ -183,10 +183,13 @@ LOADER_TRAVEL_STEPS = PANORAMA_FEED_STEPS + 5609 * 12
 #: the whole travel, and the armed sensor still ends the seek.
 LOADER_RECOVERY_SEEK_STEPS = LOADER_TRAVEL_STEPS + 510
 #: ``LoaderHomeSensorReg = 0x32,0x02,0``: an output that selects what
-#: ``HOMESNR`` (``0x101`` bit 3) reads. Cleared, the loader stop is armed and
-#: ``HOMESNR`` reads a narrow band around the loaded position; set, it reads
-#: "holder in the slot". The load clears it (``insert 35mm carrier``: ``0x32``
-#: ``07`` -> ``05``); the init table sets it (``0x1F``).
+#: ``HOMESNR`` (``0x101`` bit 3) reads. Set, it reads "holder in the slot".
+#: Cleared, the loader stop is armed and ``HOMESNR`` reads 0 for a holder
+#: inward of the loaded position and 1 otherwise, including an empty slot and
+#: a holder at the entry or ejected (135i run: ``0x32`` / ``0x101`` ``03/d0``
+#: empty, ``07/d8`` at the entry, ``05/d8`` loaded, ``1f/f8`` ejected). The load
+#: clears it (``insert 35mm carrier``: ``0x32`` ``07`` -> ``05``); the init
+#: table sets it (``0x1F``).
 LOADER_HOME_SENSOR_BIT = 0x02
 #: ``0x09`` bit set while the holder is ejected (``holder eject``: ``09=08``
 #: before the feed, ``09=00`` after it).

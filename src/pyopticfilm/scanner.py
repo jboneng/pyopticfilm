@@ -368,6 +368,11 @@ class Scanner:
         self._last_align_shift_ir = getattr(session, "last_align_shift_ir", None)
         return image
 
+    def holder_loaded(self) -> bool:
+        """Film-loader models: True once a holder is loaded, until an eject or a lost park."""
+        self._ensure_open()
+        return bool(self._loader().holder_loaded())
+
     def holder_present(self) -> bool:
         """Film-loader models: True while a film holder is in the loader."""
         self._ensure_open()

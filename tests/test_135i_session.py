@@ -20,11 +20,13 @@ from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.select import create_asic
 from pyopticfilm.device.tables_135i import SLOPE_TABLE_FEED, SLOPE_TABLE_LOADER, scan_motor_table
 from pyopticfilm.exceptions import AsicError, MotorTimeoutError, ScanError
-from pyopticfilm.scan.calib_gl128 import unpack_shading_table
+from pyopticfilm.scan.calib_gl128 import coarse_gains_from_wide_means, unpack_shading_table
 from pyopticfilm.scan.calib_gl128_loader import (
+    AFE_LINE_GAIN,
     AHB_SHADING_IR,
     AHB_SHADING_VISIBLE,
     SHADING_GAIN_UNITY,
+    lit_channel_peaks,
     split_toggle_lines,
 )
 from pyopticfilm.scan.geometry import compute_geometry
@@ -281,6 +283,45 @@ def test_warmup_does_not_home(scanner, rec):
     rec.starts.clear()
     scanner.warmup(lamp=False)
     assert rec.starts == []
+
+
+def test_scan_needs_a_load_even_when_the_sensor_reads_home(scanner, rec):
+    # Armed, HOMESNR reads 1 for a holder at the entry or ejected (135i run).
+    rec.starts.clear()
+    assert scanner.holder_present() and scanner.asic.is_at_home() and not scanner.holder_loaded()
+    with pytest.raises(ScanError, match="not loaded"):
+        scanner.scan(resolution=600)
+    with pytest.raises(ScanError, match="not loaded"):
+        scanner.calibrate(resolution=600)
+    assert rec.starts == []
+
+
+def test_holder_loaded_lasts_from_the_load_to_the_eject(scanner, rec):
+    scanner.load_holder()
+    assert scanner.holder_loaded()
+    scanner.eject_holder()
+    assert not scanner.holder_loaded()
+    rec.at_home = True  # armed, an ejected holder reads 1 (135i run)
+    with pytest.raises(ScanError, match="not loaded"):
+        scanner.scan(resolution=600)
+
+
+def test_init_removal_and_a_lost_park_clear_holder_loaded(scanner, rec):
+    asic = scanner.asic
+    scanner.load_holder()
+    asic.init(force=True)
+    assert not scanner.holder_loaded()
+
+    scanner.load_holder()
+    asic._park_ok = False
+    assert not scanner.holder_loaded()
+    asic._park_ok = True
+
+    assert scanner.holder_loaded()
+    asic.poll_loader()
+    rec.holder_present = False
+    assert asic.poll_loader() == "removed"
+    assert not scanner.holder_loaded()
 
 
 def test_home_without_holder_does_not_move(scanner, rec):
@@ -545,6 +586,20 @@ def test_multi_exposure_runs_two_fed_passes(scanner, rec):
     assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(14000, 11000), (42000, 33000)]
     assert scanner.last_me_debug.exposure_long == 42000
     assert img.rgb.shape == (896, 864, 3) and img.ir.shape == (896, 864)
+
+
+def test_afe_gains_come_from_the_visible_line_peaks():
+    pixels = 512
+    strip = np.zeros((2, pixels, 3), dtype="<u2")
+    strip[0] = 60000  # IR line, ignored
+    strip[1, :, :] = (20000, 25000, 22000)
+    strip[1, 100:104, :] = (25700, 32300, 27240)  # four-pixel peak
+    strip[1, 200, :] = 40000  # one hot pixel, averaged away
+    strip[1, -20:, :] = 65535  # the wrapped end of a strip
+    peaks = lit_channel_peaks(strip.tobytes(), pixels=pixels)
+    assert peaks == (25700.0, 32300.0, 27240.0)
+    # QuickScan's codes from peaks of this size.
+    assert coarse_gains_from_wide_means(peaks, targets=(AFE_LINE_GAIN,) * 3) == (40, 31, 38)
 
 
 def test_multi_pass_repeats_the_frame(scanner, rec):

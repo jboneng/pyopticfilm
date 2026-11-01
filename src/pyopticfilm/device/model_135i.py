@@ -50,8 +50,8 @@ and the Plustek model INI for this scanner (:mod:`pyopticfilm.device.tables_135i
 
 **Loader**
     Holder in the slot: ``HOMESNR`` with ``0x32`` bit 1 set. ``0x32`` bit 1
-    selects what ``HOMESNR`` reads (clear: loaded position, set: holder in
-    the slot). Load and home = 1 inch forward, then a reverse seek of up to
+    selects what ``HOMESNR`` reads (set: holder in the slot; clear: 0 for a
+    holder inward of the loaded position). Load and home = 1 inch forward, then a reverse seek of up to
     10 inches to the loader sensor; eject = 3600 steps on interrupt byte
     ``0x48``. Frames sit 10752 steps apart from
     6438; the panorama (whole strip) starts at 6414 and is 66600 steps tall. The flatbed carriage fields inherited from :class:`Gl128Common`

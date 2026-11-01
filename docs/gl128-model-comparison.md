@@ -970,7 +970,7 @@ both banks exactly). The IR line arrives as three channels; which channel
 | Event | Registers | Evidence |
 |---|---|---|
 | Holder in | GPIO `0x32` bit 2 goes high with the stop disarmed (it follows `HOMESNR`; `0x43` → `0x07`; QuickScan `0x43` → `0x05`; a 135i before init `0xc2` → `0xc6`, after init `0x1b` empty). Bit 6 only toggles in the VueScan capture | `insert 35mm carrier`, 12.78 s; tester readings |
-| `HOMESNR` | `0x32` bit 1 clear (stop armed): a narrow band around the loaded position; set: holder in the slot | tester readings, QuickScan eject |
+| `HOMESNR` | `0x32` bit 1 set: holder in the slot. Clear (stop armed): 0 for a holder inward of the loaded position, 1 otherwise, including an empty slot and a holder at the entry or ejected (`0x32` / `0x100` / `0x101`: `03/70/d0` empty, `07/f0/d8` entry, `05/f0/d8` loaded, `1f/f0/f8` ejected) | 135i run, QuickScan eject |
 | Load | after 0.5 s (`LoaderDelayTime`): forward 1 inch (`HomeCarriageStep[0]`), then `0x02 = 0x1C` (MTRREV) up to 10 inches back until status `HOMESNR` | FEEDL 6690, then 71490 ending on status `d8` |
 | Frame positioning | forward from the loader home, `0x02 = 0x18` | 6438, 17190, 27942 (pitch 10752); panorama 6414; 7200 scan 17631 |
 | Image pass | `0x01 = 0x23`, `0x02 = 0x30`, FEEDL 1 | every scan |
@@ -1000,11 +1000,11 @@ half.
 
 | Step | What runs | Evidence |
 |---|---|---|
-| Holder | `holder_present()`: `HOMESNR` with `0x32` bit 1 set, then restored (`0x32` bit 2 and `0x100` bit 7 follow the same arm state). `is_at_home()`: `HOMESNR` with `0x32` bit 1 cleared, then restored. `eject_requested()`: interrupt byte `0x48` | `insert 35mm carrier`, `holder eject`, tester readings |
+| Holder | `holder_present()`: `HOMESNR` with `0x32` bit 1 set, then restored (`0x32` bit 2 and `0x100` bit 7 follow the same arm state). `is_at_home()`: `HOMESNR` with `0x32` bit 1 cleared, then restored; it is also 1 with no holder loaded, so `holder_loaded()` is set only by a seek ending on the sensor and cleared by eject, removal, init or a lost park, and `require_holder_loaded()` needs it. `eject_requested()`: interrupt byte `0x48` | `insert 35mm carrier`, `holder eject`, tester readings |
 | Load | `load_holder()`: 0.5 s, clear `0x32` bit 1, 7200 forward (load ramp); reverse seek until `HOMESNR` (`0x1C = 0`, exposure 30000, `0x8A`–`0x92 = 0`) only when `HOMESNR` dropped and the motor is idle (`0x101` bit 0, `0x100` bit 1), otherwise eject | insert, both feeds |
 | Eject | `eject_holder()`: the QuickScan order above; off the loader home, a reverse seek straight back, `FEEDL` = the 73722-step travel | `holder eject`, QuickScan capture |
 | Home | `home()`: the load's two moves (1 inch in, then the reverse seek) when a holder is in the slot and off the loader home; after a lost park, the eject's seek alone; no move with the slot empty. Only on request: `scan()`, `calibrate()` and `warmup()` do not home this model after `init()`, since a holder off the loader home may be at the end of a strip or just outside the slot, and a scan or calibration raises | insert, both feeds |
-| AFE | probe 35–547 (2 lines) at offsets `0x80`/`0xFF`, full-width strip, probe pair again; `DPISET = 1200`, `LPERIOD = 10807 + px/4`, `0x2B` `0x01`/`0x04`, `0xA5 = 0x01`, `0xAB = 0x30`, `0xA6`–`0xA9 = 00 01 00 01` | both previews |
+| AFE | gains from the visible line's 4-pixel boxcar peaks, `code = int(75.6 − 75.6 · peak / 0xD600)` (QuickScan, `LineGain`); probe 35–547 (2 lines) at offsets `0x80`/`0xFF`, full-width strip, probe pair again; `DPISET = 1200`, `LPERIOD = 10807 + px/4`, `0x2B` `0x01`/`0x04`, `0xA5 = 0x01`, `0xAB = 0x30`, `0xA6`–`0xA9 = 00 01 00 01` | both previews |
 | Dark | lamp, toggle bit and IR LED off; 256 lines through the scan window, `0xA3 = 1` | both previews |
 | White | lamp, toggle bit and IR LED on; 256 lines with `0x01 = 0x23`, motor off | both previews |
 | Shading | per-pixel dark, unity `0x4000`, then gains `target · 0x4000 / white`; even lines (IR, target `0xF000`) fill `0x10014000`, odd lines (visible, target `0x16000`) `0x10034000`; `split_toggle_lines` returns the odd lines as the image and the even lines as IR | both previews (21064 bytes per bank at 1728 px) |
@@ -1016,8 +1016,9 @@ half.
 The AFE reuses the SilverFast two-point probe and gain law
 (`calib_gl128.offsets_for_black_level`, `coarse_gains_from_wide_means`) on
 the 135i strips: optical black is columns 2–29 of both lines (captured probes
-are dark to column 30), and the gain is sized for the brighter of the visible
-and IR lines, since one AFE gain serves both. The calibration strips at the
+are dark to column 30), and the one AFE gain is sized on the visible line.
+The last ~20 columns of a captured probe wrap round with the channels rotated,
+so the peak leaves out the end of the strip. The calibration strips at the
 loader home calibrate both banks, and the shading survives the per-frame
 register rewrite (VueScan does not re-upload it for frames 2 and 3).
 
@@ -1046,12 +1047,13 @@ are not replayed.
 
 ### 11.9 Open gaps (135i)
 
-- No run on 135i hardware.
+- One 135i hardware run so far: load, eject and one 600 dpi IR frame. Whole
+  strip, other resolutions and multi-exposure have not run.
 - Shading gain unity `0x4000` is VueScan's first upload on this model
   (`0x06 = 0xF8`); the SE family uses `0x2000` (`0x06 = 0xF0`). Confirm the
   scale on hardware.
-- The AFE gain targets are the SE's; VueScan's own codes (`2A 1F 25`) are
-  a little lower.
+- The AFE gain rule comes from QuickScan's numbers. The VueScan wide strip was
+  not captured whole, so its codes (`2A 1F 25`) are not reproduced here.
 - The two front-panel GPIO requests VueScan sends at the end of each frame
   (`0x8B` idx `0x0B` and `0x0F`) and the `0x8D` request after the image read
   are not sent.

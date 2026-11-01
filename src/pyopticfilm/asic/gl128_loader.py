@@ -13,9 +13,11 @@ usbmon captures of a 135i and the Plustek model INI
   to the loader sensor (``HOMESNR``); a frame is one forward feed from there;
   the image pass parks with ``AGOHOME``. There is no host-side motor stop:
   only the armed loader sensor ends a reverse seek early.
-* **Sensors**: ``HOMESNR`` reads the loaded position while ``0x32`` bit 1 is
-  clear (stop armed) and "holder in the slot" while it is set, so every check
-  sets bit 1 for the reading it needs. ``0x32`` bit 2 follows it, armed too.
+* **Sensors**: with ``0x32`` bit 1 set, ``HOMESNR`` reads "holder in the slot".
+  With it clear (stop armed) it reads 0 for a holder inward of the loaded
+  position and 1 otherwise, which includes an empty slot and a holder at the
+  entry, so "at home" says nothing about a load: only a finished load or seek
+  does (:meth:`Gl128Loader.holder_loaded`). ``0x32`` bit 2 follows ``HOMESNR``.
 * **Light**: the white lamp is ``0x03`` bit 4, the IR LED ``0x32`` bit 5 and
   the toggle bit ``0x19`` bit 3. ``0x37`` is never written after boot.
   ``0x32`` also carries the timing-set bit (7) and the loader outputs (0-4),
@@ -68,7 +70,6 @@ from pyopticfilm.scan.calib_gl128 import (
     AFE_OFFSET_PROBE_HIGH,
     AFE_OFFSET_PROBE_LOW,
     AFE_PRE_OFFSET_BLACK,
-    AFE_WHITE_TARGETS_COLOR,
     COLOR_SHADING_DARK_SETTLE_S,
     AfeFrontend,
     coarse_gains_from_wide_means,
@@ -78,6 +79,7 @@ from pyopticfilm.scan.calib_gl128 import (
 )
 from pyopticfilm.scan.calib_gl128_loader import (
     AFE_DPISET,
+    AFE_LINE_GAIN,
     AFE_PROBE_CLOCKS,
     AFE_PROBE_PIXELS,
     AFE_STRIP_LINES,
@@ -87,7 +89,7 @@ from pyopticfilm.scan.calib_gl128_loader import (
     SHADING_LINES,
     SHADING_WHITE_TARGET_IR,
     SHADING_WHITE_TARGET_VISIBLE,
-    lit_channel_means,
+    lit_channel_peaks,
     measured_shading_table,
     optical_black_means,
     shading_gains_from_white,
@@ -157,6 +159,14 @@ class Gl128Loader(Gl128):
         self.usb_planar_rgb = False
         #: Holder sensor state at the last :meth:`poll_loader` (``None``: not polled).
         self._holder_seen: bool | None = None
+        #: A seek ended on the loader sensor and no eject or init followed.
+        self._holder_loaded = False
+
+    def init(self, *, force: bool = False) -> None:
+        if self._initialized and not force:
+            return
+        self._holder_loaded = False
+        super().init(force=force)
 
     # --- light ------------------------------------------------------------
 
@@ -229,11 +239,11 @@ class Gl128Loader(Gl128):
         return self._homesnr(armed=False)
 
     def _set_home_stop(self, *, armed: bool) -> None:
-        """``0x32`` bit 1: clear arms the loader stop (``HOMESNR`` = loaded position), set disarms it."""
+        """``0x32`` bit 1: clear arms the loader stop, set disarms it (``HOMESNR`` = holder in the slot)."""
         self._write_bits(HOLDER_SENSOR_REG, LOADER_HOME_SENSOR_BIT, 0 if armed else LOADER_HOME_SENSOR_BIT)
 
     def _homesnr(self, *, armed: bool) -> bool:
-        """``HOMESNR`` with the stop armed (loaded position) or not (holder in the slot).
+        """``HOMESNR`` with the stop armed (:meth:`is_at_home`) or not (holder in the slot).
 
         ``0x32`` bit 1 is restored afterwards.
         """
@@ -245,8 +255,16 @@ class Gl128Loader(Gl128):
             self._write_bits(HOLDER_SENSOR_REG, LOADER_HOME_SENSOR_BIT, before)
 
     def is_at_home(self) -> bool:
-        """True while the holder sits at the loader home (``HOMESNR`` with the stop armed)."""
+        """``HOMESNR`` with the stop armed: False for a holder inward of the loader home.
+
+        Also True with an empty slot or a holder at the entry, so it does not
+        mean a holder is loaded (:meth:`holder_loaded`).
+        """
         return self._homesnr(armed=True)
+
+    def holder_loaded(self) -> bool:
+        """True after a load or seek to the loader sensor, until an eject, init or lost park."""
+        return self._holder_loaded and self._park_ok
 
     def _require_carriage_at_home(self, where: str) -> None:
         if not self.is_at_home():
@@ -285,13 +303,17 @@ class Gl128Loader(Gl128):
             return "eject"
         if previous is None or present == previous:
             return None
+        self._holder_loaded = False
         return "inserted" if present else "removed"
 
     def require_holder_loaded(self, where: str) -> None:
         """Refuse a scan unless a holder is in and parked at the loader home."""
         if not self.holder_present():
+            self._holder_loaded = False
             raise ScanError(f"{where}: no film holder in the loader. Insert a holder and load it first.")
         self._require_carriage_at_home(where)
+        if not self.holder_loaded():
+            raise ScanError(f"{where}: the film holder is not loaded. Load it first (Scanner.load_holder).")
 
     def _feed_in_then_seek_home(self, *, timeout_s: float) -> bool:
         """The vendor's home: arm the stop, one inch in, then the ten-inch reverse seek.
@@ -352,10 +374,12 @@ class Gl128Loader(Gl128):
             self.init()
         if not self._homesnr(armed=False):
             logger.info("GL128 loader eject: no holder in the slot")
+            self._holder_loaded = False
             return
         self._set_home_stop(armed=True)
         if not self.read_status_reliable().is_at_home:
             self._seek_home(steps=LOADER_RECOVERY_SEEK_STEPS, timeout_s=timeout_s)
+        self._holder_loaded = False
         for address, value in EJECT_LED_REGS:
             self._write(address, value)
         self._set_home_stop(armed=False)
@@ -440,6 +464,7 @@ class Gl128Loader(Gl128):
         self._start_move(regs, use_slow_slope=True)
         self._wait_move(timeout_s=timeout_s, until_home=True, steps=steps)
         self._park_ok = True
+        self._holder_loaded = True
         logger.info("GL128 loader at home")
 
     def feed(self, steps: int, *, timeout_s: float = 30.0) -> None:
@@ -723,8 +748,8 @@ class Gl128Loader(Gl128):
 
         1. gains 0, optical black at offsets ``0x80`` / ``0xFF``: offsets that
            put black at ~48;
-        2. full-width strip at those offsets: gain codes toward the white
-           targets for the brighter of the visible and IR lines;
+        2. full-width strip at those offsets: gain codes from the visible
+           line's peaks;
         3. the probe pair again under the gains: offsets for black ``0x500``.
 
         Lamp and IR LED stay on (toggle); the motor stays off.
@@ -743,20 +768,20 @@ class Gl128Loader(Gl128):
         self.apply_frontend(AfeFrontend(gains=zero, offsets=_encode_offsets(pre)))
         wide_pixels = self.model.full_width_units(dpi)
         wide = self.acquire_afe_strip(wide=True, resolution=dpi)
-        means = lit_channel_means(wide, pixels=wide_pixels)
-        gains = coarse_gains_from_wide_means(means, targets=AFE_WHITE_TARGETS_COLOR)
+        peaks = lit_channel_peaks(wide, pixels=wide_pixels)
+        gains = coarse_gains_from_wide_means(peaks, targets=(AFE_LINE_GAIN,) * 3)
         offsets = self._probe_black(gains, AFE_BLACK_TARGET_COLOR, fallback=AFE_FALLBACK_OFFSETS_COLOR, resolution=dpi, stage="black offset")
         result = AfeFrontend(gains=gains, offsets=_encode_offsets(offsets))
         self.apply_frontend(result)
         self.last_afe = result
         self.last_afe_dpi = scan_dpi
         logger.info(
-            "GL128 loader AFE dpi=%d pre_offsets=%s lit_means=(%.0f,%.0f,%.0f) gains=%s offsets=%s",
+            "GL128 loader AFE dpi=%d pre_offsets=%s visible_peaks=(%.0f,%.0f,%.0f) gains=%s offsets=%s",
             scan_dpi,
             pre,
-            means[0],
-            means[1],
-            means[2],
+            peaks[0],
+            peaks[1],
+            peaks[2],
             gains,
             offsets,
         )

@@ -73,6 +73,15 @@ AFE_PROBE_PIXELS = 512
 AFE_OPTICAL_BLACK_COLUMNS = slice(2, 30)
 #: First lit column of an AFE strip.
 AFE_FIRST_LIT_COLUMN = 32
+#: Columns dropped at the end of a strip: in the captured probes the last ~20
+#: wrap round with the channels rotated.
+AFE_END_COLUMNS = 32
+#: ``LineGain`` of the ``[Negative*]`` INI sections (0xD600): the level each
+#: channel's peak on the visible line is gained to, ``code = int(75.6 - 75.6 *
+#: peak / LineGain)``. On a 135i this leaves the visible line at G/R ~1.02.
+AFE_LINE_GAIN = 0xD600
+#: Boxcar over which an AFE peak is taken.
+AFE_PEAK_BOX = 4
 #: ``(0x2B, 0xA5, 0xAB)`` for the probe and the full-width strip (35 mm
 #: preview). ``0xAB`` keeps the boot value on AFE strips.
 AFE_PROBE_CLOCKS: tuple[int, int, int] = (0x01, 0x01, 0x30)
@@ -141,17 +150,17 @@ def optical_black_means(strip: bytes, *, pixels: int = AFE_PROBE_PIXELS) -> tupl
     return (float(means[0]), float(means[1]), float(means[2]))
 
 
-def lit_channel_means(strip: bytes, *, pixels: int) -> tuple[float, float, float]:
-    """Per-channel mean of the lit columns, the brighter of the visible and IR line.
+def lit_channel_peaks(strip: bytes, *, pixels: int) -> tuple[float, float, float]:
+    """Per-channel peak of the visible line of an AFE strip, a 4-pixel boxcar maximum.
 
-    One AFE gain serves both line types, and the IR line reads about a quarter
-    brighter than the visible one in the captured probes, so the gain is sized
-    for whichever would clip first.
+    One AFE gain serves both line types and is sized on the visible line, as
+    in QuickScan's AFE; the IR line then reads cast, as in VueScan's strips.
     """
-    arr = _strip_array(strip, pixels=pixels, lines=AFE_STRIP_LINES)[:, AFE_FIRST_LIT_COLUMN:, :]
-    per_line = arr.astype(np.float64).mean(axis=1)
-    best = per_line.max(axis=0)
-    return (float(best[0]), float(best[1]), float(best[2]))
+    arr = _strip_array(strip, pixels=pixels, lines=AFE_STRIP_LINES)
+    visible = arr[1, AFE_FIRST_LIT_COLUMN:-AFE_END_COLUMNS, :].astype(np.float64)
+    box = np.ones(AFE_PEAK_BOX) / AFE_PEAK_BOX
+    peaks = [float(np.convolve(visible[:, c], box, mode="valid").max()) for c in range(3)]
+    return (peaks[0], peaks[1], peaks[2])
 
 
 def shading_gain_for_white(white_unity: float, *, target: int) -> int:
