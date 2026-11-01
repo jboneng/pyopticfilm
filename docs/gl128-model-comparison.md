@@ -1003,7 +1003,7 @@ half.
 | Holder | `holder_present()`: `HOMESNR` with `0x32` bit 1 set, then restored (`0x32` bit 2 and `0x100` bit 7 follow the same arm state). `is_at_home()`: `HOMESNR` with `0x32` bit 1 cleared, then restored. `eject_requested()`: interrupt byte `0x48` | `insert 35mm carrier`, `holder eject`, tester readings |
 | Load | `load_holder()`: 0.5 s, clear `0x32` bit 1, 7200 forward (load ramp); reverse seek until `HOMESNR` (`0x1C = 0`, exposure 30000, `0x8A`–`0x92 = 0`) only when `HOMESNR` dropped and the motor is idle (`0x101` bit 0, `0x100` bit 1), otherwise eject | insert, both feeds |
 | Eject | `eject_holder()`: the QuickScan order above; off the loader home, a reverse seek straight back, `FEEDL` = the 73722-step travel | `holder eject`, QuickScan capture |
-| Home | `home()`: the load's two moves (1 inch in, then the reverse seek) when a holder is in the slot and off the loader home; after a lost park, the eject's seek alone; no move with the slot empty | insert, both feeds |
+| Home | `home()`: the load's two moves (1 inch in, then the reverse seek) when a holder is in the slot and off the loader home; after a lost park, the eject's seek alone; no move with the slot empty. Only on request: `scan()`, `calibrate()` and `warmup()` do not home this model after `init()`, since a holder off the loader home may be at the end of a strip or just outside the slot, and a scan or calibration raises | insert, both feeds |
 | AFE | probe 35–547 (2 lines) at offsets `0x80`/`0xFF`, full-width strip, probe pair again; `DPISET = 1200`, `LPERIOD = 10807 + px/4`, `0x2B` `0x01`/`0x04`, `0xA5 = 0x01`, `0xAB = 0x30`, `0xA6`–`0xA9 = 00 01 00 01` | both previews |
 | Dark | lamp, toggle bit and IR LED off; 256 lines through the scan window, `0xA3 = 1` | both previews |
 | White | lamp, toggle bit and IR LED on; 256 lines with `0x01 = 0x23`, motor off | both previews |
@@ -1033,8 +1033,8 @@ so `PageSize` is not the travel limit.
 loader home and its own toggle-mode pass, and the IR plane comes from the
 first short pass. Not at 7200 dpi (as on the flatbed models). The long
 exposure is filled in (fixed: `me_fixed_long_exposure = 42000`, 3× short).
-`0x90` follows the vendor rule `11000 · (n + 2)` with `n = round(E / 14000)`
-(55000 at 42000; measured only at `n = 2`). The long cap is
+`0x90` scales the timing set's value with the exposure (33000 at 42000; no
+capture above 28000). The long cap is
 `64000 · 3600 / Ydpi` (`me_long_exposure_cap`): the scan motor word here is
 `E · Ydpi / 3600`, not `E / oversample`.
 
@@ -1058,7 +1058,10 @@ are not replayed.
 - `StaggeredLine = 4` (odd/even pixels at 7200 dpi) is in the line margin but
   not applied to the image, as on the other GL128 models.
 - No 135i multi-exposure capture: the long exposure and its `0x90` are
-  filled in. As on the flatbed models, the shading is measured again at the
+  filled in, and the proportional `0x90` is a guess for adaptive long
+  exposures that are not a whole multiple of the short one. Open: whether the
+  long pass needs `0x28` changed too, and whether it should reuse the normal
+  shading. As on the flatbed models, the shading is measured again at the
   loader home before the first long pass.
 - The image `LINCNT` margin is the INI rule (`ceil(48·Y/7200) + 1`, plus 4 at
   7200 dpi: 53 / 9 / 5); VueScan uses its own margins, so it is not checked

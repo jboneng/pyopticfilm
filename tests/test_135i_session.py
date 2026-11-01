@@ -260,6 +260,29 @@ def test_home_does_not_seek_while_the_sensor_stays_set(scanner, rec, monkeypatch
     assert rec.starts == []
 
 
+def test_scan_does_not_home_after_init(scanner, rec):
+    rec.at_home = False
+    rec.starts.clear()
+    with pytest.raises(ScanError, match="eject it"):
+        scanner.scan(resolution=600)
+    assert rec.starts == []
+
+
+def test_calibrate_refuses_off_home_before_any_strip(scanner, rec):
+    rec.at_home = False
+    rec.starts.clear()
+    with pytest.raises(ScanError, match="eject it"):
+        scanner.calibrate(resolution=600)
+    assert rec.starts == []
+
+
+def test_warmup_does_not_home(scanner, rec):
+    rec.at_home = False
+    rec.starts.clear()
+    scanner.warmup(lamp=False)
+    assert rec.starts == []
+
+
 def test_home_without_holder_does_not_move(scanner, rec):
     scanner.asic.init()
     rec.holder_present = False
@@ -518,8 +541,8 @@ def test_multi_exposure_runs_two_fed_passes(scanner, rec):
     images = [s for s in rec.starts if s[0x02] == 0x30]
     feeds = [s for s in rec.starts if s[0x02] == 0x18]
     assert [_u(f, 0x3D, 3) for f in feeds] == [6438, 6438]
-    # Short 14000 / 0x90 11000; fixed long 42000 / 0x90 11000 * (3 + 2).
-    assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(14000, 11000), (42000, 55000)]
+    # Short 14000 / 0x90 11000; the fixed long 42000 scales both three times.
+    assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(14000, 11000), (42000, 33000)]
     assert scanner.last_me_debug.exposure_long == 42000
     assert img.rgb.shape == (896, 864, 3) and img.ir.shape == (896, 864)
 

@@ -386,17 +386,13 @@ class Model135i(Gl128Common):
     def exposure_regs_for(self, resolution: int, *, exposure: int | None = None) -> dict[int, int]:
         """``0x7D``-``0x7F`` and ``0x8A``-``0x92`` for an image pass at ``resolution``.
 
-        The multiplier for ``0x90`` is the timing set's (measured: 0 at 14000,
-        2 at 28000). A longer ``exposure`` (multi-exposure long pass, manual
-        override) takes ``n = round(exposure / 14000)`` by the same rule
-        (filled: no capture above 28000).
+        ``0x90`` is the timing set's (measured: 11000 at 14000, 44000 at
+        28000). A longer ``exposure`` (multi-exposure long pass, manual
+        override) scales it in proportion (filled: no capture above 28000).
         """
-        value = self.image_exposure_for(resolution) if exposure is None else int(exposure)
-        n = self.exposure_multiplier_for(resolution)
-        base = int(self.exposure_lperiod)
-        if value > max(base, base * n):
-            n = max(n, round(value / base))
-        return exposure_registers(value, n)
+        base = self.image_exposure_for(resolution)
+        value = base if exposure is None else int(exposure)
+        return exposure_registers(value, self.exposure_multiplier_for(resolution), base_exposure=base)
 
     def me_long_exposure_cap(self, resolution: int) -> int:
         """Largest long exposure whose scan motor word fits under 64000.

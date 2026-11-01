@@ -251,8 +251,9 @@ class Gl128Loader(Gl128):
     def _require_carriage_at_home(self, where: str) -> None:
         if not self.is_at_home():
             raise ScanError(
-                f"{where}: the film holder is not at the loader home. Load it again "
-                "(Scanner.load_holder) or eject and reinsert it."
+                f"{where}: the film holder is not at the loader home. If it is deep in "
+                "the strip, eject it (Scanner.eject_holder); if it is at the entry, pull "
+                "it out and insert it again."
             )
 
     def _motor_idle(self, status: ScannerStatus) -> bool:
@@ -468,7 +469,10 @@ class Gl128Loader(Gl128):
         self._set_home_stop(armed=True)
         start = self.read_status_reliable()
         if not start.is_at_home:
-            raise AsicError("Film holder is not at the loader home; load it again before scanning.")
+            raise AsicError(
+                "Film holder is not at the loader home. If it is deep in the strip, eject it; "
+                "if it is at the entry, pull it out and insert it again."
+            )
         r = self.registers
         steps = int(feed_steps)
         regs = {a: v for a, v in scan_regs.items() if a not in _MOVE_OWN_REGS and a not in LIVE_REGS}

@@ -74,6 +74,12 @@ def test_scan_motor_period_matches_captures():
     assert (MODEL_135I.exposure_regs_for(600)[0x91], MODEL_135I.exposure_regs_for(600)[0x92]) == (0x2A, 0xF8)
 
 
+@pytest.mark.parametrize(("dpi", "exposure", "reg90"), [(600, 42000, 33000), (1200, 42000, 33000), (7200, 84000, 132000)])
+def test_long_exposure_scales_the_timing_set_0x90(dpi, exposure, reg90):
+    regs = MODEL_135I.exposure_regs_for(dpi, exposure=exposure)
+    assert (regs[0x90] << 16 | regs[0x91] << 8 | regs[0x92]) == reg90
+
+
 @pytest.mark.parametrize(
     ("dpi", "span", "lperiod"),
     [(600, 5184, 11023), (1200, 5184, 11239), (7200, 10368, 15991), (1200, 2592, 11023)],

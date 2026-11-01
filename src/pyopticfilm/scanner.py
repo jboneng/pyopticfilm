@@ -195,7 +195,7 @@ class Scanner:
         self._ensure_scan_ready()
         self._ensure_open()
         self._asic.init()
-        if home:
+        if home and not self._film_loader():
             self._asic.home()
         if lamp:
             self._asic.set_scan_method("transparency")
@@ -249,8 +249,10 @@ class Scanner:
             mode = "color"
         if not self._asic._initialized:
             self._asic.init()
-            if not self._asic.is_at_home():
+            if not self._film_loader() and not self._asic.is_at_home():
                 self._asic.home()
+        if self._film_loader():
+            self._loader().require_holder_loaded("Calibration")
         was_armed = self._bringup_motor_armed
         try:
             if getattr(self._model, "asic", "") == "GL128":
@@ -334,7 +336,7 @@ class Scanner:
         self._ensure_open()
         if not self._asic._initialized:
             self._asic.init()
-            if not self._asic.is_at_home():
+            if not self._film_loader() and not self._asic.is_at_home():
                 self._asic.home()
         from pyopticfilm.scan.session import create_session
 
@@ -432,8 +434,18 @@ class Scanner:
                     emit("eject_failed")
             stop.wait(interval_s)
 
+    def _film_loader(self) -> bool:
+        """Film-loader models never home on their own.
+
+        After a fresh ``init()`` a holder off the loader home may be at the end
+        of a strip or just outside the slot, and the home's first move suits
+        only the second. Moving it is left to an explicit ``home()`` or
+        ``eject_holder()``; a scan or calibration raises instead.
+        """
+        return bool(getattr(self._model, "film_loader", False))
+
     def _loader(self) -> Any:
-        if not getattr(self._model, "film_loader", False):
+        if not self._film_loader():
             raise PlustekError(f"{self._model.model} has no film loader")
         return self._asic
 

@@ -310,18 +310,22 @@ STAGGERED_LINE = 4
 REG_90_BASE = 11000
 #: Exposure multiplier ``n`` by timing set: ``REG_EXPOSURE = 7d * n`` and
 #: ``0x90 = 11000 * (n + 2)`` when ``n > 0``. Measured: 0 (14000 / 11000) at
-#: 600 and 1200 dpi, 2 (28000 / 44000) at 7200 dpi.
+#: 600 and 1200 dpi, 2 (28000 / 44000) at 7200 dpi. A longer exposure scales
+#: the timing set's own ``0x90`` with it (filled: no capture above 28000).
 EXPOSURE_MULTIPLIER: dict[str, int] = {"Speed1": 2, "Speed2": 0}
 
 
-def exposure_registers(exposure: int, multiplier: int) -> dict[int, int]:
+def exposure_registers(exposure: int, multiplier: int, *, base_exposure: int | None = None) -> dict[int, int]:
     """``0x7D``-``0x7F`` and ``0x8A``-``0x92`` for an image pass or feed.
 
-    ``0x8A``-``0x8F`` are zero in every capture. ``0x90`` follows the
-    multiplier that produced ``exposure``.
+    ``0x8A``-``0x8F`` are zero in every capture. ``0x90`` is the timing set's
+    (``multiplier``), scaled by ``exposure / base_exposure`` above its
+    ``base_exposure``.
     """
     n = int(multiplier)
     reg90 = REG_90_BASE * (n + 2) if n > 0 else REG_90_BASE
+    if base_exposure is not None and exposure > base_exposure:
+        reg90 = round(reg90 * exposure / base_exposure)
     out = {0x7D: (exposure >> 16) & 0xFF, 0x7E: (exposure >> 8) & 0xFF, 0x7F: exposure & 0xFF}
     out.update({a: 0x00 for a in range(0x8A, 0x90)})
     out.update({0x90: (reg90 >> 16) & 0xFF, 0x91: (reg90 >> 8) & 0xFF, 0x92: reg90 & 0xFF})
