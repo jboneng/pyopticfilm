@@ -53,7 +53,7 @@ SANE-derived 8200i tables and is hardware-tested.
 | GL842 scan session | `src/pyopticfilm/scan/session_gl842.py` |
 | GL128 scan session | `src/pyopticfilm/scan/session_gl128.py` |
 | Host dark/white calib | `src/pyopticfilm/scan/calibrate.py` (non-GL128 branch) |
-| ASIC DVDSET shading | `src/pyopticfilm/scan/calib_gl128.py` (GL128: SE and 8100 V2) |
+| ASIC DVDSET shading | `src/pyopticfilm/scan/calib_gl128.py` (GL128: 8200i SE, 8100 V2, 8300i SE) |
 
 ## MAXWD unit differences (SANE)
 

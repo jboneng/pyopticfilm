@@ -230,7 +230,11 @@ class ScanSession:
         ME planes stay linear (``expose_base=False``) against the short-exposure
         host calib; film-base makeup runs once on the merged deliverable.
         """
-        from pyopticfilm.pass_align import align_ir_to_rgb_result, align_pass_to_reference
+        from pyopticfilm.pass_align import (
+            align_ir_to_rgb_result,
+            estimate_me_transform,
+            transform_mean_shift,
+        )
         from pyopticfilm.scan.exposure_merge import merge_exposures_result
         from pyopticfilm.scan.me_debug import MeScanDebug
 
@@ -302,8 +306,10 @@ class ScanSession:
         primary = rgb_short
         if rgb_long is not None and exp_long is not None:
             align_shift_long = None
+            align_transform_long = None
             if align_passes:
-                _, align_shift_long = align_pass_to_reference(rgb_short, rgb_long)
+                align_transform_long = estimate_me_transform(rgb_short, rgb_long)
+                align_shift_long = transform_mean_shift(align_transform_long)
                 logger.info(
                     "ME long pass shift (dx, dy)=(%.3f, %.3f)",
                     align_shift_long[0],
@@ -323,7 +329,8 @@ class ScanSession:
                 rgb_long,
                 exposure_short=exp_short,
                 exposure_long=exp_long,
-                align_shift=align_shift_long or (0.0, 0.0),
+                align_shift=None if align_passes else (0.0, 0.0),
+                align_transform=align_transform_long,
                 **noise,
             )
             self.last_me_debug = MeScanDebug(

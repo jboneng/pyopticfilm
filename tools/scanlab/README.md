@@ -248,7 +248,8 @@ with `python -m tools.register_reference` after editing the catalog.
   the top of the TA window), not a raw full-TA `area=None` request that can
   overrun the motor window.
 - Rubber-band crops are clamped so image `LINCNT` cannot run past the scan-window
-  end (see `captures/8200i-se/MOTOR.md` in the repo if present).
+  end (see [docs/gl128-model-comparison.md](../../docs/gl128-model-comparison.md),
+  section 4).
 - High PPI (≥2400) uses line-aligned bulk drain, read as fast as USB allows.
   Each image pass prints a `GL128 image read:` timing line (MB/s, instant reads,
   longest gap) to the terminal Scan Lab was started from; set `PYOPTICFILM_ACQUIRE_TIMING=<path.csv>` before starting
