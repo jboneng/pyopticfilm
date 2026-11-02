@@ -480,7 +480,8 @@ class Gl128ScanSession(ScanSession):
         from pyopticfilm.pass_align import (
             align_pass_to_reference,
             align_pass_to_reference_banded,
-            estimate_pass_shift,
+            estimate_me_transform,
+            transform_mean_shift,
             warn_if_align_unavailable,
         )
         from pyopticfilm.scan.exposure_merge import merge_exposures_result, merge_n_passes
@@ -818,12 +819,14 @@ class Gl128ScanSession(ScanSession):
                 ),
             )
 
+        align_transform_long = None
         align_shift_long: tuple[float, float] | None = None
         align_shift_ir: tuple[float, float] | None = None
 
         if align_passes and rgb_long is not None:
             warn_if_align_unavailable("ME long")
-            align_shift_long = estimate_pass_shift(rgb_short, rgb_long)
+            align_transform_long = estimate_me_transform(rgb_short, rgb_long)
+            align_shift_long = transform_mean_shift(align_transform_long)
             logger.info(
                 "ME long pass shift (dx, dy)=(%.3f, %.3f)",
                 align_shift_long[0],
@@ -842,13 +845,13 @@ class Gl128ScanSession(ScanSession):
         primary = rgb_short
         fusion_stats = None
         if multi_exposure and rgb_long is not None:
-            shift = align_shift_long if align_passes else (0.0, 0.0)
             merged = merge_exposures_result(
                 rgb_short,
                 rgb_long,
                 exposure_short=exp_short,
                 exposure_long=exp_long,
-                align_shift=shift,
+                align_shift=None if align_passes else (0.0, 0.0),
+                align_transform=align_transform_long,
                 alpha=noise_alpha,
                 beta=noise_beta,
             )

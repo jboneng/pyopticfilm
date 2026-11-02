@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `tools/bench_me_merge.py --real DIR` scores a real short/long TIFF pair (noise, noise-free detail, dense-film colour, timing); new cases cover a black offset and row drift.
 - **Fixed multi-exposure** (GL128: 8200i SE, 8100 V2, 8300i SE). `scan(multi_exposure=True, me_long_mode="fixed")` scans the long pass at one exposure per model on every frame, as SilverFast does, instead of metering the short pass: 42000 (3× short) on the 8200i SE and 8100 V2, 60000 (4× short) on the 8300i SE, the value in that model's SilverFast ME captures. The value is the new model field `me_fixed_long_exposure` and still goes through the normal long clamp (14000–85000). Everything after the long pass is unchanged, and `last_me_debug.exposure_reason` reads `"fixed"`. The default stays `"adaptive"`; a manual `me_long_exposure` still wins. Scan Lab has a **Fixed ME long (SilverFast-style)** toggle, and its CLI takes `--me-long-mode fixed`.
   - **Hardware.** Not yet run on hardware in this mode. 42000 is the long exposure the adaptive path already uses as its floor on the 8200i SE and 8100 V2; 60000 on the 8300i SE comes from its SilverFast captures and is inside the clamp the adaptive path already scans with.
 - Add a sequential color + infrared scan path for IR-capable GL845 models. Covered by mock-scanner tests and supervised full-frame colour + IR runs on a 7600i v2 at 900, 1800 and 3600 dpi. The 8200i shares the path, but it has not run on that model, which stays gated.
@@ -19,6 +20,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `tools/bench_me_merge`: a synthetic ground-truth benchmark of the multi-exposure merge. Its scene has log-uniform levels from 10 to 60k DN, orange-mask-like channel densities and Poisson-Gaussian noise, with extra cases with a per-channel long-pass gain error and a sub-pixel shift. Per level band it reports efficiency against the best possible merge, dB gained over the short pass alone, and bias, along with black crush and hue drift across tone. `--ref [LABEL=]REV` benchmarks other git revisions alongside the working tree.
 
 ### Fixed
+
+- **Multi-exposure merges lost most of the long pass on real negatives, and colour shifted in dense film.** On a real 1800 dpi pair the merge barely beat the short alone.
+  - **Registration.** The long feeds at a slightly different rate from the short (-1.3 px per 1000 rows on that pair), so one translation only registered the frame centre. The long now gets a per-row warp, fitted from full-resolution tiles and resampled with Lanczos-4. The fitted noise model no longer absorbs the misregistration (alpha 13 → 4).
+  - **Shift field.** Across the frame the passes also differ by up to a pixel, which on sharp silver grain read as disagreement: on HP5+ the merge rejected usable long on 15 % of green. A smooth field is now fitted from small tiles, down to 2-4 %.
+  - **Level curve.** Long over short is not a constant: it falls towards black on every film measured, and a pure ratio read blue 18 % low in the densest film. The merge now takes a curve per channel from the pair itself. Dense blue from 1200 DN up is within about 1 % of the short, and repeats of a frame agree within 0.5 %.
+  - **Guard.** A fixed 300 DN test, whose second condition is always true under the orange mask, dropped the long on a third of the frame. It now compares residual energy with the noise model, so about 1 % of pixels fall back.
+  - **Now.** Flat-area noise falls about 2 % in green and 22 % in blue (grain included); fine detail is 96.5 % of the short in green and 97.4 % in blue, against 97.2 % in green before. Red barely changes: the long clips it on 93 % of that frame's pixels. Output changes for every multi-exposure scan. Validated on one pair only, not yet at 3600 or 7200 dpi.
+- Multi-exposure merge output is rounded rather than truncated.
 
 - **Multi-exposure and Multi-Pass turned clipped highlights black.** Where a channel was at or above 95 % of full scale in every pass, the merge had no confident input and wrote 0, the darkest value. One clipped channel gave a hard colour error (red clipped in both passes came out `0, G, B`).
   - **Reach.** It needs a short pass that reaches about 62000 DN: slides, clear or empty holder areas, light leaks. The real negative ME fixtures never get there and merge byte-identically to before.
@@ -112,6 +121,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `merge_exposures` estimates the row warp and shift field itself unless given `align_shift` or the new `align_transform`. `exposure_ratio_*` in `FusionStats` is now the upper-tone gain of the level curve.
+- The multi-exposure merge runs on up to 8 threads. A 19 MP frame takes about 3 s to register and 11-27 s to warp and merge, depending on system load.
 - **OpticFilm 7600i v2 is hardware-tested** (`07b3:0c3b`, bcdDevice `0x0605`, GL845): `MODEL_7600I_V2.scan_ready` is `True`, so `Scanner.open()` scans, calibrates and parks it without a lab override, including colour + IR and multi-exposure. The scan validation set is now 8200i SE + 8100 (V2) + 8300i SE + 7600i v1 + 7600i v2. Lock oracles are at `tests/model_lock/opticfilm_7600i_v2/`. The GL845 8200i and other GL845 aliases stay gated. Evidence: [docs/scanner-validation.md](docs/scanner-validation.md) and [docs/opticfilm-7600i-v2.md](docs/opticfilm-7600i-v2.md).
 - **Multi-exposure fits its noise model from each scan.** The merge weighted the passes with a provisional model (`α=1, β=4096`, about 64 DN read noise) on every scanner. It now fits α and β per channel from the scan's own aligned short/long pair, with no user calibration. A channel keeps the defaults if it has too few valid pixels or the fit is out of range, and setting both `me_noise_alpha` and `me_noise_beta` on the model skips the fit. The long pass's variance now allows for the sub-pixel shift applied to it; it was overstated by up to 4× at half-pixel shifts, which underweighted the long pass. The fit adds about 1 s on a 24 MP frame. Multi-Pass stacking (`merge_n_passes`) still uses the defaults.
   - **Hardware.** On a 7600i v2 sky bracket, this and the merge fixes above cut blue noise from 5.64 % to 4.89 %.

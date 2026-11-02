@@ -3,9 +3,17 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
+
+_LANCZOS_TAPS = {"lanczos3": 3, "lanczos4": 4}
+
+
+def _warp_workers() -> int:
+    return min(8, os.cpu_count() or 1)
 
 
 @dataclass(frozen=True)
@@ -106,8 +114,8 @@ def warp_integer(mov: np.ndarray, dx: int, dy: int) -> np.ndarray:
     return fill_shift_border(out, float(dx), float(dy))
 
 
-def _keys_cubic_weights(t: float) -> tuple[float, float, float, float]:
-    """Keys cubic convolution weights for fractional offset ``t`` in [0, 1)."""
+def _keys_cubic_weights(t):
+    """Keys cubic convolution weights for fractional offset ``t`` in [0, 1) (scalar or array)."""
     a = -0.5
     t2 = t * t
     t3 = t2 * t
@@ -275,6 +283,93 @@ def warp_shift(
     return warp_linear(mov, dx, dy, chunk_rows=chunk_rows)
 
 
+def _lanczos_weights(frac: np.ndarray, a: int) -> tuple[np.ndarray, ...]:
+    """Normalized Lanczos-``a`` taps at offsets ``1-a .. a`` from ``floor(pos)``."""
+    dist = np.arange(1 - a, a + 1, dtype=np.float64)[:, None] - frac
+    w = np.sinc(dist) * np.sinc(dist / a)
+    return tuple(w / w.sum(axis=0))
+
+
+def _row_tap_weights(frac: np.ndarray, method: str) -> tuple[int, tuple[np.ndarray, ...]]:
+    """First tap offset from ``floor(pos)`` and the per-row tap weights."""
+    if method in _LANCZOS_TAPS:
+        a = _LANCZOS_TAPS[method]
+        return 1 - a, tuple(w.astype(np.float32) for w in _lanczos_weights(frac, a))
+    if method == "cubic":
+        return -1, tuple(np.asarray(w, dtype=np.float32) for w in _keys_cubic_weights(frac))
+    return 0, ((1.0 - frac).astype(np.float32), frac.astype(np.float32))
+
+
+def row_shift_var_scale(dx: float, dy_per_row: np.ndarray, *, method: str = "linear") -> np.ndarray:
+    """Per-row variance factor of white noise through :func:`warp_row_shifts`.
+
+    A resampling tap averages neighbours, scaling variance by the sum of its
+    squared weights, on each axis. Rows at an integer offset keep their noise.
+    """
+    dy = np.asarray(dy_per_row, dtype=np.float64)
+    h = dy.shape[0]
+    src_y = np.arange(h, dtype=np.float64) - dy
+    _, weights = _row_tap_weights(src_y - np.floor(src_y), method)
+    vertical = np.sum(np.stack(weights).astype(np.float64) ** 2, axis=0)
+    t = -float(dx) - np.floor(-float(dx))
+    if t < 1e-12:
+        return vertical
+    _, horizontal = _row_tap_weights(np.asarray([t]), method)
+    return vertical * float(np.sum(np.stack(horizontal).astype(np.float64) ** 2))
+
+
+def quadratic_field(coef: np.ndarray, x: np.ndarray, y: np.ndarray | float, w: int, h: int) -> np.ndarray:
+    """``c0 + c1 v + c2 v^2 + u (c3 + c4 v) + c5 u^2``, with ``u, v`` in [-1, 1] over the frame."""
+    u = 2.0 * np.asarray(x, dtype=np.float64) / max(w - 1, 1) - 1.0
+    v = 2.0 * np.asarray(y, dtype=np.float64) / max(h - 1, 1) - 1.0
+    return coef[0] + coef[1] * v + coef[2] * v * v + u * (coef[3] + coef[4] * v) + coef[5] * u * u
+
+
+def x_field_var_scale(dx: float, coef: np.ndarray, w: int, h: int, *, method: str = "linear") -> float:
+    """Mean variance factor of white noise through :func:`warp_x_field`."""
+    xs = np.linspace(0.0, w - 1, 33)
+    ys = np.linspace(0.0, h - 1, 33)[:, None]
+    pos = -(float(dx) + quadratic_field(coef, xs, ys, w, h)).ravel()
+    _, weights = _row_tap_weights(pos - np.floor(pos), method)
+    return float(np.mean(np.sum(np.stack(weights).astype(np.float64) ** 2, axis=0)))
+
+
+def warp_x_field(mov: np.ndarray, dx: float, coef: np.ndarray, *, method: str = "linear") -> np.ndarray:
+    """``dst(x, y) = src(x - dx - field(x, y), y)``; see :func:`quadratic_field`.
+
+    The field is held constant over row bands short enough that it moves by
+    under 0.02 px across one.
+    """
+    arr = np.asarray(mov)
+    h, w = arr.shape[:2]
+    dtype = arr.dtype
+    integer = np.issubdtype(dtype, np.integer)
+    top = np.iinfo(dtype).max if integer else 0
+    per_row = 2.0 * (abs(coef[1]) + 2.0 * abs(coef[2]) + abs(coef[4])) / max(h - 1, 1)
+    band_rows = int(np.clip(0.02 / max(per_row, 1e-9), 1, 64))
+    # One taps table: computing weights per pixel is most of the cost otherwise.
+    phases = 1024
+    first, table = _row_tap_weights(np.arange(phases + 1, dtype=np.float64) / phases, method)
+    xs = np.arange(w, dtype=np.float64)
+    trail = (None,) * (arr.ndim - 2)
+    out = np.empty(arr.shape, dtype=dtype)
+
+    def warp_band(r0: int) -> None:
+        r1 = min(h, r0 + band_rows)
+        pos = xs - dx - quadratic_field(coef, xs, 0.5 * (r0 + r1 - 1), w, h)
+        base = np.floor(pos).astype(np.int64)
+        phase = np.rint((pos - base) * phases).astype(np.int64)
+        src = arr[r0:r1].astype(np.float32)
+        acc = np.zeros(src.shape, dtype=np.float32)
+        for i, taps in enumerate(table):
+            acc += taps[phase][(None, slice(None), *trail)] * src[:, np.clip(base + first + i, 0, w - 1)]
+        out[r0:r1] = np.clip(np.rint(acc), 0, top) if integer else acc
+
+    with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
+        list(pool.map(warp_band, range(0, h, band_rows)))
+    return out
+
+
 def warp_row_shifts(
     mov: np.ndarray,
     dx: float,
@@ -285,8 +380,12 @@ def warp_row_shifts(
 ) -> np.ndarray:
     """Per-row dy + constant dx without HxW map arrays (remap convention).
 
-    Remap convention ``dst(x,y) = src(x - dx, y - dy[y])`` for banded Multi-Pass.
+    Remap convention ``dst(x,y) = src(x - dx, y - dy[y])``. ``method`` is
+    ``"linear"``, ``"cubic"`` or ``"lanczos3"`` / ``"lanczos4"``, on both axes.
+    Works in row chunks, so no full-frame float32 plane is held.
     """
+    if method not in ("linear", "cubic", *_LANCZOS_TAPS):
+        raise ValueError(f"unknown resampling method {method!r}")
     arr = np.asarray(mov)
     h, _w = arr.shape[:2]
     dy = np.asarray(dy_per_row, dtype=np.float64)
@@ -294,51 +393,73 @@ def warp_row_shifts(
         raise ValueError("dy_per_row length must match image height")
 
     dtype = arr.dtype
-    # Horizontal: constant -dx in remap convention ⇒ sample at x - dx = x + (-dx)
-    # using separable linear with shift = -dx for warpAffine-style helper...
-    # Remap: dst(x) = src(x - dx). Separable helper uses dst(x)=src(x+s) ⇒ s = -dx.
+    # Horizontal: dst(x) = src(x - dx). The separable helpers use dst(x)=src(x+s) ⇒ s = -dx.
     shift_x = -float(dx)
+    base_x = int(np.floor(shift_x))
+    first_x, weights_x = _row_tap_weights(np.asarray([shift_x - base_x]), method)
+    cols = np.arange(arr.shape[1])
+    tap_cols = [np.clip(cols + base_x + first_x + i, 0, arr.shape[1] - 1) for i in range(len(weights_x))]
 
     def horiz(p: np.ndarray) -> np.ndarray:
         if abs(shift_x) < 1e-12:
             return p.astype(np.float32, copy=False)
-        return _sample_1d_linear(p, axis=1, shift=shift_x)
-
-    if arr.ndim == 3:
-        planes = [horiz(arr[:, :, c]) for c in range(arr.shape[2])]
-        tmp = np.stack(planes, axis=2)
-    else:
-        tmp = horiz(arr)
+        acc = float(weights_x[0][0]) * p[:, tap_cols[0]].astype(np.float32)
+        for w_i, c in zip(weights_x[1:], tap_cols[1:], strict=True):
+            acc += float(w_i[0]) * p[:, c].astype(np.float32)
+        return acc
 
     # Vertical: dst(y) = src(y - dy[y]) ⇒ sample index sy = y - dy[y]
-    out = np.empty_like(tmp, dtype=np.float32)
     src_y = np.arange(h, dtype=np.float64) - dy
     y0 = np.floor(src_y).astype(np.int64)
-    frac = (src_y - y0).astype(np.float32)
-    y1 = y0 + 1
-    y0c = np.clip(y0, 0, h - 1)
-    y1c = np.clip(y1, 0, h - 1)
-    chunk = max(32, int(chunk_rows))
-    for r0 in range(0, h, chunk):
-        r1 = min(h, r0 + chunk)
-        f = frac[r0:r1]
-        a0 = y0c[r0:r1]
-        a1 = y1c[r0:r1]
-        if tmp.ndim == 3:
-            # Broadcast weights over width/channels.
-            w0 = (1.0 - f)[:, None, None]
-            w1 = f[:, None, None]
-            out[r0:r1] = w0 * tmp[a0] + w1 * tmp[a1]
-        else:
-            w0 = (1.0 - f)[:, None]
-            w1 = f[:, None]
-            out[r0:r1] = w0 * tmp[a0] + w1 * tmp[a1]
+    first_tap, weights = _row_tap_weights(src_y - y0, method)
+    tap_rows = [np.clip(y0 + first_tap + i, 0, h - 1) for i in range(len(weights))]
+    trail = (None,) * (arr.ndim - 1)
 
-    if np.issubdtype(dtype, np.integer):
-        out_i = np.clip(np.rint(out), 0, np.iinfo(dtype).max).astype(dtype)
-    else:
-        out_i = out.astype(dtype, copy=False)
-    return fill_row_shift_border(out_i, dx, dy)
+    integer = np.issubdtype(dtype, np.integer)
+    top = np.iinfo(dtype).max if integer else 0
+    out = np.empty(arr.shape, dtype=dtype)
+    chunk = max(32, int(chunk_rows))
+
+    def warp_band(r0: int) -> None:
+        r1 = min(h, r0 + chunk)
+        lo = int(min(t[r0:r1].min() for t in tap_rows))
+        hi = int(max(t[r0:r1].max() for t in tap_rows)) + 1
+        slab = horiz(arr[lo:hi])
+        acc = weights[0][r0:r1][(slice(None), *trail)] * slab[tap_rows[0][r0:r1] - lo]
+        for w_i, rows in zip(weights[1:], tap_rows[1:], strict=True):
+            acc += w_i[r0:r1][(slice(None), *trail)] * slab[rows[r0:r1] - lo]
+        out[r0:r1] = np.clip(np.rint(acc), 0, top) if integer else acc
+
+    with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
+        list(pool.map(warp_band, range(0, h, chunk)))
+    return fill_row_shift_border(out, dx, dy)
+
+
+def row_shift_touch_mask(mask: np.ndarray, dx: float, dy_per_row: np.ndarray, *, reach: int) -> np.ndarray:
+    """Where :func:`warp_row_shifts` output lies within ``reach`` px of a set ``mask`` sample."""
+    h, w = mask.shape[:2]
+    src_y = np.floor(np.arange(h, dtype=np.float64) - np.asarray(dy_per_row, dtype=np.float64)).astype(np.int64)
+    base_x = int(np.floor(-float(dx)))
+    cols = np.arange(w)
+    fractional = abs(float(dx) - round(float(dx))) >= 1e-6
+    out = np.empty(mask.shape, dtype=bool)
+
+    def band(r0: int) -> None:
+        r1 = min(h, r0 + 256)
+        rows = np.zeros((r1 - r0, *mask.shape[1:]), dtype=bool)
+        for offset in range(-reach, reach + 2):
+            rows |= mask[np.clip(src_y[r0:r1] + offset, 0, h - 1)]
+        if fractional:
+            wide = np.zeros(rows.shape, dtype=bool)
+            for offset in range(-reach, reach + 2):
+                wide |= rows[:, np.clip(cols + base_x + offset, 0, w - 1)]
+            out[r0:r1] = wide
+        else:
+            out[r0:r1] = rows[:, np.clip(cols + base_x, 0, w - 1)]
+
+    with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
+        list(pool.map(band, range(0, h, 256)))
+    return out
 
 
 def valid_mask_translation(h: int, w: int, dx: float, dy: float) -> np.ndarray:
