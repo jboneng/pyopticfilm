@@ -26,6 +26,7 @@ from pyopticfilm.scan.calib_gl128_loader import (
     AHB_SHADING_IR,
     AHB_SHADING_VISIBLE,
     SHADING_GAIN_UNITY,
+    afe_strip_clocks,
     lit_channel_peaks,
     split_toggle_lines,
 )
@@ -600,6 +601,56 @@ def test_afe_gains_come_from_the_visible_line_peaks():
     assert peaks == (25700.0, 32300.0, 27240.0)
     # QuickScan's codes from peaks of this size.
     assert coarse_gains_from_wide_means(peaks, targets=(AFE_LINE_GAIN,) * 3) == (40, 31, 38)
+
+
+def test_afe_clocks_follow_the_dpi():
+    assert afe_strip_clocks(600, wide=False)[0] == 0x03 and afe_strip_clocks(600, wide=True)[0] == 0x1F
+    assert afe_strip_clocks(1200, wide=False)[0] == 0x01 and afe_strip_clocks(1200, wide=True)[0] == 0x04
+
+
+@dataclass
+class _NoisyGpio(_Recorder):
+    """0x32 reads back bits 3-5 that were not written, as a 135i does with the toggle on."""
+
+    _reads: int = 0
+    written_32: list[int] = field(default_factory=list)
+
+    def _after_register_write(self, addr: int, value: int) -> None:
+        if addr == 0x32:
+            self.written_32.append(value & 0xFF)
+        super()._after_register_write(addr, value)
+
+    def _before_register_read(self, addr: int) -> None:
+        super()._before_register_read(addr)
+        if addr == 0x32:
+            self._reads += 1
+            self.registers[0x32] = (self.registers[0x32] & ~0x38 & 0xFF) | (self._reads * 8 & 0x38)
+
+
+def test_0x32_never_takes_bits_from_the_readback(tmp_path):
+    rec = _NoisyGpio()
+    scanner = Scanner.open_fake(MODEL_135I, rec, calib_cache=tmp_path / "calib.json")
+    try:
+        scanner.load_holder()
+        rec.starts.clear()
+        rec.written_32.clear()
+        scanner.calibrate(resolution=600)
+        assert rec.written_32 and all(v & 0x18 == 0x18 for v in rec.written_32)
+        dark, white = [s for s in rec.starts if _u(s, 0x25, 3) == 256]
+        assert (rec.written_32.count(0xBD) > 0, rec.written_32.count(0x9D) > 0) == (True, True)
+        assert (dark[0x03], white[0x03]) == (0x20, 0x30)
+    finally:
+        scanner.close()
+
+
+def test_strips_never_write_start_zero_and_clear_in_steps(scanner, rec):
+    scanner.load_holder()
+    rec.writes.clear()
+    scanner.calibrate(resolution=600)
+    assert (0x0F, 0x00) not in rec.writes
+    first = rec.writes.index((0x0F, 0x01))
+    steps = [v for a, v in rec.writes[:first] if a == 0x0D]
+    assert steps == [0x00, 0x01, 0x05, 0x07]
 
 
 def test_multi_pass_repeats_the_frame(scanner, rec):

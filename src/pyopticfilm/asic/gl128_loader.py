@@ -20,8 +20,9 @@ usbmon captures of a 135i and the Plustek model INI
   does (:meth:`Gl128Loader.holder_loaded`). ``0x32`` bit 2 follows ``HOMESNR``.
 * **Light**: the white lamp is ``0x03`` bit 4, the IR LED ``0x32`` bit 5 and
   the toggle bit ``0x19`` bit 3. ``0x37`` is never written after boot.
-  ``0x32`` also carries the timing-set bit (7) and the loader outputs (0-4),
-  so only the bits that change are written, read-modify-write.
+  ``0x32`` also carries the timing-set bit (7) and the loader outputs (0-4).
+  Its readback does not match what was written (bits 3-5 change from read to
+  read with the toggle on), so every write starts from the last value written.
 * **Toggle mode**: every scan line is an IR line then a visible line. The
   calibration strips are VueScan's (two-line AFE strips, 256-line dark and
   stationary white), and shading fills two banks.
@@ -80,15 +81,14 @@ from pyopticfilm.scan.calib_gl128 import (
 from pyopticfilm.scan.calib_gl128_loader import (
     AFE_DPISET,
     AFE_LINE_GAIN,
-    AFE_PROBE_CLOCKS,
     AFE_PROBE_PIXELS,
     AFE_STRIP_LINES,
-    AFE_WIDE_CLOCKS,
     AHB_SHADING_IR,
     AHB_SHADING_VISIBLE,
     SHADING_LINES,
     SHADING_WHITE_TARGET_IR,
     SHADING_WHITE_TARGET_VISIBLE,
+    afe_strip_clocks,
     lit_channel_peaks,
     measured_shading_table,
     optical_black_means,
@@ -138,6 +138,8 @@ _STRIP_REGS: dict[int, int] = {
 #: ``SHDAREA | DVDSET`` (white). START sets ``SCAN`` on top.
 _STRIP_REG01 = 0x02
 _STRIP_REG01_DVDSET = 0x22
+#: ``0x0D`` before a strip's START, as before VueScan's first strip.
+_STRIP_CLRCNT_STEPS: tuple[int, ...] = (0x00, 0x01, 0x05, 0x07)
 
 #: Image-pass end (``64bit rgbi 35mm film preview``, after each frame): lamp
 #: pair, clear SCAN, shutter off, AGOHOME, lamp off. VueScan also writes two
@@ -151,6 +153,9 @@ _MOVE_POLL_S = 0.015
 
 class Gl128Loader(Gl128):
     """GL128 film-loader driver (OpticFilm 135i)."""
+
+    #: No capture writes ``0x0F = 0``, in any session on this model.
+    _stationary_reset_clears_start = False
 
     def __init__(self, protocol, model: Gl128Model) -> None:  # type: ignore[no-untyped-def]
         super().__init__(protocol, model)
@@ -167,18 +172,29 @@ class Gl128Loader(Gl128):
             return
         self._holder_loaded = False
         super().init(force=force)
+        self._reg_cache[HOLDER_SENSOR_REG] = int(self.model.init_regs[HOLDER_SENSOR_REG]) & 0xFF
 
     # --- light ------------------------------------------------------------
 
     def _write_bits(self, address: int, mask: int, value: int) -> int:
-        """Read-modify-write ``mask`` bits of ``address`` to ``value``; skip a no-op."""
-        current = int(self.protocol.read_register(address)) & 0xFF
+        """Set ``mask`` bits of ``address`` to ``value``; skip a no-op.
+
+        ``0x32`` starts from the last value written, the rest from a read.
+        """
+        if address == HOLDER_SENSOR_REG:
+            current = self._gpio_written()
+        else:
+            current = int(self.protocol.read_register(address)) & 0xFF
         new = (current & ~mask & 0xFF) | (value & mask)
         if new != current:
             self._write(address, new)
         else:
             self._reg_cache[address] = new
         return new
+
+    def _gpio_written(self) -> int:
+        """Last value written to ``0x32`` (the init table's before any write)."""
+        return self._reg_cache.get(HOLDER_SENSOR_REG, int(self.model.init_regs[HOLDER_SENSOR_REG])) & 0xFF
 
     def _apply_infrared(self, *, enabled: bool) -> None:
         """IR LED on ``0x32`` bit 5; ``0x37`` keeps its boot value."""
@@ -247,7 +263,7 @@ class Gl128Loader(Gl128):
 
         ``0x32`` bit 1 is restored afterwards.
         """
-        before = int(self.protocol.read_register(HOLDER_SENSOR_REG)) & LOADER_HOME_SENSOR_BIT
+        before = self._gpio_written() & LOADER_HOME_SENSOR_BIT
         self._set_home_stop(armed=armed)
         try:
             return self.read_status_reliable().is_at_home
@@ -680,7 +696,8 @@ class Gl128Loader(Gl128):
         reg01 = _STRIP_REG01_DVDSET if dvdset else _STRIP_REG01
         regs[r.REG_0x01] = reg01
         self._write_many(regs)
-        self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
+        for value in _STRIP_CLRCNT_STEPS:
+            self._write(r.REG_CLRCNT, value)
         self._write(r.REG_0x01, reg01 | r.SCAN)
         self._write(r.REG_START, r.START_GO)
         self._wait_stationary_data_ready(timeout_s, where=where)
@@ -711,7 +728,7 @@ class Gl128Loader(Gl128):
             endpixel=WINDOW_ORIGIN + pixels,
             dpiset=AFE_DPISET,
             lperiod=strip_line_period(pixels, LPERIOD_BASE),
-            clocks=AFE_WIDE_CLOCKS if wide else AFE_PROBE_CLOCKS,
+            clocks=afe_strip_clocks(self.model.asic_dpi_for(resolution), wide=wide),
             dark=False,
         )
         self.apply_timing_gpio(resolution)

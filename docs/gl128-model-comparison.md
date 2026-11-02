@@ -1004,7 +1004,9 @@ half.
 | Load | `load_holder()`: 0.5 s, clear `0x32` bit 1, 7200 forward (load ramp); reverse seek until `HOMESNR` (`0x1C = 0`, exposure 30000, `0x8A`–`0x92 = 0`) only when `HOMESNR` dropped and the motor is idle (`0x101` bit 0, `0x100` bit 1), otherwise eject | insert, both feeds |
 | Eject | `eject_holder()`: the QuickScan order above; off the loader home, a reverse seek straight back, `FEEDL` = the 73722-step travel | `holder eject`, QuickScan capture |
 | Home | `home()`: the load's two moves (1 inch in, then the reverse seek) when a holder is in the slot and off the loader home; after a lost park, the eject's seek alone; no move with the slot empty. Only on request: `scan()`, `calibrate()` and `warmup()` do not home this model after `init()`, since a holder off the loader home may be at the end of a strip or just outside the slot, and a scan or calibration raises | insert, both feeds |
-| AFE | gains from the visible line's 4-pixel boxcar peaks, `code = int(75.6 − 75.6 · peak / 0xD600)` (QuickScan, `LineGain`); probe 35–547 (2 lines) at offsets `0x80`/`0xFF`, full-width strip, probe pair again; `DPISET = 1200`, `LPERIOD = 10807 + px/4`, `0x2B` `0x01`/`0x04`, `0xA5 = 0x01`, `0xAB = 0x30`, `0xA6`–`0xA9 = 00 01 00 01` | both previews |
+| Strip start | `0x0D` = `00 01 05 07`, then `01`, `0F = 01`; `0x0F = 0` is never written (no capture has it) | every 135i capture |
+| `0x32` | every write starts from the last value written, never the readback (bits 3–5 change from read to read with the toggle on). From the init table's `0x1F` that gives VueScan's `bd` lit and `9d` dark at 600 and 1200 dpi | panorama, preview, 135i run |
+| AFE | gains from the visible line's 4-pixel boxcar peaks, `code = int(75.6 − 75.6 · peak / 0xD600)` (QuickScan, `LineGain`); probe 35–547 (2 lines) at offsets `0x80`/`0xFF`, full-width strip, probe pair again; `DPISET = 1200`, `LPERIOD = 10807 + px/4`, `0x2B` `0x01`/`0x04` (600 dpi: `0x03`/`0x1F`), `0xA5 = 0x01`, `0xAB = 0x30`, `0xA6`–`0xA9 = 00 01 00 01` | both previews |
 | Dark | lamp, toggle bit and IR LED off; 256 lines through the scan window, `0xA3 = 1` | both previews |
 | White | lamp, toggle bit and IR LED on; 256 lines with `0x01 = 0x23`, motor off | both previews |
 | Shading | per-pixel dark, unity `0x4000`, then gains `target · 0x4000 / white`; even lines (IR, target `0xF000`) fill `0x10014000`, odd lines (visible, target `0x16000`) `0x10034000`; `split_toggle_lines` returns the odd lines as the image and the even lines as IR | both previews (21064 bytes per bank at 1728 px) |
@@ -1047,8 +1049,13 @@ are not replayed.
 
 ### 11.9 Open gaps (135i)
 
-- One 135i hardware run so far: load, eject and one 600 dpi IR frame. Whole
+- One full 135i frame so far: load, eject and one 600 dpi IR frame. Whole
   strip, other resolutions and multi-exposure have not run.
+- The second session stopped in calibration, in two ways, and neither cause
+  is proven. The first AFE strip hung at status `0xcd` until USB was unplugged
+  in 5 of 7 runs. The white strip read 12594 at `0x32 = ad` and clipped at `a5`.
+  VueScan's AFE strips read the same light at `ad` and `b5`, so bits 3 and 4 do
+  not explain the white strip on their own.
 - Shading gain unity `0x4000` is VueScan's first upload on this model
   (`0x06 = 0xF8`); the SE family uses `0x2000` (`0x06 = 0xF0`). Confirm the
   scale on hardware.

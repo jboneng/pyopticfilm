@@ -82,10 +82,20 @@ AFE_END_COLUMNS = 32
 AFE_LINE_GAIN = 0xD600
 #: Boxcar over which an AFE peak is taken.
 AFE_PEAK_BOX = 4
-#: ``(0x2B, 0xA5, 0xAB)`` for the probe and the full-width strip (35 mm
-#: preview). ``0xAB`` keeps the boot value on AFE strips.
+#: ``(0x2B, 0xA5, 0xAB)`` for the probe and the full-width strip. ``0xAB`` keeps
+#: the boot value on AFE strips. Measured at 1200 (35 mm preview) and 600
+#: (panorama) dpi; the 1200 values serve the rest.
 AFE_PROBE_CLOCKS: tuple[int, int, int] = (0x01, 0x01, 0x30)
 AFE_WIDE_CLOCKS: tuple[int, int, int] = (0x04, 0x01, 0x30)
+AFE_PROBE_CLOCKS_600: tuple[int, int, int] = (0x03, 0x01, 0x30)
+AFE_WIDE_CLOCKS_600: tuple[int, int, int] = (0x1F, 0x01, 0x30)
+
+
+def afe_strip_clocks(dpi: int, *, wide: bool) -> tuple[int, int, int]:
+    """``(0x2B, 0xA5, 0xAB)`` of an AFE strip at hardware ``dpi``."""
+    if int(dpi) == 600:
+        return AFE_WIDE_CLOCKS_600 if wide else AFE_PROBE_CLOCKS_600
+    return AFE_WIDE_CLOCKS if wide else AFE_PROBE_CLOCKS
 
 
 def strip_line_period(pixels: int, base: int) -> int:

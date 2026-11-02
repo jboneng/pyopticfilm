@@ -421,6 +421,10 @@ class Gl128:
         kind = "motorized" if motorized else "stationary"
         raise ScanError(f"{where}: no {kind} data ready within {timeout_s:.0f}s (last status=0x{last:02x})")
 
+    #: Write ``START = 0`` and clear the counters in
+    #: :meth:`_reset_stationary_scan_engine`.
+    _stationary_reset_clears_start: bool = True
+
     def _reset_stationary_scan_engine(self, *, where: str) -> None:
         """Abort a leftover image SCAN so stationary geometry writes stick.
 
@@ -431,10 +435,12 @@ class Gl128:
         """
         r = self.registers
         motor_mask = r.MTRPWR | r.AGOHOME | r.FASTFED
-        self._write(r.REG_START, 0x00)
+        if self._stationary_reset_clears_start:
+            self._write(r.REG_START, 0x00)
         self._write(r.REG_0x01, _CANCEL_REG01)
         self._write(r.REG_0x02, 0x00)
-        self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
+        if self._stationary_reset_clears_start:
+            self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
         deadline = time.monotonic() + _STATIONARY_IDLE_WAIT_S
         last01 = last02 = last_st = -1
         status = None
