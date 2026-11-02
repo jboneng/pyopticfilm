@@ -16,6 +16,7 @@ from pyopticfilm.exceptions import ScanError
 from pyopticfilm.scan.geometry import compute_geometry
 from pyopticfilm.scan.session_gl128 import (
     Gl128ScanSession,
+    check_gl128_multi_pass,
     gl128_multi_pass_allowed,
     native_line_floor,
 )
@@ -111,33 +112,46 @@ def _session_pass_tables(dpi: int, **run_kwargs) -> list[tuple[int, int]]:
     return passes
 
 
-@pytest.mark.parametrize(
-    "run_kwargs",
-    [{"multi_exposure": True}, {"n_passes": 2}, {"multi_exposure": True, "n_passes": 2}],
-)
-def test_se_me_and_multi_pass_rejected_at_7200_before_any_pass(run_kwargs):
-    passes: list[tuple[int, int]] = []
-    with pytest.raises(ScanError, match="7200 dpi"):
-        passes = _session_pass_tables(7200, **run_kwargs)
-    assert passes == []
+def test_se_me_runs_at_7200():
+    passes = _session_pass_tables(7200, multi_exposure=True)
+    assert len(passes) == 2
+    # Short pass keeps the native line floor; the long table follows its REG.
+    assert passes[0] == (28000, 14000)
+    long_ch, long_reg = passes[1]
+    assert long_ch == long_reg
+    assert 28000 <= long_reg <= 64000
+
+
+def test_se_multi_pass_runs_at_7200():
+    assert _session_pass_tables(7200, n_passes=2) == [(28000, 14000), (28000, 14000)]
 
 
 @pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE])
-def test_multi_pass_allowed_below_native_only(model):
-    assert not gl128_multi_pass_allowed(model, 7200)
-    assert all(gl128_multi_pass_allowed(model, dpi) for dpi in model.resolutions_dpi if dpi != 7200)
-    below_native = tuple(dpi for dpi in model.resolutions_dpi if dpi != 7200)
-    assert model.multi_exposure_resolutions_dpi == below_native
-    assert model.multi_pass_resolutions_dpi == below_native
+def test_multi_pass_allowed_at_every_resolution(model):
+    assert all(gl128_multi_pass_allowed(model, dpi) for dpi in model.resolutions_dpi)
+    assert model.multi_exposure_resolutions_dpi == tuple(model.resolutions_dpi)
+    assert model.multi_pass_resolutions_dpi == tuple(model.resolutions_dpi)
+
+
+def test_check_gl128_multi_pass_still_rejects_disallowed_resolution():
+    class _Restricted:
+        model = "Restricted"
+
+        @staticmethod
+        def multi_pass_allowed_at(resolution: int) -> bool:
+            return resolution != 7200
+
+    with pytest.raises(ScanError, match="7200 dpi"):
+        check_gl128_multi_pass(_Restricted(), 7200, multi_exposure=True, n_passes=1)
+    check_gl128_multi_pass(_Restricted(), 3600, multi_exposure=True, n_passes=1)
 
 
 @pytest.mark.parametrize("run_kwargs", [{"multi_exposure": True}, {"n_passes": 2}])
-def test_scanner_rejects_7200_me_before_opening_asic(run_kwargs):
+def test_scanner_accepts_7200_me_and_multi_pass(run_kwargs):
     scanner = Scanner.open_fake(MODEL_8200I_SE)
     try:
-        with pytest.raises(ScanError, match="7200 dpi"):
-            scanner.scan(resolution=7200, area=_TINY, apply_calib=False, **run_kwargs)
-        assert not scanner._asic._initialized
+        img = scanner.scan(resolution=7200, area=_TINY, apply_calib=False, **run_kwargs)
+        assert img.rgb.size > 0
     finally:
         scanner.close()
 

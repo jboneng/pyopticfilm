@@ -526,11 +526,13 @@ class Gl128Common:
     def multi_pass_allowed_at(self, resolution: int) -> bool:
         """Whether multi-exposure and Multi-Pass may run at ``resolution``.
 
-        Not at oversample 1 (native 7200 dpi): on the 8200i SE the ME long pass
-        (64000) drained at about 1 MB/s and the scanner dropped off USB part way
-        through the frame.
+        True at every resolution, native 7200 dpi included. At oversample 1 the
+        ME long pass stays capped at 64000 by
+        :func:`pyopticfilm.scan.session_gl128.clamp_me_long`. A subclass can
+        override this to restrict resolutions; ``Scanner.scan`` and
+        ``Gl128ScanSession.run`` raise ``ScanError`` where it returns False.
         """
-        return self.oversample_for(resolution) != 1
+        return True
 
     @property
     def multi_exposure_resolutions_dpi(self) -> tuple[int, ...]:

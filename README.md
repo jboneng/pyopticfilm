@@ -228,14 +228,14 @@ typically only needs these combinations, named as follows:
 | Fixed Multi-Exposure         | `True`  | `"fixed"` | `1` |
 | Fixed Multi-Pass             | `True`  | `"fixed"` | `2`–`9` |
 
-**Resolution limits.** Multi-exposure and Multi-Pass are not available at every
-resolution: on the GL128 models they are off at 7200 dpi. Before offering them
-for a resolution, check the model; `scan()` raises `ScanError` otherwise. Models
-without the attributes don't support the mode at all.
+**Resolution limits.** Check the model before you offer multi-exposure or
+Multi-Pass for a resolution; `scan()` raises `ScanError` where a mode is not
+allowed. The GL128 models allow both at every resolution, 7200 dpi included.
+Models without these attributes don't support the mode at all.
 
 ```python
 model = scanner.model
-me_dpis = getattr(model, "multi_exposure_resolutions_dpi", ())   # e.g. (3600, 2400, ...) — no 7200
+me_dpis = getattr(model, "multi_exposure_resolutions_dpi", ())   # e.g. (7200, 3600, 2400, ...)
 stack_dpis = getattr(model, "multi_pass_resolutions_dpi", ())     # n_passes > 1
 offer_me = dpi in me_dpis
 offer_multi_pass = dpi in stack_dpis

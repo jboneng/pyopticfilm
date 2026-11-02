@@ -111,9 +111,8 @@ def check_gl128_multi_pass(
         return
     mode = "multi_exposure=True" if multi_exposure else f"n_passes={n_passes}"
     raise ScanError(
-        f"{mode} is not supported at {int(resolution)} dpi on {model.model}: "
-        "multi-exposure and Multi-Pass are disabled at native resolution. "
-        "Scan a single pass, or pick a lower resolution."
+        f"{mode} is not supported at {int(resolution)} dpi on {model.model}. "
+        "Scan a single pass, or pick another resolution."
     )
 
 
