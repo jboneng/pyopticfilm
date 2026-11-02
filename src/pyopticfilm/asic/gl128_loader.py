@@ -146,6 +146,10 @@ _STRIP_CLRCNT_STEPS: tuple[int, ...] = (0x00, 0x01, 0x05, 0x07)
 #: GPIO requests here; they only drive the front-panel LEDs.
 _END_LAMP_PRE: tuple[int, ...] = (0x30, 0x20)
 _END_LAMP_POST: tuple[int, ...] = (0x10, 0x00)
+#: Between the two clock commands of every scan (all three scan captures):
+#: lamp pulses, then 65-79 ms before the scan clock. They leave the lamp on.
+_CLOCK_LAMP_PULSES: tuple[int, ...] = (0x20, 0x30, 0x20, 0x30)
+_CLOCK_SWITCH_GAP_S = 0.075
 _END_REG01 = 0x22
 #: Interval between status samples while a move runs.
 _MOVE_POLL_S = 0.015
@@ -229,6 +233,11 @@ class Gl128Loader(Gl128):
         self._write(r.REG_0x03, r.XPASEL)
         self._set_toggle(enabled=False)
         self._apply_infrared(enabled=False)
+
+    def _between_scan_clocks(self) -> None:
+        for value in _CLOCK_LAMP_PULSES:
+            self._write(self.registers.REG_0x03, value)
+        time.sleep(_CLOCK_SWITCH_GAP_S)
 
     def _strike_lamp_on(self) -> None:
         self.lamp_on()

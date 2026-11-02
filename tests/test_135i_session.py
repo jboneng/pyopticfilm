@@ -643,6 +643,18 @@ def test_0x32_never_takes_bits_from_the_readback(tmp_path):
         scanner.close()
 
 
+def test_scan_clock_switch_pulses_the_lamp_and_waits(scanner, rec, monkeypatch):
+    asic = scanner.asic
+    asic.init()
+    order: list = []
+    monkeypatch.setattr(asic, "_write_clock", lambda value: order.append(("clock", value)))
+    monkeypatch.setattr("time.sleep", lambda s: order.append(("sleep", s)))
+    rec.writes.clear()
+    asic.enter_scan_clock()
+    assert order == [("clock", 0x0D), ("sleep", 0.075), ("clock", 0x0E)]
+    assert [v for a, v in rec.writes if a == 0x03] == [0x20, 0x30, 0x20, 0x30]
+
+
 def test_strips_never_write_start_zero_and_clear_in_steps(scanner, rec):
     scanner.load_holder()
     rec.writes.clear()

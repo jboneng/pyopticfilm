@@ -1328,6 +1328,9 @@ class Gl128:
         self.protocol.write_0x8c(0x10, value)
         self.protocol.write_0x8c(0x13, value)
 
+    def _between_scan_clocks(self) -> None:
+        """Hook between the boot and scan clock commands of :meth:`enter_scan_clock`."""
+
     def enter_scan_clock(self) -> None:
         """Switch to the scan clock the way the vendor opens every scan pass.
 
@@ -1341,6 +1344,7 @@ class Gl128:
         boot = int(self.model.asic_clock_boot_0x8c)
         scan = int(self.model.asic_clock_scan_0x8c)
         self._write_clock(boot)
+        self._between_scan_clocks()
         self._write_clock(scan)
         self._write(_REG_CLK_DRAM, int(self.model.sensor_custom_regs[_REG_CLK_DRAM]))
         self._write(_REG_0x13, int(self.model.init_regs[_REG_0x13]))
