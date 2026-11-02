@@ -612,6 +612,47 @@ class Gl128Common:
         base = int(exposure if exposure is not None else self.exposure_lperiod)
         return base // self.oversample_for(resolution)
 
+    def image_linesel_for(
+        self, resolution: int, *, exposure: int, channel_exposure: int
+    ) -> int:
+        """``0x1D`` low bits (LINESEL) for an image pass.
+
+        SilverFast's scan motor table period is ``exposure x (LINESEL + 1) /
+        oversample`` on every image pass in the captures: the 8100 V2 and 8200i
+        SE PPI ladders, the ME short and long passes at 1200 and 1800 ppi
+        (``0x80``, 14000 -> 2333 / 3500 and 42000 -> 7000 / 10500) and the V2's
+        7200 ppi ME pair (``07_multi_exposure``): the short pass writes ``0x81``
+        with a 28000 table for ``REG_EXPOSURE`` 14000, the long pass ``0x80``
+        with a 42000 table for 42000. LINESEL 1 is only the native 7200 ppi
+        short / single pass, whose doubled line period keeps a full-width line
+        from outrunning USB; the ME long pass runs one line period per line.
+
+        So LINESEL is a property of the pass, not of the PPI: 1 when the table
+        runs two exposure periods per line, else 0. Writing ``0x81`` with a
+        table equal to the exposure (the old per-PPI rule on a 7200 ppi long
+        pass) desyncs line timing from the motor and hangs the scanner.
+        """
+        if self.oversample_for(resolution) != 1 or int(exposure) <= 0:
+            return 0
+        return 1 if int(channel_exposure) == 2 * int(exposure) else 0
+
+    def image_dummy_for(self, resolution: int, *, span: int, linesel: int) -> int:
+        """``0x2B`` for an image pass ``span`` native pixels wide.
+
+        :attr:`dummy_by_dpi` holds SilverFast's single-pass values, which are
+        ``ceil(lines x 6 x pixels / 8192)`` with one line of buffer below 7200
+        ppi and three at 7200 (LINESEL 1, ``0x17``). The 7200 ppi ME long pass
+        (LINESEL 0) gets two lines, ``0x10`` on the full frame, like the white
+        shading strip (8100 V2 ``07_multi_exposure``, 7200 long pass). Unknown
+        PPIs raise ``KeyError`` like the table lookup.
+        """
+        asic_dpi = self.asic_dpi_for(resolution)
+        table = int(self.dummy_by_dpi[asic_dpi])
+        if self.oversample_for(resolution) == 1 and int(linesel) == 0:
+            pixels = int(span) * asic_dpi / _NATIVE_DPI
+            return math.ceil(2 * 6 * pixels / 8192)
+        return table
+
     def scan_motor_table(self, period: int) -> tuple[int, ...]:
         """Words for AHB ``0x10000000``/``0x10004000``/``0x10008000``: flat ``period``."""
         from pyopticfilm.device.tables_8200i_se import exposure_table

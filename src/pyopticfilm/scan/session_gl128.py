@@ -50,10 +50,13 @@ IMAGE_CHUNK_BYTES = BULK_MAX_SIZE
 #: timing to (``dpi,offset,bytes,read_s,gap_s``).
 ACQUIRE_TIMING_ENV = "PYOPTICFILM_ACQUIRE_TIMING"
 
-#: Low bits of ``0x1D`` for an image pass, by ASIC dpi (8200i SE 13_ppi_ladder,
-#: 8100 V2 04_color_7200). SilverFast writes ``0x81`` before a 7200 dpi image;
-#: with ``0x80`` a full-width line outruns USB and the motor stops and restarts.
-_IMAGE_REG_1D_LOW_BY_DPI: dict[int, int] = {7200: 0x01}
+#: ``0x1D``: the low bits are LINESEL, set per image pass from the scan motor
+#: table / exposure ratio (``Gl128Common.image_linesel_for``). SilverFast
+#: writes ``0x81`` before a 7200 dpi single or ME-short pass (28000 table for
+#: exposure 14000) and ``0x80`` before the 7200 dpi ME long pass (42000 table
+#: for exposure 42000; 8100 V2 ``07_multi_exposure``). With ``0x80`` on the
+#: short pass a full-width line outruns USB and the motor stops and restarts;
+#: with ``0x81`` on the long pass the scanner hangs (PR #156).
 _REG_1D = 0x1D
 _REG_1D_LOW_MASK = 0x1F
 
@@ -318,10 +321,6 @@ class Gl128ScanSession(ScanSession):
         cache.pop(r.REG_FE_HIGH, None)
         cache.pop(r.REG_FE_LOW, None)
 
-        if not shading:
-            low = _IMAGE_REG_1D_LOW_BY_DPI.get(model.asic_dpi_for(dpi), 0)
-            cache[_REG_1D] = (cache.get(_REG_1D, 0x80) & ~_REG_1D_LOW_MASK) | low
-
         motor = r.MTRPWR
         if not shading:
             # Image pass: AGOHOME parks the carriage when the scan ends.
@@ -389,6 +388,32 @@ class Gl128ScanSession(ScanSession):
         # moved the carriage, which would strand it mid-window.
         if channel_exp is not None:
             exposure_table(channel_exp)
+
+        if not shading:
+            # LINESEL (0x1D low bits) and the line buffer (0x2B) follow the
+            # pass: the table runs exposure x (LINESEL + 1) clocks per line.
+            linesel = 0
+            linesel_fn = getattr(model, "image_linesel_for", None)
+            if channel_exp is not None and callable(linesel_fn):
+                linesel = int(
+                    linesel_fn(dpi, exposure=exposure_reg, channel_exposure=channel_exp)
+                )
+                if (
+                    model.oversample_for(dpi) == 1
+                    and channel_exp != exposure_reg * (linesel + 1)
+                ):
+                    logger.warning(
+                        "GL128 %d dpi scan motor table %d is not REG_EXPOSURE %d x "
+                        "(LINESEL %d + 1); line timing and motor may desync",
+                        dpi,
+                        channel_exp,
+                        exposure_reg,
+                        linesel,
+                    )
+            cache[_REG_1D] = (cache.get(_REG_1D, 0x80) & ~_REG_1D_LOW_MASK) | linesel
+            dummy_fn = getattr(model, "image_dummy_for", None)
+            if callable(dummy_fn):
+                cache[0x2B] = int(dummy_fn(dpi, span=span, linesel=linesel))
 
         # Capture-constant feeds from home — never geometry.starty (that was the
         # grinding bug). Calibration passes stay put (no motor). Positioning is

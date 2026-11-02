@@ -286,6 +286,20 @@ class Model8300iSE(Gl128Common):
         reg_1d_lines = 2 if oversample == 1 else 1
         return base * reg_1d_lines // (2 * oversample)
 
+    def image_linesel_for(
+        self, resolution: int, *, exposure: int, channel_exposure: int
+    ) -> int:
+        """``0x1D`` low bits: 1 for every 7200 ppi image pass, else 0.
+
+        :meth:`channel_exposure_for` already folds LINESEL 1 into the 7200
+        ppi table (``exposure x 2 x 7200 / 14400``), so the table and the
+        register stay consistent for the short and the ME long pass alike.
+        No 8300i SE capture shows a 7200 ppi ME long pass; the 8200i SE and
+        8100 V2 switch to LINESEL 0 there (:meth:`Gl128Common.image_linesel_for`).
+        """
+        del exposure, channel_exposure
+        return 1 if self.oversample_for(resolution) == 1 else 0
+
     def scan_motor_table(self, period: int) -> tuple[int, ...]:
         """Vendor acceleration ramp clamped at ``period`` (head 40404)."""
         return scan_motor_table(period)

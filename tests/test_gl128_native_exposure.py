@@ -45,6 +45,69 @@ def test_image_reg_0x1d_matches_vendor(model, dpi, reg_1d):
     assert _image_regs(model, dpi)[0x1D] == reg_1d
 
 
+def _image_regs_pass(model, dpi: int, **pass_state) -> dict[int, int]:
+    asic = MagicMock()
+    asic._motor_moves_enabled = False
+    asic.last_afe = None
+    asic.asic_shading_ready = True
+    asic._scan_method = "color"
+    session = Gl128ScanSession(asic, model)
+    session.se_regs = Gl128Registers()
+    session._lamp_requested = True
+    for key, value in pass_state.items():
+        setattr(session, key, value)
+    session._configure(compute_geometry(dpi, model=model, area=None))
+    regs = dict(asic.protocol.write_registers_batched.call_args[0][0])
+    regs["channel"] = asic.upload_tables.call_args.kwargs["channel_exposure"]
+    return regs
+
+
+@pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2])
+def test_se_v2_7200_me_long_pass_writes_linesel_0_and_two_line_buffer(model):
+    """8100 V2 07_multi_exposure, 7200 ppi: the ME long pass (REG_EXPOSURE
+    42000, 42000 table) writes 0x1D=0x80 and 0x2B=0x10; the short pass
+    (14000, 28000 table) 0x81 and 0x17. 0x81 on the long pass hung the V2
+    (PR #156)."""
+    long = _image_regs_pass(model, 7200, _pass_exposure=42000, _pass_long_exposure=True)
+    assert (long[0x1D], long[0x2B], long["channel"]) == (0x80, 0x10, 42000)
+    short = _image_regs_pass(model, 7200, _pass_exposure=14000)
+    assert (short[0x1D], short[0x2B], short["channel"]) == (0x81, 0x17, 28000)
+
+
+@pytest.mark.parametrize(("dpi", "dummy", "channel"), [(1200, 0x02, 7000), (3600, 0x04, 21000)])
+def test_se_me_long_pass_below_7200_keeps_linesel_0(dpi, dummy, channel):
+    """SE session 14 (1800) and V2 07_multi_exposure (1200): oversampled long
+    passes stay at 0x80 with the single-pass dummy and exposure / oversample."""
+    long = _image_regs_pass(MODEL_8200I_SE, dpi, _pass_exposure=42000, _pass_long_exposure=True)
+    assert (long[0x1D], long[0x2B], long["channel"]) == (0x80, dummy, channel)
+
+
+def test_8300i_se_7200_me_long_pass_keeps_linesel_1():
+    """No 8300i SE 7200 ME capture: its table already folds LINESEL 1 in."""
+    long = _image_regs_pass(MODEL_8300I_SE, 7200, _pass_exposure=42000, _pass_long_exposure=True)
+    assert (long[0x1D], long[0x2B], long["channel"]) == (0x81, 0x1F, 42000)
+
+
+@pytest.mark.parametrize("manual", [28000, 14000])
+def test_se_manual_7200_pass_linesel_follows_table(manual):
+    """A manual override runs the table at the exposure itself, so LINESEL is 0."""
+    regs = _image_regs_pass(MODEL_8200I_SE, 7200, _pass_exposure=manual, _pass_manual=True)
+    assert (regs[0x1D], regs["channel"]) == (0x80, manual)
+
+
+def test_image_linesel_and_dummy_rules():
+    v2 = MODEL_8100_V2
+    assert v2.image_linesel_for(7200, exposure=14000, channel_exposure=28000) == 1
+    assert v2.image_linesel_for(7200, exposure=42000, channel_exposure=42000) == 0
+    assert v2.image_linesel_for(7200, exposure=28000, channel_exposure=28000) == 0
+    assert v2.image_linesel_for(3600, exposure=14000, channel_exposure=7000) == 0
+    assert v2.image_dummy_for(7200, span=10368, linesel=1) == 0x17
+    assert v2.image_dummy_for(7200, span=10368, linesel=0) == 0x10
+    assert v2.image_dummy_for(3600, span=10368, linesel=0) == 0x04
+    with pytest.raises(KeyError):
+        v2.image_dummy_for(5000, span=10368, linesel=0)
+
+
 def _configure(model, dpi: int, **pass_state) -> tuple[int, int]:
     asic = MagicMock()
     asic._motor_moves_enabled = False
