@@ -397,9 +397,10 @@ class Model135i(Gl128Common):
     def me_long_exposure_cap(self, resolution: int) -> int:
         """Largest long exposure whose scan motor word fits under 64000.
 
-        The word is ``exposure * Ydpi / 3600`` on this model (64000 at 3600
-        dpi, 192000 at 1200), not ``exposure / oversample`` as on the
-        flatbed GL128 models.
+        The word is ``exposure * Ydpi / 3600`` on this model (32000 at 7200
+        dpi, 64000 at 3600, 192000 at 1200), not ``exposure / oversample``
+        as on the flatbed GL128 models. 42000 at 7200 dpi would be a word
+        of 84000, which does not fit the table.
         """
         return 64000 * 3600 // self.asic_dpi_for(resolution)
 

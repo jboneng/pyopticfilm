@@ -1040,7 +1040,8 @@ exposure is filled in (fixed: `me_fixed_long_exposure = 42000`, 3× short).
 `0x90` scales the timing set's value with the exposure (33000 at 42000; no
 capture above 28000). The long cap is
 `64000 · 3600 / Ydpi` (`me_long_exposure_cap`): the scan motor word here is
-`E · Ydpi / 3600`, not `E / oversample`.
+`E · Ydpi / 3600`, not `E / oversample`. That is 32000 at 7200 dpi; the
+filled-in 42000 would be a word of 84000.
 
 **Watcher**: `Scanner.watch_loader(stop=…)` polls the holder sensor and the
 interrupt endpoint every 190 ms (VueScan's idle interval) and reports

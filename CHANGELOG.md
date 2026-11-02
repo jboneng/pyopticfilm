@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **OpticFilm 135i multi-exposure at 7200 dpi stays inside the 16-bit scan-motor table.** The motor word is `exposure × Ydpi / 3600`, so the filled-in long exposure of 42000 would be 84000. The long pass is capped at 32000 (word 64000), including a pass that arrives already set to the flatbed 42000.
 - **Multi-exposure merges lost most of the long pass on real negatives, and colour shifted in dense film.** On a real 1800 dpi pair the merge barely beat the short alone.
   - **Registration.** The long feeds at a slightly different rate from the short (-1.3 px per 1000 rows on that pair), so one translation only registered the frame centre. The long now gets a per-row warp, fitted from full-resolution tiles and resampled with Lanczos-4. The fitted noise model no longer absorbs the misregistration (alpha 13 → 4).
   - **Shift field.** Across the frame the passes also differ by up to a pixel, which on sharp silver grain read as disagreement: on HP5+ the merge rejected usable long on 15 % of green. A smooth field is now fitted from small tiles, down to 2-4 %.

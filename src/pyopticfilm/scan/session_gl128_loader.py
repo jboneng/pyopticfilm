@@ -39,7 +39,12 @@ from pyopticfilm.scan.exposure_override import validate_manual_exposure, validat
 from pyopticfilm.scan.geometry import ScanGeometry
 from pyopticfilm.scan.me_exposure import validate_me_long_mode
 from pyopticfilm.scan.pipeline import ImagePipeline
-from pyopticfilm.scan.session_gl128 import _MOTOR_GATED_HINT, Gl128ScanSession, check_gl128_multi_pass
+from pyopticfilm.scan.session_gl128 import (
+    _MOTOR_GATED_HINT,
+    Gl128ScanSession,
+    check_gl128_multi_pass,
+    clamp_me_long,
+)
 
 logger = get_logger(__name__)
 
@@ -150,6 +155,19 @@ class Gl128LoaderScanSession(Gl128ScanSession):
         check_gl128_multi_pass(
             self.model, geometry.resolution, multi_exposure=multi_exposure, n_passes=n_passes
         )
+        if me_long_exposure is not None:
+            # Ceiling only, so the merge's long/short ratio is the exposure
+            # the motor table is built from. A manual value under the floor stays.
+            raw_long = int(me_long_exposure)
+            capped_long = clamp_me_long(self.model, geometry.resolution, raw_long)
+            if raw_long > capped_long:
+                logger.warning(
+                    "ME long exposure %d at %d dpi is above the scan-motor cap %d; clamping",
+                    raw_long,
+                    geometry.resolution,
+                    capped_long,
+                )
+                me_long_exposure = capped_long
 
         if not self.asic._initialized:
             self.asic.init()
@@ -322,6 +340,19 @@ class Gl128LoaderScanSession(Gl128ScanSession):
         self._set24(cache, r.REG_ENDPIXEL, geometry.pixel_endx)
         self._verify_geometry_usb_span(geometry)
         exposure = None if self._pass_exposure is None else int(self._pass_exposure)
+        if exposure is not None:
+            # Ceiling only. A value under the floor (a manual short pass) stays.
+            # The 135i motor word is exposure * Ydpi / 3600, so the flatbed
+            # 42000 long at 7200 dpi is 84000 and does not fit the 16-bit table.
+            capped = clamp_me_long(model, dpi, exposure)
+            if exposure > capped:
+                logger.warning(
+                    "GL128 loader exposure %d at %d dpi is above the scan-motor cap %d; clamping",
+                    exposure,
+                    dpi,
+                    capped,
+                )
+                exposure = capped
         cache.update(model.exposure_regs_for(dpi, exposure=exposure))
         exposure_reg = (cache[0x7D] << 16) | (cache[0x7E] << 8) | cache[0x7F]
         self._set24(cache, r.REG_FEEDL, 1)

@@ -70,20 +70,27 @@ _ME_CHANNEL_EXPOSURE_MAX = 64_000
 def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
     """Clamp ME colour-long exposure to the shared range and the AHB table.
 
-    ``me_long_clamp_min`` / ``me_long_clamp_max`` are shared by both GL128
+    ``me_long_clamp_min`` / ``me_long_clamp_max`` are shared by the GL128
     models (14000–85000). The ceiling is also
     ``min(model max, 64000 * oversample(resolution))`` so a native 7200 dpi
-    pass cannot overflow the 16-bit scan motor table.
+    pass cannot overflow the 16-bit scan motor table. ``me_long_clamp_max_native``,
+    when a model defines it, tightens oversample 1 further (42000 on the
+    flatbeds). A model whose motor word is not ``exposure / oversample``
+    (the 135i: ``exposure * Ydpi / 3600``) then applies
+    ``me_long_exposure_cap`` on top, so 42000 at 7200 dpi becomes 32000
+    and the table word stays 64000.
     """
     lo = int(model.me_long_clamp_min)
     hi = int(model.me_long_clamp_max)
+    oversample = max(1, int(model.oversample_for(resolution)))
+    hi = min(hi, _ME_CHANNEL_EXPOSURE_MAX * oversample)
+    if oversample == 1:
+        native_max = getattr(model, "me_long_clamp_max_native", None)
+        if native_max is not None:
+            hi = min(hi, int(native_max))
     cap_fn = getattr(model, "me_long_exposure_cap", None)
     if callable(cap_fn):
-        # Models whose scan motor word is not ``exposure / oversample`` (135i).
         hi = min(hi, int(cap_fn(resolution)))
-    else:
-        oversample = max(1, int(model.oversample_for(resolution)))
-        hi = min(hi, _ME_CHANNEL_EXPOSURE_MAX * oversample)
     return min(max(int(exp_long), lo), hi)
 
 

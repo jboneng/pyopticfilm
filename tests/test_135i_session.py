@@ -676,10 +676,31 @@ def test_multi_pass_repeats_the_frame(scanner, rec):
 def test_me_long_cap_follows_the_135i_motor_word():
     from pyopticfilm.scan.session_gl128 import clamp_me_long
 
-    # Motor word = exposure * Ydpi / 3600 must stay under 64000.
+    # Motor word = exposure * Ydpi / 3600 must stay at or under 64000.
+    # 42000 is the flatbed long exposure; at 7200 dpi that word is 84000.
+    assert clamp_me_long(MODEL_135I, 7200, 42000) == 32000
+    assert clamp_me_long(MODEL_135I, 7200, 84000) == 32000
+    assert MODEL_135I.channel_exposure_for(7200, exposure=32000) == 64000
     assert clamp_me_long(MODEL_135I, 3600, 200000) == 64000
     assert clamp_me_long(MODEL_135I, 1200, 200000) == 85000
     assert clamp_me_long(MODEL_8200I_SE, 3600, 200000) == 85000
+    assert clamp_me_long(MODEL_8200I_SE, 7200, 42000) == 42000
+
+
+def test_7200_long_exposure_is_clamped_before_the_motor_table(rec, tmp_path):
+    sc = Scanner.open_fake(MODEL_135I, rec, calib_cache=tmp_path / "c.json")
+    asic = sc.asic
+    asic.init()
+    asic._motor_moves_enabled = False
+    session = create_session(asic, MODEL_135I)
+    session._pass_exposure = 42000
+    rec.ahb.clear()
+    session._configure(compute_geometry(7200, model=MODEL_135I))
+    regs = rec.registers
+    assert _u(regs, 0x7D, 3) == 32000
+    motor = [blob for a, blob in rec.ahb if a == R.AHB_SCAN_MOTOR_0]
+    assert _words(motor[0]) == (64000,) * 256
+    sc.close()
 
 
 # --- loader watcher -----------------------------------------------------------
