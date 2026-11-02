@@ -119,7 +119,7 @@ def test_se_me_runs_at_7200():
     assert passes[0] == (28000, 14000)
     long_ch, long_reg = passes[1]
     assert long_ch == long_reg
-    assert 28000 <= long_reg <= 64000
+    assert 28000 <= long_reg <= 42000
 
 
 def test_se_multi_pass_runs_at_7200():

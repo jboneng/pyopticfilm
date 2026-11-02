@@ -63,20 +63,20 @@ Helpers:
 
 Adaptive ME colour-long `REG_EXPOSURE` is clamped before the long pass runs
 (`clamp_me_long()` in `session_gl128.py`). 8200i SE, 8100 (V2) and 8300i SE
-share the same envelope (`Gl128Common` defaults). Since 1.3.7, `Scanner.scan`
-and `Gl128ScanSession.run` reject multi-exposure and Multi-Pass at 7200 dpi on
-all three, so the 7200 row is no longer reached by ME; it is kept for the clamp
-logic and the 16-bit note below:
+share the same envelope (`Gl128Common` defaults):
 
 | PPI | Long clamp |
 | --- | --- |
 | not 7200 | 14000–85000 |
-| 7200 (oversample 1) | 14000–64000 |
+| 7200 (oversample 1) | 14000–42000 |
 
-The shared fields are `me_long_clamp_min` / `me_long_clamp_max`. The 7200 dpi
-cap is not a second model constant: the ceiling is
-`min(model max, 64000 * oversample)`. Oversample is 1 only at native optical
-resolution, so 85000 is left intact at 3600 dpi and below.
+The shared fields are `me_long_clamp_min` / `me_long_clamp_max`, and
+`me_long_clamp_max_native` (42000) at oversample 1. On the 8200i SE a 64000
+long pass at 7200 dpi read at about 1 MB/s and the scanner dropped off USB part
+way through the frame, so 7200 dpi uses 42000, the long exposure SilverFast
+uses on the 8200i SE and 8100 V2. Under that, the ceiling is never more than
+`64000 * oversample`. Oversample is 1 only at native optical resolution, so
+85000 is left intact at 3600 dpi and below.
 
 64000 is a safety margin under 65536. The AHB scan motor table
 (`tables_8200i_se.exposure_table`) is 16-bit, and at oversample == 1

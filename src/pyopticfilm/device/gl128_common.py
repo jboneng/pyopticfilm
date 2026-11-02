@@ -355,6 +355,7 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "me_hardware_max_exposure",
         "me_long_clamp_min",
         "me_long_clamp_max",
+        "me_long_clamp_max_native",
         "me_max_exposure_ratio",
         "me_target_dense_dn",
         "me_dense_percentile",
@@ -455,9 +456,15 @@ class Gl128Common:
     me_long_clamp_min: int = 14_000
     #: Hard ceiling for adaptive ME colour-long ``REG_EXPOSURE``. At
     #: oversample == 1 (7200 dpi) :func:`pyopticfilm.scan.session_gl128.clamp_me_long`
-    #: still caps the channel word at 64000, because the AHB exposure table is
-    #: 16-bit and would wrap a value at or above 65536.
+    #: uses :attr:`me_long_clamp_max_native` instead, and never more than 64000,
+    #: because the AHB exposure table is 16-bit and would wrap a value at or
+    #: above 65536.
     me_long_clamp_max: int = 85_000
+    #: Ceiling for the ME colour-long ``REG_EXPOSURE`` at oversample == 1
+    #: (native 7200 dpi). On the 8200i SE a 64000 long pass at 7200 dpi read at
+    #: about 1 MB/s and the scanner dropped off USB part way through the frame;
+    #: 42000 is the long exposure SilverFast uses on the 8200i SE and 8100 V2.
+    me_long_clamp_max_native: int = 42_000
     me_max_exposure_ratio: float = 7.0
     me_target_dense_dn: float = 10000.0
     me_dense_percentile: float = 5.0
@@ -527,7 +534,7 @@ class Gl128Common:
         """Whether multi-exposure and Multi-Pass may run at ``resolution``.
 
         True at every resolution, native 7200 dpi included. At oversample 1 the
-        ME long pass stays capped at 64000 by
+        ME long pass is capped at :attr:`me_long_clamp_max_native` (42000) by
         :func:`pyopticfilm.scan.session_gl128.clamp_me_long`. A subclass can
         override this to restrict resolutions; ``Scanner.scan`` and
         ``Gl128ScanSession.run`` raise ``ScanError`` where it returns False.

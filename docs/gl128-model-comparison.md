@@ -398,7 +398,7 @@ white `0x17` was the image dummy, not a model difference. The image pass stays
 | ME long default | 42000 | 42000 | unknown | inconclusive |
 | ME adaptive min / max | 42000 / 85000 | 42000 / 85000 | unknown | inconclusive |
 | ME long clamp (not 7200 dpi) | 14000–85000 | 14000–85000 | unknown | inconclusive |
-| ME long clamp (7200 dpi, oversample 1) | 14000–64000 | 14000–64000 | unknown | inconclusive |
+| ME long clamp (7200 dpi, oversample 1) | 14000–42000 | 14000–42000 | unknown | inconclusive |
 
 LPERIOD is not a model split: it follows the window width (§5); 135i 7200 is
 a third constant. DPISET at 7200 and image

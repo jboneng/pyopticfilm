@@ -70,15 +70,21 @@ _ME_CHANNEL_EXPOSURE_MAX = 64_000
 def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
     """Clamp ME colour-long exposure to the shared range and the AHB table.
 
-    ``me_long_clamp_min`` / ``me_long_clamp_max`` are shared by both GL128
+    ``me_long_clamp_min`` / ``me_long_clamp_max`` are shared by the GL128
     models (14000–85000). The ceiling is also
     ``min(model max, 64000 * oversample(resolution))`` so a native 7200 dpi
-    pass cannot overflow the 16-bit scan motor table.
+    pass cannot overflow the 16-bit scan motor table. At oversample 1 it is
+    further capped at ``me_long_clamp_max_native`` (42000): a 64000 long pass
+    at 7200 dpi dropped the 8200i SE off USB.
     """
     lo = int(model.me_long_clamp_min)
     hi = int(model.me_long_clamp_max)
     oversample = max(1, int(model.oversample_for(resolution)))
     hi = min(hi, _ME_CHANNEL_EXPOSURE_MAX * oversample)
+    if oversample == 1:
+        native_max = getattr(model, "me_long_clamp_max_native", None)
+        if native_max is not None:
+            hi = min(hi, int(native_max))
     return min(max(int(exp_long), lo), hi)
 
 
