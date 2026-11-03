@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.9] - 2026-11-03
+
 ### Added
 
 - `tools/bench_me_merge.py --real DIR` scores a real short/long TIFF pair (noise, noise-free detail, dense-film colour, timing); new cases cover a black offset and row drift.
