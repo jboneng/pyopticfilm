@@ -191,19 +191,36 @@ def test_v2_rounds_ld_shift_at_1440():
 
 
 def test_v2_host_stagger_table():
-    """8100 V2 unstagger: (4, 0) @7200, (1, 0) @1440/2400, nothing elsewhere (TIFF-measured)."""
+    """8100 V2 unstagger: (4, 0) @7200, 4 x dpi / 7200 @1440/2400 (0.8 / 1.333), nothing elsewhere.
+
+    The fractional patterns keep one spare row (``ceil(d / 2)``), as ``(1, 0)`` did.
+    """
     g7200 = compute_geometry(7200, model=MODEL_8100_V2, area=None)
     g2400 = compute_geometry(2400, model=MODEL_8100_V2, area=None)
     g1800 = compute_geometry(1800, model=MODEL_8100_V2, area=None)
     g1440 = compute_geometry(1440, model=MODEL_8100_V2, area=None)
     assert g7200.stagger_y == (4, 0)
     assert g7200.num_staggered_lines == 4
-    assert g2400.stagger_y == (1, 0)
+    assert g2400.stagger_y == (1.25, 0)
     assert g2400.num_staggered_lines == 1
-    assert g1440.stagger_y == (1, 0)
+    assert g1440.stagger_y == (0.8, 0)
     assert g1440.num_staggered_lines == 1
     assert g1800.stagger_y == ()
     assert g1800.num_staggered_lines == 0
+
+
+def test_8300i_host_stagger_at_7200():
+    """8300i SE SilverFast 7200 capture: 3.95-row even/odd offset, uncorrected before."""
+    g = compute_geometry(7200, model=MODEL_8300I_SE, area=None)
+    assert g.stagger_y == (4, 0)
+    assert g.num_staggered_lines == 4
+    assert g.stagger_phase % 2 == 0
+    pipe = ImagePipeline(MODEL_8300I_SE)
+    rgb = np.zeros((g.optical_line_count, 4, 3), dtype=np.uint16)
+    rgb = pipe.reduce_y_oversample(rgb, g)
+    rgb = pipe.apply_line_shifts(rgb, g)
+    rgb = pipe.apply_y_stagger(rgb, g)
+    assert rgb.shape[0] >= g.frame_lines
 
 
 def test_se_host_stagger_at_7200():
@@ -278,14 +295,111 @@ def test_apply_y_stagger_odd_start_without_phase_doubles_the_comb():
     assert edge_rows[-1] - edge_rows[0] == 8
 
 
+def _smooth_staggered_edge(h: int, w: int, *, edge: float, lag: float, phase: int) -> np.ndarray:
+    """Soft (tanh) step at row ``edge``, ``lag`` rows later on even sensor columns."""
+    rows = np.arange(h, dtype=np.float64)[:, None]
+    lags = np.array([lag if (x + phase) % 2 == 0 else 0.0 for x in range(w)])[None, :]
+    plane = 28_000 + 20_000 * np.tanh((rows - edge - lags) / 1.5)
+    return np.repeat(np.rint(plane).astype(np.uint16)[:, :, None], 3, axis=2)
+
+
+def _edge_positions(plane: np.ndarray, level: float = 28_000.0) -> np.ndarray:
+    """Sub-row crossing of ``level`` in each column (linear between samples)."""
+    pos = []
+    for x in range(plane.shape[1]):
+        c = plane[:, x].astype(np.float64)
+        i = int(np.argmax(c > level))
+        pos.append(i - 1 + (level - c[i - 1]) / (c[i] - c[i - 1]))
+    return np.array(pos)
+
+
+#: Measured fractional stagger (rows): 8200i SE scans and 8100 V2 / 8300i SE
+#: SilverFast captures, the zero crossing of the even/odd offset (2026-11-03).
+_FRACTIONAL = {
+    (MODEL_8200I_SE.model, 1440): 0.8,
+    (MODEL_8200I_SE.model, 2400): 1.25,
+    (MODEL_8100_V2.model, 1440): 0.8,
+    (MODEL_8100_V2.model, 2400): 1.25,
+    (MODEL_8300I_SE.model, 1440): 0.8,
+    (MODEL_8300I_SE.model, 2400): 1.15,
+}
+
+
+@pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE])
+@pytest.mark.parametrize("dpi", [1440, 2400])
+@pytest.mark.parametrize("pixel_startx", [242, 2825])
+def test_fractional_stagger_lines_up_columns(model, dpi, pixel_startx):
+    """The measured even/odd offset comes out flat at both phases, on every GL128 leaf.
+
+    The old whole-row (1, 0) left 0.2 rows at 1440 and 0.15-0.25 at 2400: the
+    sawtooth on sharp edges.
+    """
+    from dataclasses import replace
+
+    g = compute_geometry(dpi, model=model, area=None)
+    lag = _FRACTIONAL[(model.model, dpi)]
+    assert g.stagger_y == (lag, 0)
+    g = replace(g, lines=60, pixel_startx=pixel_startx, stagger_phase=pixel_startx)
+    raw = _smooth_staggered_edge(64, 16, edge=30.0, lag=lag, phase=pixel_startx)
+    out = ImagePipeline(model).apply_y_stagger(raw, g)
+    assert out.shape == (60, 16, 3)
+    pos = _edge_positions(out[:, :, 1])
+    assert abs(float(pos[0::2].mean() - pos[1::2].mean())) < 0.05
+    assert float(pos.max() - pos.min()) < 0.1
+
+
+@pytest.mark.parametrize("dpi", [1440, 2400])
+def test_fractional_stagger_softens_both_columns_equally(dpi):
+    """The +-d/2 split interpolates both columns alike: no alternating sharpness."""
+    from dataclasses import replace
+
+    g = compute_geometry(dpi, model=MODEL_8200I_SE, area=None)
+    g = replace(g, lines=500, stagger_phase=0)
+    rng = np.random.default_rng(7)
+    raw = rng.normal(30_000, 2_000, size=(504, 64, 3)).clip(0, 65535).astype(np.uint16)
+    out = ImagePipeline(MODEL_8200I_SE).apply_y_stagger(raw, g).astype(np.float64)
+    var_even = float(out[5:-5, 0::2, 1].var())
+    var_odd = float(out[5:-5, 1::2, 1].var())
+    assert abs(var_even / var_odd - 1.0) < 0.05
+
+
+def test_integer_stagger_is_plain_row_slicing():
+    """(4, 0) at 7200 still slices whole rows: no interpolation, output unchanged."""
+    from dataclasses import replace
+
+    g = compute_geometry(7200, model=MODEL_8200I_SE, area=None)
+    g = replace(g, lines=40, stagger_phase=0)
+    rng = np.random.default_rng(3)
+    raw = rng.integers(0, 65535, size=(48, 16, 3), dtype=np.uint16)
+    out = ImagePipeline(MODEL_8200I_SE).apply_y_stagger(raw, g)
+    expect = np.empty((40, 16, 3), dtype=np.uint16)
+    expect[:, 0::2] = raw[4:44, 0::2]
+    expect[:, 1::2] = raw[0:40, 1::2]
+    assert np.array_equal(out, expect)
+
+
+@pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE])
+@pytest.mark.parametrize("dpi", [1440, 2400])
+def test_fractional_stagger_keeps_lincnt_and_frame(model, dpi):
+    """One spare row, as with (1, 0): SilverFast's LINCNT and the full frame are unchanged."""
+    g = compute_geometry(dpi, model=model, area=None)
+    assert g.num_staggered_lines == 1
+    pipe = ImagePipeline(model)
+    rgb = np.zeros((g.optical_line_count, 4, 3), dtype=np.uint16)
+    rgb = pipe.reduce_y_oversample(rgb, g)
+    rgb = pipe.apply_line_shifts(rgb, g)
+    rgb = pipe.apply_y_stagger(rgb, g)
+    assert rgb.shape[0] >= g.frame_lines
+
+
 @pytest.mark.parametrize("model", [MODEL_8300I_SE, MODEL_8200I_SE])
 def test_host_stagger_at_1440_and_2400_only(model):
     g1440 = compute_geometry(1440, model=model, area=None)
     g1800 = compute_geometry(1800, model=model, area=None)
     g2400 = compute_geometry(2400, model=model, area=None)
-    assert g1440.stagger_y == (1, 0)
+    assert g1440.stagger_y == (0.8, 0)
     assert g1440.num_staggered_lines == 1
-    assert g2400.stagger_y == (1, 0)
+    assert g2400.stagger_y == ((1.15 if model is MODEL_8300I_SE else 1.25), 0)
     assert g2400.num_staggered_lines == 1
     assert g1800.stagger_y == ()
     assert g1800.num_staggered_lines == 0
@@ -299,7 +413,7 @@ def test_bringup_lincnt_keeps_y_stagger_spare(dpi: int, model):
 
     geo, _meta = bringup_scan_geometry(model, dpi, profile="preview_safe")
     assert geo.num_staggered_lines == 1
-    assert geo.stagger_y == (1, 0)
+    assert geo.stagger_y == (_FRACTIONAL[(model.model, dpi)], 0)
     y_ov = geo.optical_line_count // geo.lines
     assert y_ov >= 1
     rows_after_reduce = geo.optical_line_count // y_ov

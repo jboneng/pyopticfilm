@@ -173,6 +173,15 @@ def _sample_1d_cubic(plane: np.ndarray, axis: int, shift: float) -> np.ndarray:
     return kw0 * take(i0) + kw1 * take(i1) + kw2 * take(i2) + kw3 * take(i3)
 
 
+def sample_rows_cubic(plane: np.ndarray, shift: float) -> np.ndarray:
+    """Keys-cubic sample of ``plane`` at rows ``y + shift`` (axis 0, float32 out).
+
+    Rows outside the plane clamp to the edge: the taps reach ``floor(shift) - 1``
+    to ``floor(shift) + 2`` rows from each output row.
+    """
+    return _sample_1d_cubic(plane, 0, float(shift))
+
+
 def _finalize_warp(out: np.ndarray, dtype: np.dtype, dx: float, dy: float) -> np.ndarray:
     if np.issubdtype(dtype, np.integer):
         out = np.clip(np.rint(out), 0, np.iinfo(dtype).max).astype(dtype)

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from math import lcm
 
@@ -30,7 +31,7 @@ class ScanGeometry:
     shift_b: int
     optical_line_count: int
     line_bytes: int
-    stagger_y: tuple[int, ...] = ()
+    stagger_y: tuple[float, ...] = ()
     num_staggered_lines: int = 0
     #: Index into :attr:`stagger_y` for buffer column 0. GL128 leaves set it to
     #: ``pixel_startx`` (the pattern follows the sensor column); 0 elsewhere.
@@ -95,15 +96,49 @@ class ScanGeometry:
         return self.lincnt_register * MM_PER_INCH / (per_line * self.asic_dpi)
 
 
-def _stagger_for(resolution: int, model: FilmModel) -> tuple[tuple[int, ...], int]:
-    stagger_fn = getattr(model, "stagger_y_for", None)
-    if callable(stagger_fn):
-        shifts = tuple(int(v) for v in stagger_fn(resolution))
-    else:
-        shifts = tuple(model.stagger_y_by_dpi.get(resolution, ()))
+def _as_row_shift(value: float) -> int | float:
+    """Integral values as ``int`` (integer row slicing), others as ``float``."""
+    v = float(value)
+    return int(v) if v.is_integer() else v
+
+
+def stagger_sample_shifts(shifts: tuple[float, ...]) -> tuple[tuple[float, ...], int]:
+    """Row offsets :meth:`ImagePipeline.apply_y_stagger` samples at, and the spare rows read.
+
+    Integer patterns are used as given and need ``max(shifts)`` spare rows. A
+    fractional two-column pattern keeps its relative offset ``d`` but is
+    centred on zero, ``+d/2`` and ``-d/2``: the fractional parts are ``f`` and
+    ``1 - f``, so both columns get the same interpolation. ``(4/3, 0)`` samples
+    at ``(+0.667, -0.667)``, ``(0.8, 0)`` at ``(+0.4, -0.4)``.
+
+    The spare rows are ``ceil(d/2)`` (1 at 1440 and 2400, the same as the old
+    ``(1, 0)``), so ``LINCNT`` and the line count stay as SilverFast sizes them;
+    there is no travel for more. The Keys-cubic outer taps reach one row
+    further and clamp at the buffer edge, which touches only the first and last
+    output rows, with weights under 0.1.
+    """
     if not shifts:
         return (), 0
-    return shifts, max(shifts)
+    if all(float(s).is_integer() for s in shifts):
+        ints = tuple(int(s) for s in shifts)
+        return ints, max(ints)
+    if len(shifts) != 2:
+        raise ValueError(f"fractional stagger needs a two-column pattern, got {shifts!r}")
+    a, b = float(shifts[0]), float(shifts[1])
+    half = abs(a - b) / 2
+    split = (half, -half) if a >= b else (-half, half)
+    return split, math.ceil(half)
+
+
+def _stagger_for(resolution: int, model: FilmModel) -> tuple[tuple[float, ...], int]:
+    stagger_fn = getattr(model, "stagger_y_for", None)
+    if callable(stagger_fn):
+        shifts = tuple(_as_row_shift(v) for v in stagger_fn(resolution))
+    else:
+        shifts = tuple(_as_row_shift(v) for v in model.stagger_y_by_dpi.get(resolution, ()))
+    if not shifts:
+        return (), 0
+    return shifts, stagger_sample_shifts(shifts)[1]
 
 
 def _scaled_ld_shift(ld: int, asic_dpi: int, model: FilmModel) -> int:

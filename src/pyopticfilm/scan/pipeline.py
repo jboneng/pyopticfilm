@@ -8,7 +8,8 @@ import numpy as np
 from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.protocol import FilmModel
 from pyopticfilm.logging import get_logger
-from pyopticfilm.scan.geometry import ScanGeometry
+from pyopticfilm.registration.resample import sample_rows_cubic
+from pyopticfilm.scan.geometry import ScanGeometry, stagger_sample_shifts
 
 logger = get_logger(__name__)
 
@@ -261,6 +262,12 @@ class ImagePipeline:
         ``pixel_startx + x``. Their full frames start on an even column and are
         unchanged; a crop starting on an odd column gets the pattern rotated by
         one. Other models keep phase 0 (buffer column parity).
+
+        Integer patterns slice whole rows. Fractional ones (the GL128 1440 / 2400
+        CCD stagger, 0.8 / 1.333 rows) are split by
+        :func:`~pyopticfilm.scan.geometry.stagger_sample_shifts` into ``+d/2`` /
+        ``-d/2`` so both columns get the same Keys-cubic interpolation and the
+        softening does not alternate from column to column.
         """
         shifts = geometry.stagger_y
         if not shifts or geometry.num_staggered_lines == 0:
@@ -268,17 +275,21 @@ class ImagePipeline:
 
         height, width, channels = rgb.shape
         assert channels == 3
-        max_shift = max(shifts)
-        out_h = min(geometry.lines, height - max_shift)
+        sample, spare = stagger_sample_shifts(tuple(shifts))
+        out_h = min(geometry.lines, height - spare)
         if out_h < 1:
             raise ValueError("Buffer shorter than required for Y stagger")
 
         out = np.empty((out_h, width, 3), dtype=np.uint16)
-        n = len(shifts)
+        n = len(sample)
         phase = int(getattr(geometry, "stagger_phase", 0) or 0)
         for k in range(n):
-            shift = shifts[(k + phase) % n]
-            out[:, k::n, :] = rgb[shift : shift + out_h, k::n, :]
+            shift = sample[(k + phase) % n]
+            if isinstance(shift, int):
+                out[:, k::n, :] = rgb[shift : shift + out_h, k::n, :]
+                continue
+            cols = sample_rows_cubic(rgb[:, k::n, :], shift)[:out_h]
+            out[:, k::n, :] = np.clip(np.rint(cols), 0, 65535).astype(np.uint16)
         logger.debug(
             "applied y stagger shifts=%s phase=%d out_h=%d", shifts, phase % n, out_h
         )

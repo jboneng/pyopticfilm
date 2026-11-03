@@ -228,7 +228,25 @@ DUMMY_BY_DPI: dict[int, int] = {
     7200: 0x17,
 }
 
-STAGGER_BY_DPI: dict[int, tuple[int, ...]] = {
+#: Rows (at native 7200 dpi) between the CCD's even and odd sensor columns.
+CCD_STAGGER_NATIVE_ROWS = 4
+
+
+def ccd_stagger_rows(asic_dpi: int) -> float:
+    """Even/odd column offset in output rows at ``asic_dpi``: 4 x dpi / 7200.
+
+    The stagger shows only where the column step ``7200 / asic_dpi`` is odd
+    (7200, 2400, 1440), so output columns alternate sensor parity; at an even
+    step (3600, 1800, ...) every output column has one parity. The rule holds
+    at 7200 (4 rows; captures 3.88-3.95) and 1440 (0.8; 8100 V2 capture 0.80,
+    8200i SE scans 0.00 left). It does **not** hold at 2400: measured 1.23-1.28
+    on the SE / V2 and 1.13 on the 8300i SE, not 1.333, so the leaves use
+    measured 2400 values instead of this function.
+    """
+    return CCD_STAGGER_NATIVE_ROWS * int(asic_dpi) / 7200
+
+
+STAGGER_BY_DPI: dict[int, tuple[float, ...]] = {
     150: (),
     300: (),
     600: (),
@@ -435,7 +453,7 @@ class Gl128Common:
     full_frame_output_inches: float = 1.0
     y_oversampled: bool = True
 
-    stagger_y_by_dpi: Mapping[int, tuple[int, ...]] = field(
+    stagger_y_by_dpi: Mapping[int, tuple[float, ...]] = field(
         default_factory=lambda: dict(STAGGER_BY_DPI)
     )
     #: Host unstagger patterns are indexed by sensor column parity, so a crop

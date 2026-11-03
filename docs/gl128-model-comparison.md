@@ -872,7 +872,31 @@ The 8200i SE showed the same 4-row stagger at 7200 (Scan Lab TIFFs,
 pattern follows the sensor column (`stagger_follows_sensor_column`, phase =
 `pixel_startx`): full frames start on column 242 and are unchanged, and a
 crop that starts on an odd column gets the pattern rotated by one instead of
-a doubled comb. The 8300i SE has no 7200 pattern yet (not measured).
+a doubled comb. The 8300i SE's SilverFast 7200 capture shows the same stagger
+(3.95 rows), so it uses `(4, 0)` at 7200 too.
+
+The stagger shows only where the column step `7200 / dpi` is odd, because there
+the output columns alternate sensor parity. Measured as the pattern value where
+the even/odd offset crosses zero (gradient cross-correlation, no interpolation;
+the SilverFast captures were run through this pipeline):
+
+| dpi | Column step | 8200i SE (scans) | 8100 V2 (capture) | 8300i SE (capture) | Host pattern |
+|---|---|---|---|---|---|
+| 7200 | 1 | ≈4 (0.00 left) | 3.88 | 3.95 | `(4, 0)` |
+| 2400 | 3 | 1.24–1.28 | 1.23 | 1.13–1.14 | `(1.25, 0)`, 8300i `(1.15, 0)` |
+| 1440 | 5 | 0.80 (0.00 left) | 0.80 | not captured | `(0.8, 0)` |
+| 3600 / 1800 / 1200 | 2 / 4 / 6 | 0 | 0.03 / 0.04 | | none |
+
+At 7200 and 1440 the value is `4 × dpi / 7200` (`gl128_common.ccd_stagger_rows`).
+At 2400 it is lower than that rule's 1.333, so the leaves use the measured values.
+The whole-row `(1, 0)` used before at 1440 and 2400 over-corrected 1440 by 0.2 and
+left 0.15–0.25 rows at 2400 (a sawtooth on the film border). The 8200i SE's own
+session 13 ladder passes carry too little image detail to measure (correlation peak
+0.05–0.13) and were not used. Fractional patterns are resampled at `±d/2` (Keys
+cubic), so both column sets soften equally, and they keep the single spare row of
+`(1, 0)`. `LINCNT` stays at SilverFast's value; there is no travel for more spare
+rows. The cubic's outer taps clamp on the first and last output rows. Patterns that
+are whole rows (7200, GL845) are sliced as before.
 
 This document does not implement a 135i driver and does not change SE/V2
 constants. The 8300i SE leaf is in-tree with `scan_ready=True`; §10 is the

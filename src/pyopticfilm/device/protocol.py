@@ -70,7 +70,7 @@ class FilmModel(Protocol):
     ld_shift_g: int
     ld_shift_b: int
 
-    stagger_y_by_dpi: Mapping[int, tuple[int, ...]]
+    stagger_y_by_dpi: Mapping[int, tuple[float, ...]]
     register_dpiset_by_dpi: Mapping[int, int]
     output_pixel_offset_by_dpi: Mapping[int, int]
 
