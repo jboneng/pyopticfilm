@@ -50,10 +50,13 @@ IMAGE_CHUNK_BYTES = BULK_MAX_SIZE
 #: timing to (``dpi,offset,bytes,read_s,gap_s``).
 ACQUIRE_TIMING_ENV = "PYOPTICFILM_ACQUIRE_TIMING"
 
-#: Low bits of ``0x1D`` for an image pass, by ASIC dpi (8200i SE 13_ppi_ladder,
-#: 8100 V2 04_color_7200). SilverFast writes ``0x81`` before a 7200 dpi image;
-#: with ``0x80`` a full-width line outruns USB and the motor stops and restarts.
-_IMAGE_REG_1D_LOW_BY_DPI: dict[int, int] = {7200: 0x01}
+#: ``0x1D``: the low bits are LINESEL, set per image pass from the scan motor
+#: table / exposure ratio (``Gl128Common.image_linesel_for``). SilverFast
+#: writes ``0x81`` before a 7200 dpi single or ME-short pass (28000 table for
+#: exposure 14000) and ``0x80`` before the 7200 dpi ME long pass (42000 table
+#: for exposure 42000; 8100 V2 ``07_multi_exposure``). With ``0x80`` on the
+#: short pass a full-width line outruns USB and the motor stops and restarts;
+#: with ``0x81`` on the long pass the scanner hangs (PR #156).
 _REG_1D = 0x1D
 _REG_1D_LOW_MASK = 0x1F
 
@@ -74,8 +77,8 @@ def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
     models (14000–85000). The ceiling is also
     ``min(model max, 64000 * oversample(resolution))`` so a native 7200 dpi
     pass cannot overflow the 16-bit scan motor table. At oversample 1 it is
-    further capped at ``me_long_clamp_max_native`` (42000): a 64000 long pass
-    at 7200 dpi dropped the 8200i SE off USB.
+    also capped at ``me_long_clamp_max_native`` (64000, the same margin; a
+    model can lower it).
     """
     lo = int(model.me_long_clamp_min)
     hi = int(model.me_long_clamp_max)
@@ -93,7 +96,9 @@ def native_line_floor(model: Gl128Model) -> int:
 
     Below ``exposure_short * native_image_exposure_factor`` (28000 on the
     8200i SE / 8100 V2, 15000 on the 8300i SE) a full-width 7200 dpi line comes
-    out faster than USB drains it, and the motor stops and restarts.
+    out faster than USB drains it, and the motor stops and restarts. The
+    LINESEL rule (``image_linesel_for``) reaches this floor by itself for the
+    stock short exposure; the floor only catches exposures below it.
     """
     factor = max(1, int(getattr(model, "native_image_exposure_factor", 1)))
     return int(model.exposure_short) * factor
@@ -318,10 +323,6 @@ class Gl128ScanSession(ScanSession):
         cache.pop(r.REG_FE_HIGH, None)
         cache.pop(r.REG_FE_LOW, None)
 
-        if not shading:
-            low = _IMAGE_REG_1D_LOW_BY_DPI.get(model.asic_dpi_for(dpi), 0)
-            cache[_REG_1D] = (cache.get(_REG_1D, 0x80) & ~_REG_1D_LOW_MASK) | low
-
         motor = r.MTRPWR
         if not shading:
             # Image pass: AGOHOME parks the carriage when the scan ends.
@@ -368,8 +369,17 @@ class Gl128ScanSession(ScanSession):
         cache.pop(r.REG_CLRCNT, None)
         cache.pop(r.REG_START, None)
 
+        # LINESEL (0x1D low bits) comes first: the scan motor table runs
+        # REG_EXPOSURE x (LINESEL + 1) clocks per line on every image pass.
+        linesel = 0
+        linesel_fn = getattr(model, "image_linesel_for", None)
+        if not shading and callable(linesel_fn):
+            linesel = int(linesel_fn(dpi, exposure=exposure_reg, manual=self._pass_manual))
+        period_fn = getattr(model, "scan_motor_period_for", None)
         ch_exp_fn = getattr(model, "channel_exposure_for", None)
-        if callable(ch_exp_fn):
+        if callable(period_fn):
+            channel_exp = int(period_fn(dpi, exposure=exposure_reg, linesel=linesel))
+        elif callable(ch_exp_fn):
             try:
                 channel_exp = int(ch_exp_fn(dpi, exposure=exposure_reg))
             except TypeError:
@@ -382,13 +392,30 @@ class Gl128ScanSession(ScanSession):
             and not self._pass_manual
             and model.oversample_for(dpi) == 1
         ):
-            channel_exp = max(channel_exp, native_line_floor(model))
+            floored = max(channel_exp, native_line_floor(model))
+            if floored != channel_exp:
+                logger.warning(
+                    "GL128 %d dpi scan motor table %d raised to the native line floor %d; "
+                    "it is no longer REG_EXPOSURE %d x (LINESEL %d + 1)",
+                    dpi,
+                    channel_exp,
+                    floored,
+                    exposure_reg,
+                    linesel,
+                )
+                channel_exp = floored
         # Validate before any motor move below: an out-of-range channel_exp
         # (e.g. a manual-override exposure above the 16-bit AHB table) must
         # raise here rather than after position_for_full_frame_scan already
         # moved the carriage, which would strand it mid-window.
         if channel_exp is not None:
             exposure_table(channel_exp)
+
+        if not shading:
+            cache[_REG_1D] = (cache.get(_REG_1D, 0x80) & ~_REG_1D_LOW_MASK) | linesel
+            dummy_fn = getattr(model, "image_dummy_for", None)
+            if callable(dummy_fn):
+                cache[0x2B] = int(dummy_fn(dpi, span=span, linesel=linesel))
 
         # Capture-constant feeds from home — never geometry.starty (that was the
         # grinding bug). Calibration passes stay put (no motor). Positioning is
