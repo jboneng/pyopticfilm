@@ -21,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **8200i SE 7200 dpi scans had a fine zipper on edges.** Even and odd columns were 4 rows apart (the CCD stagger), because the SE had no host unstagger at 7200. It now uses `(4, 0)` there, as the 8100 V2 does. Scan registers are unchanged; a full frame returns 4 fewer spare rows before the cut to the frame.
+- **GL128 crops starting on an odd column got the unstagger pattern backwards** (8100 V2 at 7200, 1440 and 2400 dpi; 8200i SE and 8300i SE at 1440 and 2400; now also 8200i SE at 7200). The pattern was indexed by buffer column, so about half of all crops doubled the comb instead of removing it. It now follows the sensor column (`ScanGeometry.stagger_phase`, set from `pixel_startx` when the model's `stagger_follows_sensor_column` is true). Full frames start on an even column and are unchanged. Other models keep the buffer-column behaviour.
 - **Multi-exposure merges lost most of the long pass on real negatives, and colour shifted in dense film.** On a real 1800 dpi pair the merge barely beat the short alone.
   - **Registration.** The long feeds at a slightly different rate from the short (-1.3 px per 1000 rows on that pair), so one translation only registered the frame centre. The long now gets a per-row warp, fitted from full-resolution tiles and resampled with Lanczos-4. The fitted noise model no longer absorbs the misregistration (alpha 13 → 4).
   - **Shift field.** Across the frame the passes also differ by up to a pixel, which on sharp silver grain read as disagreement: on HP5+ the merge rejected usable long on 15 % of green. A smooth field is now fitted from small tiles, down to 2-4 %.
