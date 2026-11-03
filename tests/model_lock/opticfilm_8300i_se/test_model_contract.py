@@ -23,8 +23,9 @@ def test_8300i_identity_and_scan_flags():
     assert MODEL_8300I_SE.lperiod_by_dpi[7200] == 16035
     assert MODEL_8300I_SE.dummy_by_dpi[1800] == 0x08
     assert MODEL_8300I_SE.pixel_clock_by_dpi[1800] == 0x08
-    assert MODEL_8300I_SE.stagger_y_for(1440) == (1, 0)
-    assert MODEL_8300I_SE.stagger_y_for(2400) == (1, 0)
+    assert MODEL_8300I_SE.stagger_y_for(1440) == (0.8, 0)
+    assert MODEL_8300I_SE.stagger_y_for(2400) == (1.15, 0)
+    assert MODEL_8300I_SE.stagger_y_for(7200) == (4, 0)
     assert MODEL_8300I_SE.stagger_y_for(1800) == ()
 
 

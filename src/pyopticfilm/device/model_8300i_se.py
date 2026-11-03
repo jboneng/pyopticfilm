@@ -51,7 +51,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from pyopticfilm.device.gl128_common import LADDER_LINCNT_BY_DPI, SCAN_REGS, Gl128Common
+from pyopticfilm.device.gl128_common import (
+    LADDER_LINCNT_BY_DPI,
+    SCAN_REGS,
+    Gl128Common,
+    ccd_stagger_rows,
+)
 from pyopticfilm.device.tables_8300i_se import (
     SLOPE_TABLE_FAST,
     SLOPE_TABLE_SLOW,
@@ -81,18 +86,24 @@ _SCAN_REGS_8300I: dict[int, int] = {
 # in Scan Lab TIFFs. Pre-mirror pattern (1, 0); mirror_x + odd/even width flips
 # post-mirror polarity so 1440 (odd W) and 2400 (even W) both match offline trials.
 # ASIC STAGGER bit stays clear (captures / Scan Lab runs). 1800 left empty (clean).
-_STAGGER_BY_DPI_8300I: dict[int, tuple[int, ...]] = {
+# Fractional values measured from the 8300i SilverFast PPI ladder captures
+# (2026-10-21) through this pipeline, as the pattern where the even/odd offset
+# crosses zero: 2400 = 1.13-1.14 rows (both colour passes; the SE / V2 1.25 left
+# +0.21 there, worse than (1, 0)), 7200 = 3.95 rows (no correction before; the
+# same 4-row CCD stagger as the SE / V2). 1440 is not captured and follows the
+# SE / V2 rule (ccd_stagger_rows: 0.8), unverified on 8300i hardware.
+_STAGGER_BY_DPI_8300I: dict[int, tuple[float, ...]] = {
     150: (),
     300: (),
     600: (),
     720: (),
     900: (),
     1200: (),
-    1440: (1, 0),
+    1440: (ccd_stagger_rows(1440), 0.0),
     1800: (),
-    2400: (1, 0),
+    2400: (1.15, 0.0),
     3600: (),
-    7200: (),
+    7200: (4, 0),
 }
 
 # SilverFast full-frame LINCNT; the same travel as the 8100 V2 ladder (V2 / 4).
@@ -269,7 +280,7 @@ class Model8300iSE(Gl128Common):
         """Round line-distance shifts (floor left ~0.8 G / ~0.6 B at 1440)."""
         return round(int(ld) * int(asic_dpi) / int(self.motor_base_ydpi))
 
-    def stagger_y_for(self, resolution: int) -> tuple[int, ...]:
+    def stagger_y_for(self, resolution: int) -> tuple[float, ...]:
         """Host column unstagger; see ``_STAGGER_BY_DPI_8300I``."""
         key = self.asic_dpi_for(resolution)
         return tuple(_STAGGER_BY_DPI_8300I.get(key, ()))

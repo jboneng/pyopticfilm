@@ -72,6 +72,7 @@ from pyopticfilm.device.gl128_common import (
     SCAN_REGS,
     SHADING_LINESEL_BY_DPI,
     Gl128Common,
+    ccd_stagger_rows,
 )
 
 # V2's ladder crop (feed2=13128) starts 432 steps earlier than the SE's
@@ -103,16 +104,21 @@ assert set(_LADDER_LINCNT_BY_DPI_V2) == set(LADDER_LINCNT_BY_DPI)
 #   1440: 0.79 rows and 2400: 1.35 rows -> (1, 0) as on the SE / 8300i leaves;
 #         the mirrored (0, 1) was tried first and doubled the comb instead.
 # 1200 / 3600 measured flat. Other PPIs left empty; ASIC STAGGER bit stays clear.
-_STAGGER_BY_DPI_8100_V2: dict[int, tuple[int, ...]] = {
+# 1440 / 2400 now use fractional values, measured from the 06_ppi_ladder SilverFast
+# capture through this pipeline (zero crossing of the even/odd offset): 1440 =
+# 0.80 rows (ccd_stagger_rows), 2400 = 1.23 rows, so 1.25 like the 8200i SE. The
+# 4 x dpi / 7200 rule (1.333) overshoots at 2400. 7200 (4, 0) leaves +0.08 rows on
+# 04_color_7200 (zero crossing 3.88).
+_STAGGER_BY_DPI_8100_V2: dict[int, tuple[float, ...]] = {
     150: (),
     300: (),
     600: (),
     720: (),
     900: (),
     1200: (),
-    1440: (1, 0),
+    1440: (ccd_stagger_rows(1440), 0.0),
     1800: (),
-    2400: (1, 0),
+    2400: (1.25, 0.0),
     3600: (),
     7200: (4, 0),
 }
@@ -181,7 +187,7 @@ class Model8100V2(Gl128Common):
         """Round line-distance shifts (floor left G +0.8 / B +0.6 rows at 1440)."""
         return round(int(ld) * int(asic_dpi) / int(self.motor_base_ydpi))
 
-    def stagger_y_for(self, resolution: int) -> tuple[int, ...]:
+    def stagger_y_for(self, resolution: int) -> tuple[float, ...]:
         """Host column unstagger; see ``_STAGGER_BY_DPI_8100_V2``."""
         key = self.asic_dpi_for(resolution)
         return tuple(_STAGGER_BY_DPI_8100_V2.get(key, ()))
