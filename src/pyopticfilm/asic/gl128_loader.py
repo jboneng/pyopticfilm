@@ -153,6 +153,15 @@ _CLOCK_SWITCH_GAP_S = 0.075
 _END_REG01 = 0x22
 #: Interval between status samples while a move runs.
 _MOVE_POLL_S = 0.015
+#: After a move or park: wait up to this long for both motor bits to clear,
+#: then :data:`_SETTLE_S` more. On a 135i the first AFE START hung when it came
+#: 9-15 ms after a load and ran at 29-60 ms (QuickScan: 63 ms).
+_MOTOR_IDLE_WAIT_S = 2.0
+_SETTLE_S = 0.1
+#: Before a shading upload after a strip. A white strip read with about half
+#: its columns at 0 when the tables went up 3-10 ms after the dark strip, and
+#: clean at 10-21 ms; the captures leave 40-144 ms.
+_UPLOAD_SETTLE_S = 0.1
 
 
 class Gl128Loader(Gl128):
@@ -481,6 +490,17 @@ class Gl128Loader(Gl128):
         self._start_move(self._move_regs(steps), use_slow_slope=use_slow_slope)
         end = self._wait_move(timeout_s=timeout_s, until_home=False, steps=steps)
         logger.info("GL128 loader moved %d steps (status 0x%02x)", steps, int(end.raw) & 0xFF)
+        self._settle_after_move()
+
+    def _settle_after_move(self) -> None:
+        """Wait for ``0x101`` bit 0 and ``0x100`` bit 1 to clear, then :data:`_SETTLE_S`."""
+        deadline = time.monotonic() + _MOTOR_IDLE_WAIT_S
+        while not self._motor_idle(self.read_status_reliable()):
+            if time.monotonic() >= deadline:
+                logger.warning("GL128 loader motor bits still set %.0f s after the move", _MOTOR_IDLE_WAIT_S)
+                break
+            time.sleep(_MOVE_POLL_S)
+        time.sleep(_SETTLE_S)
 
     def _seek_home(self, *, steps: int = LOADER_LOAD_REVERSE_STEPS, timeout_s: float = 30.0) -> None:
         """Reverse seek to the loader sensor (``insert 35mm carrier``, second feed)."""
@@ -488,6 +508,7 @@ class Gl128Loader(Gl128):
         regs.update(self._move_regs(steps, reverse=True))
         self._start_move(regs, use_slow_slope=True)
         self._wait_move(timeout_s=timeout_s, until_home=True, steps=steps)
+        self._settle_after_move()
         self._park_ok = True
         self._holder_loaded = True
         logger.info("GL128 loader at home")
@@ -585,6 +606,7 @@ class Gl128Loader(Gl128):
             self._set_toggle(enabled=False)
             try:
                 self.wait_until_at_home(timeout_s=60.0)
+                self._settle_after_move()
                 self._reg_cache[r.REG_0x02] = int(reg02) & ~r.AGOHOME
                 logger.info("GL128 loader parked at home after the scan")
             except MotorTimeoutError as exc:
@@ -816,6 +838,7 @@ class Gl128Loader(Gl128):
     def upload_shading_table(self, blob: bytes) -> None:
         """Write a two-bank blob: IR to ``0x10014000``, visible to ``0x10034000``."""
         ir, visible = split_shading_blob(bytes(blob))
+        time.sleep(_UPLOAD_SETTLE_S)
         self.protocol.write_ahb(AHB_SHADING_IR, ir)
         self.protocol.write_ahb(AHB_SHADING_VISIBLE, visible)
         logger.info("GL128 loader uploaded shading tables (2 x %d bytes)", len(ir))

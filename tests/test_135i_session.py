@@ -655,6 +655,16 @@ def test_scan_clock_switch_pulses_the_lamp_and_waits(scanner, rec, monkeypatch):
     assert [v for a, v in rec.writes if a == 0x03] == [0x20, 0x30, 0x20, 0x30]
 
 
+def test_settles_after_moves_and_before_shading_uploads(scanner, rec, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    scanner.load_holder()
+    assert sleeps.count(0.1) >= 2  # the inward inch and the seek
+    sleeps.clear()
+    scanner.asic.upload_shading_table(bytes(2 * 21064))
+    assert sleeps == [0.1]
+
+
 def test_strips_never_write_start_zero_and_clear_in_steps(scanner, rec):
     scanner.load_holder()
     rec.writes.clear()

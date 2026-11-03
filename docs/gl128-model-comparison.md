@@ -1055,9 +1055,12 @@ are not replayed.
   strip, other resolutions and multi-exposure have not run.
 - The second session stopped in calibration, in two ways, and neither cause
   is proven. The first AFE strip hung at status `0xcd` until USB was unplugged
-  in 5 of 7 runs. The white strip read 12594 at `0x32 = ad` and clipped at `a5`.
-  VueScan's AFE strips read the same light at `ad` and `b5`, so bits 3 and 4 do
-  not explain the white strip on their own.
+  in 5 of 7 runs, each time 9-15 ms after the load (29-60 ms in the runs that
+  went on). The white strip came back with about half its columns at 0 on both
+  lines whenever the shading tables went up 3-10 ms after the dark strip, and
+  clean at 10-21 ms; `0x32` did not decide it. The driver now waits for the
+  motor bits and 100 ms after every loader move and park, and 100 ms before a
+  shading upload.
 - Shading gain unity `0x4000` is VueScan's first upload on this model
   (`0x06 = 0xF8`); the SE family uses `0x2000` (`0x06 = 0xF0`). Confirm the
   scale on hardware.
