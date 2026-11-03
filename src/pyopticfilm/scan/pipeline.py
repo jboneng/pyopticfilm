@@ -252,6 +252,15 @@ class ImagePipeline:
         ``LINCNT`` for the crop alone — GL128 OpticFilm under ladder override —
         lose ``max(shift)`` lines off the bottom instead (same clamp as
         :meth:`apply_line_shifts`).
+
+        Buffer column ``x`` uses ``stagger_y[(x + stagger_phase) % n]``. GL128
+        leaves set ``stagger_phase`` to ``pixel_startx`` so the pattern follows
+        the sensor column: buffer column ``x`` starts at native pixel
+        ``pixel_startx + x * factor``, and every GL128 PPI with a pattern has an
+        odd factor (1 at 7200, 3 at 2400, 5 at 1440), so its parity is that of
+        ``pixel_startx + x``. Their full frames start on an even column and are
+        unchanged; a crop starting on an odd column gets the pattern rotated by
+        one. Other models keep phase 0 (buffer column parity).
         """
         shifts = geometry.stagger_y
         if not shifts or geometry.num_staggered_lines == 0:
@@ -266,10 +275,13 @@ class ImagePipeline:
 
         out = np.empty((out_h, width, 3), dtype=np.uint16)
         n = len(shifts)
-        for x in range(width):
-            shift = shifts[x % n]
-            out[:, x, :] = rgb[shift : shift + out_h, x, :]
-        logger.debug("applied y stagger shifts=%s out_h=%d", shifts, out_h)
+        phase = int(getattr(geometry, "stagger_phase", 0) or 0)
+        for k in range(n):
+            shift = shifts[(k + phase) % n]
+            out[:, k::n, :] = rgb[shift : shift + out_h, k::n, :]
+        logger.debug(
+            "applied y stagger shifts=%s phase=%d out_h=%d", shifts, phase % n, out_h
+        )
         return out
 
     def clamp_border_highlights(

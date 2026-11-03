@@ -138,6 +138,9 @@ def test_divergent_fields_match_capture_catalog():
     assert MODEL_8200I_SE.stagger_y_for(1440) == (1, 0)
     assert MODEL_8200I_SE.stagger_y_for(2400) == (1, 0)
     assert MODEL_8200I_SE.stagger_y_for(1800) == ()
+    # 2026-11-03 TIFFs: 4-row even/odd offset at 7200, the V2's CCD stagger.
+    assert MODEL_8200I_SE.stagger_y_for(7200) == (4, 0)
+    assert MODEL_8200I_SE.stagger_follows_sensor_column
     # V2 (Scan Lab TIFF evidence 2026-10-16, see model_8100_v2._STAGGER_BY_DPI_8100_V2):
     # rounded ld_shift like the SE leaves; host unstagger (4, 0) at 7200, (1, 0) at 1440/2400.
     assert MODEL_8100_V2.scaled_ld_shift(24, 1440) == 5

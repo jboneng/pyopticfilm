@@ -867,6 +867,12 @@ Closed by hardware measurement (Scan Lab TIFFs, 2026-10-16): the 7200 dpi
 leaves correct); 1440/2400 show 0.8/1.35 rows. Fixed by host unstagger
 (`(4, 0)` @7200, `(1, 0)` @1440/2400, pre-mirror) plus rounded `ld_shift` as
 on the SE leaves; 1200/3600 flat. Full-frame 7200 loses 4 output rows.
+The 8200i SE showed the same 4-row stagger at 7200 (Scan Lab TIFFs,
+2026-11-03) and now uses `(4, 0)` there too. On all three GL128 leaves the
+pattern follows the sensor column (`stagger_follows_sensor_column`, phase =
+`pixel_startx`): full frames start on column 242 and are unchanged, and a
+crop that starts on an odd column gets the pattern rotated by one instead of
+a doubled comb. The 8300i SE has no 7200 pattern yet (not measured).
 
 This document does not implement a 135i driver and does not change SE/V2
 constants. The 8300i SE leaf is in-tree with `scan_ready=True`; §10 is the

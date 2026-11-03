@@ -206,6 +206,78 @@ def test_v2_host_stagger_table():
     assert g1800.num_staggered_lines == 0
 
 
+def test_se_host_stagger_at_7200():
+    """8200i SE 2026-11-03 TIFFs: even/odd columns 4 rows apart at 7200, as on the V2.
+
+    The spare lines come out of the margin, not LINCNT: the full frame keeps
+    SilverFast's travel and the 7200-row frame, as the V2 did in eada6d2.
+    """
+    g = compute_geometry(7200, model=MODEL_8200I_SE, area=None)
+    assert g.stagger_y == (4, 0)
+    assert g.num_staggered_lines == 4
+    assert g.stagger_phase == g.pixel_startx == 242
+    assert g.optical_line_count == 14506
+    assert g.lines == 7249
+    assert g.frame_lines == 7200
+
+
+@pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE])
+@pytest.mark.parametrize("dpi", [1440, 2400, 7200])
+def test_gl128_full_frame_stagger_phase_is_even(model, dpi):
+    """The patterns were measured on full frames; an even phase keeps them as measured."""
+    g = compute_geometry(dpi, model=model, area=None)
+    if g.stagger_y:
+        assert g.stagger_phase % 2 == 0
+
+
+def test_non_gl128_stagger_phase_stays_buffer_column():
+    """GL845 leaves keep buffer-column parity, even where the full frame starts odd."""
+    from pyopticfilm.device.model_8200i import MODEL_8200I
+
+    g = compute_geometry(7200, model=MODEL_8200I, area=None)
+    assert g.stagger_y == (4, 0)
+    assert g.pixel_startx % 2 == 1
+    assert g.stagger_phase == 0
+
+
+def _staggered_edge(h: int, w: int, *, edge_row: int, odd_lag: int, phase: int) -> np.ndarray:
+    """Step edge where even sensor columns see the edge ``odd_lag`` rows late in
+    buffer order (sensor column = ``phase + x``); the pattern (odd_lag, 0) undoes it."""
+    rgb = np.empty((h, w, 3), dtype=np.uint16)
+    for x in range(w):
+        lag = odd_lag if (x + phase) % 2 == 0 else 0
+        rgb[:, x] = 8_000
+        rgb[edge_row + lag :, x] = 48_000
+    return rgb
+
+
+@pytest.mark.parametrize("pixel_startx", [242, 2803])
+def test_apply_y_stagger_follows_sensor_column(pixel_startx):
+    """Even and odd crop starts both come out flat: the pattern rotates with pixel_startx."""
+    g = compute_geometry(7200, model=MODEL_8200I_SE, area=None)
+    from dataclasses import replace
+
+    g = replace(g, lines=40, pixel_startx=pixel_startx, stagger_phase=pixel_startx)
+    raw = _staggered_edge(48, 16, edge_row=20, odd_lag=4, phase=pixel_startx)
+    out = ImagePipeline(MODEL_8200I_SE).apply_y_stagger(raw, g)
+    assert out.shape == (40, 16, 3)
+    # Every column now has its edge on the same row.
+    edge_rows = {int(np.argmax(out[:, x, 1] > 20_000)) for x in range(16)}
+    assert len(edge_rows) == 1
+
+
+def test_apply_y_stagger_odd_start_without_phase_doubles_the_comb():
+    """Regression guard: indexing by buffer column on an odd start leaves 2x the offset."""
+    g = compute_geometry(7200, model=MODEL_8200I_SE, area=None)
+    from dataclasses import replace
+
+    g = replace(g, lines=40, pixel_startx=2803, stagger_phase=0)
+    raw = _staggered_edge(48, 16, edge_row=20, odd_lag=4, phase=2803)
+    out = ImagePipeline(MODEL_8200I_SE).apply_y_stagger(raw, g)
+    edge_rows = sorted({int(np.argmax(out[:, x, 1] > 20_000)) for x in range(16)})
+    assert edge_rows[-1] - edge_rows[0] == 8
+
+
 @pytest.mark.parametrize("model", [MODEL_8300I_SE, MODEL_8200I_SE])
 def test_host_stagger_at_1440_and_2400_only(model):
     g1440 = compute_geometry(1440, model=model, area=None)

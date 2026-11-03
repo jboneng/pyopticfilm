@@ -32,6 +32,9 @@ class ScanGeometry:
     line_bytes: int
     stagger_y: tuple[int, ...] = ()
     num_staggered_lines: int = 0
+    #: Index into :attr:`stagger_y` for buffer column 0. GL128 leaves set it to
+    #: ``pixel_startx`` (the pattern follows the sensor column); 0 elsewhere.
+    stagger_phase: int = 0
     channels: int = 3
     depth: int = 16
     exposure_lperiod: int = 14000
@@ -408,6 +411,11 @@ def _geometry_from_mm(
         line_bytes=line_bytes,
         stagger_y=stagger_y,
         num_staggered_lines=num_staggered,
+        stagger_phase=(
+            int(pixel_startx)
+            if stagger_y and getattr(model, "stagger_follows_sensor_column", False)
+            else 0
+        ),
         channels=channels,
         depth=depth,
         exposure_lperiod=exposure_lperiod,

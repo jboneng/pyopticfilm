@@ -344,6 +344,7 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "full_frame_output_inches",
         "y_oversampled",
         "stagger_y_by_dpi",
+        "stagger_follows_sensor_column",
         "register_dpiset_by_dpi",
         "lperiod_by_dpi",
         "output_pixel_offset_by_dpi",
@@ -437,6 +438,11 @@ class Gl128Common:
     stagger_y_by_dpi: Mapping[int, tuple[int, ...]] = field(
         default_factory=lambda: dict(STAGGER_BY_DPI)
     )
+    #: Host unstagger patterns are indexed by sensor column parity, so a crop
+    #: that starts on an odd native column gets the pattern rotated by one. The
+    #: patterns were measured on full frames, which start on an even column
+    #: (242) on every GL128 leaf, so full frames are unchanged.
+    stagger_follows_sensor_column: bool = True
     register_dpiset_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(REGISTER_DPISET)
     )
