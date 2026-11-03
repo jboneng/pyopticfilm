@@ -46,7 +46,8 @@ GL128_OPTICAL_REGISTER_KEYS: tuple[int, ...] = (
 )
 
 #: Per-scan sensor timing (``sensor_custom_regs``) and ``0x1D``. These differ
-#: per model (8300i SE overlay) and per dpi (``0x1D=0x81`` at 7200).
+#: per model (8300i SE overlay) and per pass (``0x1D=0x81`` on a 7200 single /
+#: ME-short pass, ``0x80`` on the 7200 ME long pass).
 GL128_SENSOR_REGISTER_KEYS: tuple[int, ...] = (
     0x06,
     0x0B,

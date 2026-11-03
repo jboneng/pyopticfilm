@@ -20,7 +20,8 @@ from pyopticfilm.usb.protocol import GenesysUsbProtocol
 
 def test_clamp_me_long_bounds():
     """SE long clamp is 14000-85000, except oversample == 1 (7200 dpi), where
-    the 16-bit AHB exposure table caps the channel word at 64000."""
+    it is 14000-64000 (``me_long_clamp_max_native``, the 16-bit scan motor
+    table margin)."""
     assert clamp_me_long(MODEL_8200I_SE, 1800, 85000) == 85000
     assert clamp_me_long(MODEL_8200I_SE, 1800, 90000) == 85000
     assert clamp_me_long(MODEL_8200I_SE, 1800, 64000) == 64000
@@ -31,6 +32,7 @@ def test_clamp_me_long_bounds():
     assert clamp_me_long(MODEL_8200I_SE, 7200, 85000) == 64000
     assert clamp_me_long(MODEL_8200I_SE, 7200, 64000) == 64000
     assert clamp_me_long(MODEL_8200I_SE, 7200, 42000) == 42000
+    assert clamp_me_long(MODEL_8200I_SE, 7200, 10000) == 14000
 
 
 def test_image_feed2_uses_area_y1_when_area_missing():

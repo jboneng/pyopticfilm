@@ -279,12 +279,22 @@ class Model8300iSE(Gl128Common):
 
         Half the SE/V2 ``exposure // oversample`` at every PPI in the SilverFast
         captures (1875 at 1800 dpi, 3750 at 3600, 15000 at 7200 with
-        ``0x1D=0x81``; ME-long 60000 gives 15000 at 3600).
+        ``0x1D=0x81``; ME-long 60000 gives 15000 at 3600). Assumes the
+        single-pass LINESEL (1 at 7200 dpi); image passes go through
+        :meth:`scan_motor_period_for`, which takes the pass's LINESEL.
         """
         base = int(exposure if exposure is not None else self.exposure_lperiod)
         oversample = self.oversample_for(resolution)
         reg_1d_lines = 2 if oversample == 1 else 1
         return base * reg_1d_lines // (2 * oversample)
+
+    def scan_motor_period_for(self, resolution: int, *, exposure: int, linesel: int) -> int:
+        """``exposure × (LINESEL + 1) × asic_dpi / 14400`` for an image pass.
+
+        15000 for the 15000 short pass at 7200 dpi (LINESEL 1), 21000 for a
+        42000 ME long pass there (LINESEL 0, unverified on hardware).
+        """
+        return int(exposure) * (int(linesel) + 1) * self.asic_dpi_for(resolution) // 14400
 
     def scan_motor_table(self, period: int) -> tuple[int, ...]:
         """Vendor acceleration ramp clamped at ``period`` (head 40404)."""
