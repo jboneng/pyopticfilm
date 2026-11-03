@@ -82,10 +82,13 @@ def test_se_me_long_pass_below_7200_keeps_linesel_0(dpi, dummy, channel):
     assert (long[0x1D], long[0x2B], long["channel"]) == (0x80, dummy, channel)
 
 
-def test_8300i_se_7200_me_long_pass_keeps_linesel_1():
-    """No 8300i SE 7200 ME capture: its table already folds LINESEL 1 in."""
+def test_8300i_se_7200_me_long_pass_follows_the_same_rule():
+    """No 8300i SE 7200 ME capture; by the shared rule the long pass gets
+    LINESEL 0, a table of exposure x 7200 / 14400 and one line less of buffer."""
     long = _image_regs_pass(MODEL_8300I_SE, 7200, _pass_exposure=42000, _pass_long_exposure=True)
-    assert (long[0x1D], long[0x2B], long["channel"]) == (0x81, 0x1F, 42000)
+    assert (long[0x1D], long[0x2B], long["channel"]) == (0x80, 0x17, 21000)
+    short = _image_regs_pass(MODEL_8300I_SE, 7200, _pass_exposure=15000)
+    assert (short[0x1D], short[0x2B], short["channel"]) == (0x81, 0x1F, 15000)
 
 
 @pytest.mark.parametrize("manual", [28000, 14000])
@@ -97,12 +100,19 @@ def test_se_manual_7200_pass_linesel_follows_table(manual):
 
 def test_image_linesel_and_dummy_rules():
     v2 = MODEL_8100_V2
-    assert v2.image_linesel_for(7200, exposure=14000, channel_exposure=28000) == 1
-    assert v2.image_linesel_for(7200, exposure=42000, channel_exposure=42000) == 0
-    assert v2.image_linesel_for(7200, exposure=28000, channel_exposure=28000) == 0
-    assert v2.image_linesel_for(3600, exposure=14000, channel_exposure=7000) == 0
+    assert v2.image_linesel_for(7200, exposure=14000) == 1
+    assert v2.image_linesel_for(7200, exposure=42000) == 0
+    assert v2.image_linesel_for(7200, exposure=28000) == 0
+    assert v2.image_linesel_for(7200, exposure=14000, manual=True) == 0
+    assert v2.image_linesel_for(3600, exposure=14000) == 0
+    assert v2.scan_motor_period_for(7200, exposure=14000, linesel=1) == 28000
+    assert v2.scan_motor_period_for(7200, exposure=42000, linesel=0) == 42000
+    assert v2.scan_motor_period_for(1200, exposure=42000, linesel=0) == 7000
+    assert MODEL_8300I_SE.scan_motor_period_for(7200, exposure=15000, linesel=1) == 15000
+    assert MODEL_8300I_SE.scan_motor_period_for(7200, exposure=42000, linesel=0) == 21000
     assert v2.image_dummy_for(7200, span=10368, linesel=1) == 0x17
     assert v2.image_dummy_for(7200, span=10368, linesel=0) == 0x10
+    assert MODEL_8300I_SE.image_dummy_for(7200, span=10368, linesel=0) == 0x17
     assert v2.image_dummy_for(3600, span=10368, linesel=0) == 0x04
     with pytest.raises(KeyError):
         v2.image_dummy_for(5000, span=10368, linesel=0)
@@ -182,7 +192,7 @@ def test_se_me_runs_at_7200():
     assert passes[0] == (28000, 14000)
     long_ch, long_reg = passes[1]
     assert long_ch == long_reg
-    assert 28000 <= long_reg <= 42000
+    assert 28000 <= long_reg <= 64000
 
 
 def test_se_multi_pass_runs_at_7200():

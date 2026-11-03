@@ -461,10 +461,12 @@ class Gl128Common:
     #: above 65536.
     me_long_clamp_max: int = 85_000
     #: Ceiling for the ME colour-long ``REG_EXPOSURE`` at oversample == 1
-    #: (native 7200 dpi). On the 8200i SE a 64000 long pass at 7200 dpi read at
-    #: about 1 MB/s and the scanner dropped off USB part way through the frame;
-    #: 42000 is the long exposure SilverFast uses on the 8200i SE and 8100 V2.
-    me_long_clamp_max_native: int = 42_000
+    #: (native 7200 dpi): the 16-bit scan motor table's margin. It was 42000
+    #: while a 64000 long pass dropped the 8200i SE off USB and hung the 8100
+    #: V2; both ran with LINESEL 1 on the long pass. With the pass's LINESEL
+    #: (:meth:`image_linesel_for`) the 8100 V2 completed full frames at 42000
+    #: and 64000 (2026-11-03).
+    me_long_clamp_max_native: int = 64_000
     me_max_exposure_ratio: float = 7.0
     me_target_dense_dn: float = 10000.0
     me_dense_percentile: float = 5.0
@@ -534,7 +536,7 @@ class Gl128Common:
         """Whether multi-exposure and Multi-Pass may run at ``resolution``.
 
         True at every resolution, native 7200 dpi included. At oversample 1 the
-        ME long pass is capped at :attr:`me_long_clamp_max_native` (42000) by
+        ME long pass is capped at :attr:`me_long_clamp_max_native` (64000) by
         :func:`pyopticfilm.scan.session_gl128.clamp_me_long`. A subclass can
         override this to restrict resolutions; ``Scanner.scan`` and
         ``Gl128ScanSession.run`` raise ``ScanError`` where it returns False.
@@ -612,45 +614,59 @@ class Gl128Common:
         base = int(exposure if exposure is not None else self.exposure_lperiod)
         return base // self.oversample_for(resolution)
 
+    def scan_motor_period_for(self, resolution: int, *, exposure: int, linesel: int) -> int:
+        """Scan motor table period for an image pass: ``exposure x (LINESEL + 1) / oversample``.
+
+        28000 for the 14000 short pass at 7200 dpi (LINESEL 1), 42000 for the
+        42000 ME long pass there (LINESEL 0), 7000 / 10500 for 42000 at 1200 /
+        1800 dpi, all as SilverFast uploads them.
+        """
+        return self.channel_exposure_for(resolution, exposure=exposure) * (int(linesel) + 1)
+
     def image_linesel_for(
-        self, resolution: int, *, exposure: int, channel_exposure: int
+        self, resolution: int, *, exposure: int, manual: bool = False
     ) -> int:
         """``0x1D`` low bits (LINESEL) for an image pass.
 
-        SilverFast's scan motor table period is ``exposure x (LINESEL + 1) /
-        oversample`` on every image pass in the captures: the 8100 V2 and 8200i
-        SE PPI ladders, the ME short and long passes at 1200 and 1800 ppi
-        (``0x80``, 14000 -> 2333 / 3500 and 42000 -> 7000 / 10500) and the V2's
-        7200 ppi ME pair (``07_multi_exposure``): the short pass writes ``0x81``
-        with a 28000 table for ``REG_EXPOSURE`` 14000, the long pass ``0x80``
-        with a 42000 table for 42000. LINESEL 1 is only the native 7200 ppi
-        short / single pass, whose doubled line period keeps a full-width line
-        from outrunning USB; the ME long pass runs one line period per line.
+        SilverFast's scan motor table period is ``exposure x (LINESEL + 1) x
+        asic_dpi / motor_base_ydpi`` on every image pass in the captures: the
+        8100 V2 and 8200i SE PPI ladders, the ME short and long passes at 1200
+        and 1800 ppi (``0x80``, 14000 -> 2333 / 3500 and 42000 -> 7000 / 10500)
+        and the V2's 7200 ppi ME pair (``07_multi_exposure``): the short pass
+        writes ``0x81`` with a 28000 table for ``REG_EXPOSURE`` 14000, the long
+        pass ``0x80`` with a 42000 table for 42000. LINESEL 1 is only the native
+        7200 ppi short / single pass, whose doubled line period keeps a
+        full-width line from outrunning USB; the ME long pass runs one line
+        period per line.
 
-        So LINESEL is a property of the pass, not of the PPI: 1 when the table
-        runs two exposure periods per line, else 0. Writing ``0x81`` with a
-        table equal to the exposure (the old per-PPI rule on a 7200 ppi long
-        pass) desyncs line timing from the motor and hangs the scanner.
+        So LINESEL is a property of the pass, not of the PPI: at oversample 1 a
+        driver-derived exposure below twice the short exposure gets 1, anything
+        else 0. A manual override runs the table at its own exposure and gets 0.
+        Writing ``0x81`` with a table equal to the exposure (the old per-PPI rule
+        on a 7200 ppi long pass) desyncs line timing from the motor and hangs
+        the scanner (PR #156).
         """
-        if self.oversample_for(resolution) != 1 or int(exposure) <= 0:
+        if self.oversample_for(resolution) != 1 or manual:
             return 0
-        return 1 if int(channel_exposure) == 2 * int(exposure) else 0
+        return 1 if int(exposure) < 2 * int(self.exposure_short) else 0
 
     def image_dummy_for(self, resolution: int, *, span: int, linesel: int) -> int:
         """``0x2B`` for an image pass ``span`` native pixels wide.
 
-        :attr:`dummy_by_dpi` holds SilverFast's single-pass values, which are
-        ``ceil(lines x 6 x pixels / 8192)`` with one line of buffer below 7200
-        ppi and three at 7200 (LINESEL 1, ``0x17``). The 7200 ppi ME long pass
-        (LINESEL 0) gets two lines, ``0x10`` on the full frame, like the white
-        shading strip (8100 V2 ``07_multi_exposure``, 7200 long pass). Unknown
-        PPIs raise ``KeyError`` like the table lookup.
+        :attr:`dummy_by_dpi` holds SilverFast's single-pass values,
+        ``ceil(lines x 6 x pixels / 8192)`` lines of buffer: one below 7200 ppi,
+        three at 7200 on the 8200i SE / 8100 V2 (``0x17``), four on the 8300i SE
+        (``0x1F``). A LINESEL 0 pass at 7200 ppi gets one line less: ``0x10`` on
+        the SE / V2 full frame, like the white shading strip (8100 V2
+        ``07_multi_exposure``, 7200 long pass); ``0x17`` on the 8300i SE by the
+        same rule, unverified. Unknown PPIs raise ``KeyError`` like the table.
         """
         asic_dpi = self.asic_dpi_for(resolution)
         table = int(self.dummy_by_dpi[asic_dpi])
         if self.oversample_for(resolution) == 1 and int(linesel) == 0:
-            pixels = int(span) * asic_dpi / _NATIVE_DPI
-            return math.ceil(2 * 6 * pixels / 8192)
+            line_bytes = 6 * int(span) * asic_dpi / _NATIVE_DPI
+            lines = max(1, int(table * 8192 // line_bytes) - 1)
+            return math.ceil(lines * line_bytes / 8192)
         return table
 
     def scan_motor_table(self, period: int) -> tuple[int, ...]:
