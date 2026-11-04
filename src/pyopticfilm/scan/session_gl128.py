@@ -553,15 +553,23 @@ class Gl128ScanSession(ScanSession):
             exp_short = int(single_pass_exposure)
         else:
             short_manual = False
-            # A model whose single pass changes REG_EXPOSURE with the
-            # resolution (135i: 28000 at 7200 dpi) gives the short slot that
-            # exposure; the flatbed models keep exposure_short everywhere.
-            short_fn = getattr(model, "me_short_exposure_for", None)
-            if callable(short_fn):
-                exp_short = int(short_fn(int(geometry.resolution if geometry is not None else resolution)))
-            else:
-                exp_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
-        exp_long = int(getattr(model, "exposure_long", exp_short * 3))
+        # A model whose single pass changes REG_EXPOSURE with the resolution
+        # (135i: 28000 at 7200 dpi) gives the short slot that exposure, and its
+        # long-pass constants (sized for the 14000 short) scale with it; the
+        # flatbed models keep exposure_short everywhere and a scale of 1.
+        base_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
+        short_fn = getattr(model, "me_short_exposure_for", None)
+        if callable(short_fn):
+            slot_short = int(short_fn(int(geometry.resolution if geometry is not None else resolution)))
+        else:
+            slot_short = base_short
+
+        def _me_scaled(value: int) -> int:
+            return int(value) * slot_short // base_short if base_short > 0 else int(value)
+
+        if not short_manual:
+            exp_short = slot_short
+        exp_long = _me_scaled(int(getattr(model, "exposure_long", base_short * 3)))
         # Unset: the ME merge fits its noise model from each scan's pass pair.
         noise_alpha = getattr(model, "me_noise_alpha", None)
         noise_beta = getattr(model, "me_noise_beta", None)
@@ -772,7 +780,7 @@ class Gl128ScanSession(ScanSession):
             elif me_long_mode == "fixed":
                 # SilverFast-style: the model's fixed long exposure on every
                 # frame, no metering, still inside the driver's safety clamp.
-                requested = int(getattr(model, "me_fixed_long_exposure", exp_long))
+                requested = _me_scaled(int(getattr(model, "me_fixed_long_exposure", exp_long)))
                 exp_long = clamp_me_long(model, geometry.resolution, requested)
                 fixed_reason = "fixed" if exp_long == requested else "fixed (clamped)"
                 logger.info(
@@ -804,8 +812,13 @@ class Gl128ScanSession(ScanSession):
                     black_level=float(getattr(model, "me_black_level", 0.0)),
                     dense_percentile=float(getattr(model, "me_dense_percentile", 5.0)),
                     target_dense_dn=float(getattr(model, "me_target_dense_dn", 10000.0)),
-                    adaptive_min=int(
-                        getattr(model, "me_adaptive_min_exposure", exp_long)
+                    # Clamped like the max, so a scaled floor above the motor
+                    # cap (135i 7200 dpi: 84000 > 64000) meets it instead of
+                    # tripping the min > max fallback.
+                    adaptive_min=clamp_me_long(
+                        model,
+                        geometry.resolution,
+                        _me_scaled(int(getattr(model, "me_adaptive_min_exposure", exp_long))),
                     ),
                     adaptive_max=adaptive_max,
                     hardware_max=hardware_max,

@@ -59,7 +59,6 @@ from pyopticfilm.device.tables_135i import (
     STATUS2_MOTMFLG,
     STATUS2_REG,
     WINDOW_ORIGIN,
-    exposure_registers,
     feedl_for_move,
     ramp_steps_for_move,
 )
@@ -722,7 +721,12 @@ class Gl128Loader(Gl128):
         regs.update(self.model.memory_layout_regs)
         regs.update(_STRIP_REGS)
         regs.update(_CALIB_STRIP_A6_A9)
-        regs.update(exposure_registers(int(self.model.exposure_lperiod), 0))
+        # The image pass's exposure, so the AFE gains and the shading white are
+        # sized for the light the image will see: 14000 / 0x90 11000 under
+        # Speed2 (every captured strip), 28000 / 44000 at 7200 dpi. 14000 there
+        # is half the image's exposure and shorter than the 15991 full-width
+        # line period, a pairing no captured pass has.
+        regs.update(self.model.exposure_regs_for(resolution))
         dummy, clk_a, clk_b = clocks
         regs[0x2B] = int(dummy)
         regs[0xA5] = int(clk_a)
@@ -776,13 +780,32 @@ class Gl128Loader(Gl128):
             raise ScanError(f"{where}: short read {len(buf)} of {size} bytes")
         return bytes(buf[:size])
 
-    def acquire_afe_strip(self, size: int = 0, *, timeout_s: float = 5.0, timing=None, wide: bool = False, resolution: int = 1200) -> bytes:  # type: ignore[override]
-        """One two-line AFE strip: the 512-pixel probe, or the full width with ``wide``."""
+    def acquire_afe_strip(  # type: ignore[override]
+        self,
+        size: int = 0,
+        *,
+        timeout_s: float = 5.0,
+        timing=None,
+        wide: bool = False,
+        resolution: int = 1200,
+        after_wide: bool = False,
+    ) -> bytes:
+        """One two-line AFE strip: the 512-pixel probe, or the full width with ``wide``.
+
+        ``after_wide``: a probe that follows the wide strip keeps the wide
+        strip's ``LPERIOD`` and ``0x2B``, as VueScan (1200) and QuickScan (600,
+        2400, 3600) do for the probe pair under the new gains.
+        """
         del size, timing
         if not self._initialized:
             self.init()
         units = self.model.full_width_units(resolution)
         pixels = units if wide else AFE_PROBE_PIXELS
+        asic_dpi = self.model.asic_dpi_for(resolution)
+        timing_pixels = units if (wide or after_wide) else pixels
+        dummy, clk_a, clk_b = afe_strip_clocks(asic_dpi, wide=wide)
+        if after_wide:
+            dummy = afe_strip_clocks(asic_dpi, wide=True)[0]
         regs = self._strip_regs(
             resolution=resolution,
             pixels=pixels,
@@ -790,8 +813,8 @@ class Gl128Loader(Gl128):
             strpixel=WINDOW_ORIGIN,
             endpixel=WINDOW_ORIGIN + pixels,
             dpiset=AFE_DPISET,
-            lperiod=self.model.afe_strip_line_period(resolution, pixels),
-            clocks=afe_strip_clocks(self.model.asic_dpi_for(resolution), wide=wide),
+            lperiod=self.model.afe_strip_line_period(resolution, timing_pixels),
+            clocks=(dummy, clk_a, clk_b),
             dark=False,
         )
         self.apply_timing_gpio(resolution)
@@ -803,11 +826,21 @@ class Gl128Loader(Gl128):
             timeout_s=timeout_s,
         )
 
-    def _probe_black(self, gains: tuple[int, int, int], target: float, *, fallback: tuple[int, int, int], resolution: int, stage: str) -> tuple[int, int, int]:
+    def _probe_black(
+        self,
+        gains: tuple[int, int, int],
+        target: float,
+        *,
+        fallback: tuple[int, int, int],
+        resolution: int,
+        stage: str,
+        after_wide: bool = False,
+    ) -> tuple[int, int, int]:
         black: list[tuple[float, float, float]] = []
         for code in (AFE_OFFSET_PROBE_LOW, AFE_OFFSET_PROBE_HIGH):
             self.apply_frontend(AfeFrontend(gains=gains, offsets=(code, code, code)))
-            black.append(optical_black_means(self.acquire_afe_strip(resolution=resolution)))
+            strip = self.acquire_afe_strip(resolution=resolution, after_wide=after_wide)
+            black.append(optical_black_means(strip))
         solved = offsets_for_black_level(black[0], black[1], target)
         offsets = tuple(fallback[c] if v is None else v for c, v in enumerate(solved))
         if None in solved:
@@ -850,7 +883,14 @@ class Gl128Loader(Gl128):
         wide = self.acquire_afe_strip(wide=True, resolution=dpi)
         peaks = lit_channel_peaks(wide, pixels=wide_pixels)
         gains = coarse_gains_from_wide_means(peaks, targets=(AFE_LINE_GAIN,) * 3)
-        offsets = self._probe_black(gains, AFE_BLACK_TARGET_COLOR, fallback=AFE_FALLBACK_OFFSETS_COLOR, resolution=dpi, stage="black offset")
+        offsets = self._probe_black(
+            gains,
+            AFE_BLACK_TARGET_COLOR,
+            fallback=AFE_FALLBACK_OFFSETS_COLOR,
+            resolution=dpi,
+            stage="black offset",
+            after_wide=True,
+        )
         result = AfeFrontend(gains=gains, offsets=_encode_offsets(offsets))
         self.apply_frontend(result)
         self.last_afe = result

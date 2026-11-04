@@ -276,6 +276,9 @@ class Model135i(Gl128Common):
     exposure_lperiod: int = 14000
     exposure_short: int = 14000
     #: Filled: no multi-exposure capture. 3x the short, as on the 8200i SE.
+    #: The family multi-pass scales this (and the default and adaptive-floor
+    #: longs) by :meth:`me_short_exposure_for` / 14000, so at 7200 dpi it is
+    #: 3 x 28000, capped at :meth:`me_long_exposure_cap`.
     me_fixed_long_exposure: int = 42000
     pixel_clock_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(_PIXEL_CLOCK_BY_DPI_135I)
@@ -483,14 +486,38 @@ class Model135i(Gl128Common):
         return int(self.shading_linesel_by_dpi.get(self.asic_dpi_for(resolution), 0))
 
     def afe_strip_line_period(self, resolution: int, pixels: int) -> int:
-        """``LPERIOD`` of an AFE strip of ``pixels``: ``10807 + px/4``, ``/2`` at hardware X 3600.
+        """``LPERIOD`` of an AFE strip of ``pixels``: ``10807 + px/4``, ``/2`` from 3600 dpi.
 
         Measured 10935 / 12103 (probe / wide) at 600 and 1200 dpi, 11063 /
-        13399 at 2400 and 3600 dpi (QuickScan). 7200 has no capture and keeps
-        ``/4``.
+        13399 at 2400 and 3600 dpi (QuickScan). 7200 has no AFE capture; it
+        takes ``/2`` like its image pass (15991) and the flatbed GL128 AFE
+        strips at 7200, so the 10368-pixel wide strip is not given a shorter
+        line than any measured 7200 pass.
         """
-        divisor = 2 if self.asic_dpi_for(resolution) == 3600 else 4
+        divisor = 2 if self.asic_dpi_for(resolution) >= 3600 else 4
         return LPERIOD_BASE + int(pixels) // divisor
+
+    def afe_timing_key(self, resolution: int) -> tuple[object, ...]:
+        """What an AFE search result depends on: timing set, strip line periods and exposure.
+
+        Codes searched at one resolution are reused at another only when this
+        matches. The flatbed rule (:func:`~pyopticfilm.scan.calib_gl128.afe_timing_matches`)
+        puts 3600 and 7200 together, but on this model they are different
+        timing sets (``Speed2`` / ``Speed1``: AFE sampling and CCD clocks
+        ``0x52``-``0x57``, ``0x5A``-``0x5B``, ``0x70``-``0x73``), and VueScan's
+        7200 pass runs other offsets than its ``Speed2`` passes. The strip
+        ``0x2B`` is left out: QuickScan writes different values at one dpi.
+        """
+        return (
+            timing_set_for(self.asic_dpi_for(resolution)),
+            self.afe_strip_line_period(resolution, 512),
+            self.afe_strip_line_period(resolution, self.full_width_units(resolution)),
+            self.image_exposure_for(resolution),
+        )
+
+    def scaled_ld_shift(self, ld: int, asic_dpi: int) -> int:
+        """Round line-distance shifts: truncating leaves B 0.8 rows off at 720 dpi (4.8 -> 4)."""
+        return round(int(ld) * int(asic_dpi) / int(self.motor_base_ydpi))
 
     # --- loader ----------------------------------------------------------
 

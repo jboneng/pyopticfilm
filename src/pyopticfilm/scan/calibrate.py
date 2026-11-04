@@ -417,6 +417,21 @@ class Calibrator:
         asic_dpi_for = getattr(self.model, "asic_dpi_for", None)
         return int(asic_dpi_for(resolution)) if callable(asic_dpi_for) else int(resolution)
 
+    def _afe_timing_matches(self, searched_dpi: int | None, scan_dpi: int) -> bool:
+        """Whether AFE codes searched at ``searched_dpi`` may be reused at ``scan_dpi``.
+
+        A model with ``afe_timing_key(resolution)`` (OpticFilm 135i) compares
+        those keys; the others use the GL128 flatbed rule.
+        """
+        if searched_dpi is None:
+            return False
+        key_fn = getattr(self.model, "afe_timing_key", None)
+        if callable(key_fn):
+            return key_fn(int(searched_dpi)) == key_fn(int(scan_dpi))
+        from pyopticfilm.scan.calib_gl128 import afe_timing_matches
+
+        return afe_timing_matches(searched_dpi, scan_dpi)
+
     def _ensure_at_home(self) -> None:
         assert self.asic is not None
         if getattr(self.asic, "is_at_home", lambda: True)():
@@ -473,8 +488,6 @@ class Calibrator:
         shade = getattr(self.asic, "run_asic_shading", None)
         if not callable(shade):
             raise CalibrationError("ASIC has no run_asic_shading")
-        from pyopticfilm.scan.calib_gl128 import afe_timing_matches
-
         scan_dpi = self._asic_dpi(geometry.resolution)
         last_reason = "unknown"
         for attempt in range(2):
@@ -485,7 +498,7 @@ class Calibrator:
                     not (research_afe and attempt == 0)
                     and last_afe is not None
                     and getattr(self.asic, "_scan_method", None) == "transparency"
-                    and afe_timing_matches(getattr(self.asic, "last_afe_dpi", None), scan_dpi)
+                    and self._afe_timing_matches(getattr(self.asic, "last_afe_dpi", None), scan_dpi)
                 )
                 if callable(search) and not reuse_afe:
                     logger.info("GL128 running stationary AFE search (attempt %d)", attempt + 1)

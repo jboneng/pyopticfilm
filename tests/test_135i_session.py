@@ -448,7 +448,11 @@ def test_1200_preview_programs_match_capture(scanner, rec):
     for probe in (probe1, probe2, probe3, probe4):
         _common_scan_bits(probe)
         assert (_u(probe, 0x2C, 2), _u(probe, 0x82, 3), _u(probe, 0x85, 3), _u(probe, 0x25, 3)) == (1200, 35, 547, 2)
-        assert (_u(probe, 0x28, 3), probe[0x2B], probe[0xA5], probe[0xAB]) == (10935, 0x01, 0x01, 0x30)
+        assert (probe[0xA5], probe[0xAB]) == (0x01, 0x30)
+        # Probe timing before the wide strip; the pair after it keeps the wide
+        # strip's LPERIOD and 0x2B (VueScan 1200, QuickScan 600/2400/3600).
+        expected = (10935, 0x01) if probe in (probe1, probe2) else (12103, 0x04)
+        assert (_u(probe, 0x28, 3), probe[0x2B]) == expected
         assert [probe[a] for a in (0xA6, 0xA7, 0xA8, 0xA9)] == [0x00, 0x01, 0x00, 0x01]
         assert (probe[0x01], probe[0x02], probe[0x03], probe[0x19], probe[0xAF]) == (0x03, 0x00, 0x30, 0x08, 0x00)
         assert probe[0x32] & 0xA0 == 0xA0
@@ -760,12 +764,13 @@ def test_7200_multi_exposure_short_at_timing_set_exposure(scanner, rec):
     )
     images = [s for s in rec.starts if s[0x02] == 0x30]
     feeds = [s for s in rec.starts if s[0x02] == 0x18]
-    assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(28000, 44000), (42000, 66000)]
+    # Fixed long = 3 x the 28000 short (84000), capped at the motor-word limit.
+    assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(28000, 44000), (64000, 100571)]
     assert [s[0x1C] & 0x07 for s in images] == [0, 1]
     assert [s[0xA5] for s in images] == [0x01, 0x01]
     assert feeds and all(s[0x1C] & 0x07 == 0 for s in feeds)
     assert scanner.last_me_debug.exposure_short == 28000
-    assert scanner.last_me_debug.exposure_long == 42000
+    assert scanner.last_me_debug.exposure_long == 64000
     # The eject after a shifted pass runs without the shift.
     rec.starts.clear()
     scanner.eject_holder()
@@ -951,3 +956,61 @@ def test_7200_unstagger_aligns_a_four_row_column_offset():
     col = out[:, :, 1]
     first_bright = [int(np.argmax(col[:, x] > 25000)) for x in range(col.shape[1])]
     assert len(set(first_bright)) == 1
+
+
+# --- second audit: calibration timing, line shifts, ME longs --------------------
+
+
+def _strip_starts(starts: list[dict[int, int]]) -> list[dict[int, int]]:
+    """Stationary calibration strips (motor off), in order."""
+    return [s for s in starts if s.get(0x02) == 0x00]
+
+
+@pytest.mark.parametrize(("dpi", "shifts"), [(600, (0, 2, 4)), (720, (0, 2, 5)), (1200, (0, 4, 8)), (7200, (0, 24, 48))])
+def test_line_shifts_round_to_the_nearest_row(dpi, shifts):
+    # LineSpace 24 at 7200: 2.4 / 4.8 rows at 720 dpi round to 2 / 5, not 2 / 4.
+    g = compute_geometry(dpi, model=MODEL_135I)
+    assert (g.shift_r, g.shift_g, g.shift_b) == shifts
+
+
+def test_afe_strip_line_period_halves_from_3600():
+    assert MODEL_135I.afe_strip_line_period(1200, 5184) == 12103
+    assert MODEL_135I.afe_strip_line_period(3600, 5184) == 13399
+    # 7200 wide strip: the same 15991 as the 7200 image pass.
+    assert MODEL_135I.afe_strip_line_period(7200, 10368) == 15991
+
+
+@pytest.mark.parametrize(("dpi", "exposure", "reg90"), [(1200, 14000, 11000), (7200, 28000, 44000)])
+def test_calibration_strips_run_at_the_image_exposure(scanner, rec, dpi, exposure, reg90):
+    scanner.load_holder()
+    rec.starts.clear()
+    # Full width, so the 7200 strips have the 15991 full-width line period.
+    scanner.scan(resolution=dpi, frame=1, area=(0.0, 0.0, 1.0, 0.02))
+    strips = _strip_starts(rec.starts)
+    image = [s for s in rec.starts if s[0x02] == 0x30][-1]
+    assert len(strips) == 7  # 2 probes, wide, 2 probes, dark, white
+    assert {(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in strips} == {(exposure, reg90)}
+    assert (_u(image, 0x7D, 3), _u(image, 0x90, 3)) == (exposure, reg90)
+    # Every captured pass has REG_EXPOSURE >= LPERIOD.
+    assert all(_u(s, 0x7D, 3) >= _u(s, 0x28, 3) for s in strips)
+
+
+def test_7200_after_3600_runs_its_own_afe_search(scanner, rec):
+    scanner.load_holder()
+    scanner.scan(resolution=3600, frame=1, area=(0.0, 0.0, 0.1, 0.1))
+    rec.starts.clear()
+    scanner.scan(resolution=7200, frame=1, area=(0.0, 0.0, 0.1, 0.1))
+    afe = [s for s in _strip_starts(rec.starts) if _u(s, 0x25, 3) == 2]
+    assert len(afe) == 5
+    assert scanner.asic.last_afe_dpi == 7200
+
+
+def test_afe_codes_are_reused_within_a_timing_regime(scanner, rec):
+    # 600 and 1200 share Speed2 and the AFE strip line periods.
+    scanner.load_holder()
+    scanner.scan(resolution=600, frame=1, area=(0.0, 0.0, 0.1, 0.1))
+    rec.starts.clear()
+    scanner.scan(resolution=1200, frame=1, area=(0.0, 0.0, 0.1, 0.1))
+    assert not [s for s in _strip_starts(rec.starts) if _u(s, 0x25, 3) == 2]
+    assert MODEL_135I.afe_timing_key(1800) != MODEL_135I.afe_timing_key(3600)
+    assert MODEL_135I.afe_timing_key(3600) != MODEL_135I.afe_timing_key(7200)
