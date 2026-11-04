@@ -1035,13 +1035,19 @@ so `PageSize` is not the travel limit.
 **Multi-exposure and Multi-Pass** use the family pass sequence and merge
 (`Gl128ScanSession._run_multi_pass`): each pass is its own feed from the
 loader home and its own toggle-mode pass, and the IR plane comes from the
-first short pass. Not at 7200 dpi (as on the flatbed models). The long
-exposure is filled in (fixed: `me_fixed_long_exposure = 42000`, 3× short).
-`0x90` scales the timing set's value with the exposure (33000 at 42000; no
-capture above 28000). The long cap is
-`64000 · 3600 / Ydpi` (`me_long_exposure_cap`): the scan motor word here is
-`E · Ydpi / 3600`, not `E / oversample`. That is 32000 at 7200 dpi; the
-filled-in 42000 would be a word of 84000.
+first short pass. The short slot (and every Multi-Pass repeat) runs the
+single pass's exposure (`me_short_exposure_for`: 14000, or 28000 at 7200
+dpi). The long exposure is filled in (fixed: `me_fixed_long_exposure =
+42000`). `0x90` scales the timing set's value with the exposure (33000 at
+42000; no capture above 28000). The scan motor word here is
+`E · Ydpi / 3600`, not `E / oversample`, so at 7200 dpi a 16-bit table holds
+at most 32000. A word above 16 bits sets the motor step-time shift
+(`0x1C[2:0] = 1`, `scan_motor_step_shift`), which halves every table word:
+the vendor driver's table generator raises that shift until the table fits.
+The long cap is `128000 · 3600 / Ydpi` (`me_long_exposure_cap`): 64000 at
+7200 dpi. No capture has an image pass with the shift set, so it is
+untested on hardware. Loader moves and frame feeds always write `0x1C = 0`;
+the AGOHOME park after a shifted pass may run at half speed.
 
 **Watcher**: `Scanner.watch_loader(stop=…)` polls the holder sensor and the
 interrupt endpoint every 190 ms (VueScan's idle interval) and reports
@@ -1108,6 +1114,36 @@ Closed by hardware measurement (Scan Lab TIFFs, 2026-10-16): the 7200 dpi
 leaves correct); 1440/2400 show 0.8/1.35 rows. Fixed by host unstagger
 (`(4, 0)` @7200, `(1, 0)` @1440/2400, pre-mirror) plus rounded `ld_shift` as
 on the SE leaves; 1200/3600 flat. Full-frame 7200 loses 4 output rows.
+The 8200i SE showed the same 4-row stagger at 7200 (Scan Lab TIFFs,
+2026-11-03) and now uses `(4, 0)` there too. On all three GL128 leaves the
+pattern follows the sensor column (`stagger_follows_sensor_column`, phase =
+`pixel_startx`): full frames start on column 242 and are unchanged, and a
+crop that starts on an odd column gets the pattern rotated by one instead of
+a doubled comb. The 8300i SE's SilverFast 7200 capture shows the same stagger
+(3.95 rows), so it uses `(4, 0)` at 7200 too.
+
+The stagger shows only where the column step `7200 / dpi` is odd, because there
+the output columns alternate sensor parity. Measured as the pattern value where
+the even/odd offset crosses zero (gradient cross-correlation, no interpolation;
+the SilverFast captures were run through this pipeline):
+
+| dpi | Column step | 8200i SE (scans) | 8100 V2 (capture) | 8300i SE (capture) | Host pattern |
+|---|---|---|---|---|---|
+| 7200 | 1 | ≈4 (0.00 left) | 3.88 | 3.95 | `(4, 0)` |
+| 2400 | 3 | 1.24–1.28 | 1.23 | 1.13–1.14 | `(1.25, 0)`, 8300i `(1.15, 0)` |
+| 1440 | 5 | 0.80 (0.00 left) | 0.80 | not captured | `(0.8, 0)` |
+| 3600 / 1800 / 1200 | 2 / 4 / 6 | 0 | 0.03 / 0.04 | | none |
+
+At 7200 and 1440 the value is `4 × dpi / 7200` (`gl128_common.ccd_stagger_rows`).
+At 2400 it is lower than that rule's 1.333, so the leaves use the measured values.
+The whole-row `(1, 0)` used before at 1440 and 2400 over-corrected 1440 by 0.2 and
+left 0.15–0.25 rows at 2400 (a sawtooth on the film border). The 8200i SE's own
+session 13 ladder passes carry too little image detail to measure (correlation peak
+0.05–0.13) and were not used. Fractional patterns are resampled at `±d/2` (Keys
+cubic), so both column sets soften equally, and they keep the single spare row of
+`(1, 0)`. `LINCNT` stays at SilverFast's value; there is no travel for more spare
+rows. The cubic's outer taps clamp on the first and last output rows. Patterns that
+are whole rows (7200, GL845) are sliced as before.
 
 The 8300i SE leaf is in-tree with `scan_ready=True`; §10 is the capture
 synthesis behind that leaf. The 135i leaf is in-tree with

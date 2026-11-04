@@ -19,12 +19,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     - `scan(frame=None)` scans the whole strip in one pass, as VueScan's panorama preview does (feed 6414, 66600 steps);
     - every pass scans a visible and an IR line per output line, so `scan(infrared=True)` returns RGB and IR from one pass, registered to the same line;
     - calibration at the loader home fills a visible and an IR shading bank, and `calibrate(mode="infrared")` runs the same calibration as `"color"`;
-    - multi-exposure and Multi-Pass work as on the flatbed GL128 models (not at 7200 dpi), one feed per pass; the long exposure is filled in, since there is no 135i multi-exposure capture;
+    - multi-exposure and Multi-Pass work as on the flatbed GL128 models, 7200 dpi included, one feed per pass; the long exposure is filled in, since there is no 135i multi-exposure capture;
     - `Scanner.watch_loader(stop=...)` polls the holder sensor and eject button like VueScan, loading on insert and ejecting on the button.
 
     `Scanner.open_fake(MODEL_135I)` runs all of it against the new `MockFilmLoaderTransport`, and Scan Lab's MOCK mode has Frame, Whole strip, Load holder and Eject holder controls. On real USB, Scan Lab's **Override safety HW gate** also arms the 135i loader motor for bring-up. Setup goldens: `tests/traces/python/135i/`.
 
   The model stays `scan_ready=False`: on real hardware `scan()`, `calibrate()`, `home()`, `park()`, `load_holder()` and `eject_holder()` stay locked unless the motor is armed for bring-up (`Scanner.arm_bringup_motor()`). One 135i hardware run so far, with an earlier commit: load, eject and one 600 dpi IR frame. Details: `docs/gl128-model-comparison.md` §11.
+
+### Fixed
+
+- **OpticFilm 135i multi-exposure and Multi-Pass at 7200 dpi.** The short pass (and every Multi-Pass repeat) ran at 14000, half the 28000 a single 7200 dpi pass uses; it now uses the single pass's exposure (`me_short_exposure_for`). The 135i's motor word is `exposure × Ydpi / 3600`, so at 7200 dpi the 16-bit table held a long pass of at most 32000, barely above the short. A pass whose word exceeds 16 bits now sets the motor step-time shift (`0x1C[2:0] = 1`), which halves every table word, so the long pass can reach 64000 at 7200 dpi. Every captured pass needs no shift and is unchanged; loader moves and frame feeds always run with `0x1C = 0`. The shift is not yet tested on 135i hardware.
+
+### Notes for integrators
+
+- GL128 family for the 135i:
+  - Six fields move from `Gl128Common` to the per-leaf divergent catalog, each declared on every leaf: `resolutions_dpi`, `register_dpiset_by_dpi`, `lperiod_by_dpi`, `feed_steps_per_inch`, `init_regs`, `memory_layout_regs`. The 8200i SE, 8100 V2 and 8300i SE keep their values.
+  - `Gl128.asic_boot()` / `init()` read new `Gl128Common` hooks: `boot_blobs()`, `boot_writes_layout_and_gpo()`, `boot_vendor_steps()`, `boot_uploads_tables()`.
+  - `gl128_firmware_variant()` now delegates to `firmware_register_overrides()`.
+  - New `GenesysUsbProtocol.write_vendor()` / `read_vendor()`.
+  - `MockScannerTransport` accepts GPIO (`0x8A`/`0x8B`) requests; `FakeUsbTransport` has an `interrupt_queue` read by `read_intr()`.
+  - New class flag `Gl128Common.film_loader` (`False`; `True` on `Model135i`) selects `pyopticfilm.asic.gl128_loader.Gl128Loader` in `create_asic`, `pyopticfilm.scan.session_gl128_loader.Gl128LoaderScanSession` in `create_session`, and the frame-slot geometry in `compute_geometry`.
+  - `Gl128ScanSession._bulk_index(geometry, *, first)` picks each image chunk's `wIndex`; the flatbed models are unchanged.
+  - `Scanner.scan(..., frame=0)`: any `frame` other than 0 raises `ValueError` on models without a film loader.
+  - `clamp_me_long()` uses a model's `me_long_exposure_cap(resolution)` when it has one (135i); the flatbed models keep `64000 · oversample`.
+
+## [1.3.9] - 2026-11-03
+
+### Added
+
 - `tools/bench_me_merge.py --real DIR` scores a real short/long TIFF pair (noise, noise-free detail, dense-film colour, timing); new cases cover a black offset and row drift.
 - **Fixed multi-exposure** (GL128: 8200i SE, 8100 V2, 8300i SE). `scan(multi_exposure=True, me_long_mode="fixed")` scans the long pass at one exposure per model on every frame, as SilverFast does, instead of metering the short pass: 42000 (3× short) on the 8200i SE and 8100 V2, 60000 (4× short) on the 8300i SE, the value in that model's SilverFast ME captures. The value is the new model field `me_fixed_long_exposure` and still goes through the normal long clamp (14000–85000). Everything after the long pass is unchanged, and `last_me_debug.exposure_reason` reads `"fixed"`. The default stays `"adaptive"`; a manual `me_long_exposure` still wins. Scan Lab has a **Fixed ME long (SilverFast-style)** toggle, and its CLI takes `--me-long-mode fixed`.
   - **Hardware.** Not yet run on hardware in this mode. 42000 is the long exposure the adaptive path already uses as its floor on the 8200i SE and 8100 V2; 60000 on the 8300i SE comes from its SilverFast captures and is inside the clamp the adaptive path already scans with.
@@ -38,7 +60,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **OpticFilm 135i multi-exposure at 7200 dpi stays inside the 16-bit scan-motor table.** The motor word is `exposure × Ydpi / 3600`, so the filled-in long exposure of 42000 would be 84000. The long pass is capped at 32000 (word 64000), including a pass that arrives already set to the flatbed 42000.
+- **GL128 1440 and 2400 dpi scans had a fine sawtooth on sharp edges** (8200i SE, 8100 V2, 8300i SE). The CCD's even and odd columns are offset by a fraction of a row at these resolutions, and the whole-row `(1, 0)` couldn't match it. It left 0.15–0.25 rows at 2400 (visible on the film border) and over-corrected 1440 by 0.2. The unstagger now uses measured values: 0.8 rows at 1440, and at 2400 1.25 (8200i SE, 8100 V2) or 1.15 (8300i SE). They come from the 8200i SE's own scans and the 8100 V2 and 8300i SE SilverFast captures. Both column sets are resampled by ±half the offset with a Keys cubic, so they soften equally and the image doesn't move. Scan registers and output size are unchanged (still one spare row). 1200, 1800 and 3600 have no stagger (each output column comes from one sensor parity).
+- **8300i SE 7200 dpi scans had the same 4-row zipper as the 8200i SE.** Its SilverFast 7200 capture shows a 3.95-row even/odd offset, which nothing corrected. It now uses `(4, 0)` like the 8200i SE and 8100 V2. Scan registers are unchanged.
+- **8200i SE 7200 dpi scans had a fine zipper on edges.** Even and odd columns were 4 rows apart (the CCD stagger), because the SE had no host unstagger at 7200. It now uses `(4, 0)` there, as the 8100 V2 does. Scan registers are unchanged; a full frame returns 4 fewer spare rows before the cut to the frame.
+- **GL128 crops starting on an odd column got the unstagger pattern backwards** (8100 V2 at 7200, 1440 and 2400 dpi; 8200i SE and 8300i SE at 1440 and 2400; now also 8200i SE at 7200). The pattern was indexed by buffer column, so about half of all crops doubled the comb instead of removing it. It now follows the sensor column (`ScanGeometry.stagger_phase`, set from `pixel_startx` when the model's `stagger_follows_sensor_column` is true). Full frames start on an even column and are unchanged. Other models keep the buffer-column behaviour.
 - **Multi-exposure merges lost most of the long pass on real negatives, and colour shifted in dense film.** On a real 1800 dpi pair the merge barely beat the short alone.
   - **Registration.** The long feeds at a slightly different rate from the short (-1.3 px per 1000 rows on that pair), so one translation only registered the frame centre. The long now gets a per-row warp, fitted from full-resolution tiles and resampled with Lanczos-4. The fitted noise model no longer absorbs the misregistration (alpha 13 → 4).
   - **Shift field.** Across the frame the passes also differ by up to a pixel, which on sharp silver grain read as disagreement: on HP5+ the merge rejected usable long on 15 % of green. A smooth field is now fitted from small tiles, down to 2-4 %.
@@ -139,6 +164,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **GL128 multi-exposure and Multi-Pass work at 7200 dpi again** (8200i SE, 8100 V2, 8300i SE, 135i). `Scanner.scan` and `Gl128ScanSession.run` accept `multi_exposure=True` and `n_passes > 1` at 7200 dpi. `multi_exposure_resolutions_dpi` and `multi_pass_resolutions_dpi` now list every resolution. Scan Lab enables **Multi-exposure (ME)** and **Passes** at 7200. The short pass and every Multi-Pass repeat keep the 28000 motor-table floor that single-pass scans use (15000 on the 8300i SE).
+  - **Why the long pass failed.** These modes were turned off because, on the 8200i SE, a 7200 dpi ME long pass at 64000 read at about 1 MB/s and the scanner dropped off USB; the 8100 V2 hung. pyopticfilm wrote LINESEL 1 (`0x1D=0x81`) and three lines of `0x2B` buffer on every 7200 dpi image pass. SilverFast writes those only on the short pass, and its ME long pass uses `0x80`, two lines of buffer and a scan motor table equal to the exposure (8100 V2 SilverFast capture). With `0x81` the ASIC timed each line at twice what the motor table said.
+  - **Now.** LINESEL and `0x2B` follow the pass (`Gl128Common.image_linesel_for`, `image_dummy_for`), and the scan motor table is `exposure × (LINESEL + 1) / oversample` (`× dpi / 14400` on the 8300i SE; `scan_motor_period_for`) ([#157](https://github.com/jboneng/pyopticfilm/pull/157)). Single-pass and Multi-Pass registers are unchanged.
+  - **Long pass up to 64000 at 7200 dpi**, the 16-bit motor-table limit (`me_long_clamp_max_native`). It applies to adaptive and fixed modes, so the 8300i SE's fixed long runs at its 60000. Other resolutions keep 14000–85000, and a manual `me_long_exposure` is still written verbatim.
+  - **Hardware.**
+    - 8100 V2: full frames at 42000 and 64000 and an adaptive full frame, no read gaps, parked at home (#157).
+    - 8200i SE: an adaptive crop and full frame. Adaptive chose 64000; the full frame read the short pass at 5.56 MB/s and the long at 2.43 MB/s, with no gaps, and parked at home.
+    - 8300i SE: not yet run at 7200 dpi. Its long-pass `0x2B` is derived, not captured ([#158](https://github.com/jboneng/pyopticfilm/issues/158), [#159](https://github.com/jboneng/pyopticfilm/issues/159)).
 - `merge_exposures` estimates the row warp and shift field itself unless given `align_shift` or the new `align_transform`. `exposure_ratio_*` in `FusionStats` is now the upper-tone gain of the level curve.
 - The multi-exposure merge runs on up to 8 threads. A 19 MP frame takes about 3 s to register and 11-27 s to warp and merge, depending on system load.
 - **OpticFilm 7600i v2 is hardware-tested** (`07b3:0c3b`, bcdDevice `0x0605`, GL845): `MODEL_7600I_V2.scan_ready` is `True`, so `Scanner.open()` scans, calibrates and parks it without a lab override, including colour + IR and multi-exposure. The scan validation set is now 8200i SE + 8100 (V2) + 8300i SE + 7600i v1 + 7600i v2. Lock oracles are at `tests/model_lock/opticfilm_7600i_v2/`. The GL845 8200i and other GL845 aliases stay gated. Evidence: [docs/scanner-validation.md](docs/scanner-validation.md) and [docs/opticfilm-7600i-v2.md](docs/opticfilm-7600i-v2.md).
@@ -166,16 +199,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - from `pyopticfilm.scan.calib_gl128`: `adaptive_afe_white_target`, `AFE_WHITE_TARGET_SF` / `_MIN` / `_MAX`, `AFE_OFFSET_MIN`, `AFE_GAIN_COARSE_DIVISOR` and `COLOR_AFE_SESSION04_OFFSETS`;
   - from `pyopticfilm.asic.gl128`: `IR_AFE_FALLBACK_GAINS`, `IR_AFE_FALLBACK_OFFSETS` and `IR_AFE_HEALTHY_MEAN`.
 - `search_afe_codes` and `AfeSearchConfig` remain for GL845.
-- GL128 family for the 135i:
-  - Six fields move from `Gl128Common` to the per-leaf divergent catalog, each declared on every leaf: `resolutions_dpi`, `register_dpiset_by_dpi`, `lperiod_by_dpi`, `feed_steps_per_inch`, `init_regs`, `memory_layout_regs`. The 8200i SE, 8100 V2 and 8300i SE keep their values.
-  - `Gl128.asic_boot()` / `init()` read new `Gl128Common` hooks: `boot_blobs()`, `boot_writes_layout_and_gpo()`, `boot_vendor_steps()`, `boot_uploads_tables()`.
-  - `gl128_firmware_variant()` now delegates to `firmware_register_overrides()`.
-  - New `GenesysUsbProtocol.write_vendor()` / `read_vendor()`.
-  - `MockScannerTransport` accepts GPIO (`0x8A`/`0x8B`) requests; `FakeUsbTransport` has an `interrupt_queue` read by `read_intr()`.
-  - New class flag `Gl128Common.film_loader` (`False`; `True` on `Model135i`) selects `pyopticfilm.asic.gl128_loader.Gl128Loader` in `create_asic`, `pyopticfilm.scan.session_gl128_loader.Gl128LoaderScanSession` in `create_session`, and the frame-slot geometry in `compute_geometry`.
-  - `Gl128ScanSession._bulk_index(geometry, *, first)` picks each image chunk's `wIndex`; the flatbed models are unchanged.
-  - `Scanner.scan(..., frame=0)`: any `frame` other than 0 raises `ValueError` on models without a film loader.
-  - `clamp_me_long()` uses a model's `me_long_exposure_cap(resolution)` when it has one (135i); the flatbed models keep `64000 · oversample`.
 - `Gl128Common.line_period_for(resolution, *, span=None)` takes the window span (`END − STR`, native pixels) and defaults to SilverFast's full frame. New in `pyopticfilm.device.gl128_common`: `lperiod_for_window`, `lperiod_for_line`, `LPERIOD_BASE` and `FULL_FRAME_SPAN_NATIVE`. `lperiod_by_dpi` is now one shared full-frame table on `Gl128Common`, no longer declared per model.
 - `Gl128.position_for_full_frame_scan(..., scan_regs=None)` takes the image pass's register set; both feeds then run under it. Without it the fixed feed recipe is used.
 - `Gl128Common.shading_strip_clocks(resolution, *, dvdset, span=None)` takes the strip window span and defaults to SilverFast's full frame. New in `pyopticfilm.device.gl128_common`: `shading_clocks_for_window`. Removed: the `shading_dark_dummy_by_dpi` / `shading_dark_pixel_clock_a_by_dpi` / `shading_dark_pixel_clock_b_by_dpi` fields and the `SHADING_DARK_*_BY_DPI` tables.
@@ -185,8 +208,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Contributors
 
 - [@beegus](https://github.com/beegus) for OpticFilm 7600i v2 (GL845) support and its hardware sign-off ([#151](https://github.com/jboneng/pyopticfilm/pull/151), [#152](https://github.com/jboneng/pyopticfilm/pull/152), [#153](https://github.com/jboneng/pyopticfilm/pull/153)): the GL845 dark-calibration, home/park and error-handling fixes, colour + IR, multi-exposure, auto exposure, the pre-feed and `ScanImage.ir_tracks_image`, plus the hardware testing and measurements behind them on a physical 7600i v2, including the light-path profile that found the white-strip position, the read-noise and LPERIOD envelope measurements, and the HP5 Plus and Tri-X 400 infrared tests.
-- [@theaino](https://github.com/theaino) for testing the `staging` branch (#131–#145) on the 8300i SE before it reached `main` ([#143](https://github.com/jboneng/pyopticfilm/issues/143)), and for the 8300i SE SilverFast USB captures and frame-position tests from [#98](https://github.com/jboneng/pyopticfilm/issues/98) and [#102](https://github.com/jboneng/pyopticfilm/issues/102). The #102 results showed that `0xAF` changes the feed distance, which led to the positioning-feed fix.
-- [@krixkrax615](https://github.com/krixkrax615) for first reporting that the boot value `0x5E=0x1F` overwrites the calibrated blue AFE offset ([#97](https://github.com/jboneng/pyopticfilm/issues/97)).
+- [@theaino](https://github.com/theaino) for testing the `staging` branch (#131–#145) on the 8300i SE before it reached `main` ([#143](https://github.com/jboneng/pyopticfilm/issues/143)), and for the 8300i SE SilverFast USB captures and frame-position tests from [#98](https://github.com/jboneng/pyopticfilm/issues/98) and [#102](https://github.com/jboneng/pyopticfilm/issues/102). The #102 results showed that `0xAF` changes the feed distance, which led to the positioning-feed fix. The same 8300i SE PPI-ladder captures gave the 8300i SE's fractional unstagger at 2400 dpi and its `(4, 0)` at 7200 dpi ([#161](https://github.com/jboneng/pyopticfilm/pull/161)).
+- [@TobbyTravel](https://github.com/TobbyTravel) for finding why the 7200 dpi multi-exposure long pass hung. They decoded the 8100 V2 SilverFast 7200 dpi ME capture register by register and wrote the LINESEL / line-buffer fix that brought multi-exposure back at 7200 dpi ([#157](https://github.com/jboneng/pyopticfilm/pull/157)). They also tested it on the 8100 V2 (crops and full frames at 42000, 64000 and adaptive) and opened the hardware-verification request for the other models ([#158](https://github.com/jboneng/pyopticfilm/issues/158)). Their 8100 V2 SilverFast captures (`04_color_7200`, `06_ppi_ladder`) gave the V2's 1440 / 2400 dpi unstagger values ([#161](https://github.com/jboneng/pyopticfilm/pull/161)).
+- [@krixkrax615](https://github.com/krixkrax615) for first reporting that the boot value `0x5E=0x1F` overwrites the calibrated blue AFE offset ([#97](https://github.com/jboneng/pyopticfilm/issues/97)), and for the 4-line CCD stagger at 7200 dpi reported in the same issue, the `(4, 0)` correction that the 8200i SE and 8300i SE now use as well ([#160](https://github.com/jboneng/pyopticfilm/pull/160), [#161](https://github.com/jboneng/pyopticfilm/pull/161)).
 
 ## [1.3.8] - 2026-10-26
 

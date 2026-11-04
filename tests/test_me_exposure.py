@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 from pyopticfilm.device.model_8100_v2 import MODEL_8100_V2
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
+from pyopticfilm.device.model_8300i_se import MODEL_8300I_SE
 from pyopticfilm.scan.me_exposure import (
     choose_long_exposure,
     clamp_long_exposure,
@@ -145,9 +148,26 @@ def test_model_adaptive_envelope_defaults():
 
 
 def test_v2_me_long_clamp_matches_se():
-    """V2 uses the same 14000–85000 envelope, still cut to 64000 at 7200 dpi."""
+    """V2 uses the same 14000–85000 envelope, cut to 64000 at 7200 dpi."""
     assert MODEL_8100_V2.me_long_clamp_min == 14000
     assert MODEL_8100_V2.me_long_clamp_max == 85000
+    assert MODEL_8100_V2.me_long_clamp_max_native == 64000
     assert clamp_me_long(MODEL_8100_V2, 1800, 85000) == 85000
     assert clamp_me_long(MODEL_8100_V2, 1800, 90000) == 85000
     assert clamp_me_long(MODEL_8100_V2, 7200, 85000) == 64000
+
+
+@pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE])
+def test_me_long_capped_at_64000_only_at_7200(model):
+    """The 16-bit scan motor table margin at oversample 1; a model may lower it."""
+    assert clamp_me_long(model, 7200, 85000) == 64000
+    assert clamp_me_long(model, 7200, 64000) == 64000
+    assert clamp_me_long(model, 3600, 85000) == 85000
+    lowered = replace(model, me_long_clamp_max_native=42000)
+    assert clamp_me_long(lowered, 7200, 64000) == 42000
+
+
+def test_native_cap_never_exceeds_16_bit_table():
+    """A model raising the native cap still cannot pass the 64000 table margin."""
+    raised = replace(MODEL_8200I_SE, me_long_clamp_max_native=80000)
+    assert clamp_me_long(raised, 7200, 85000) == 64000

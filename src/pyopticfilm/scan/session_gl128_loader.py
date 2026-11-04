@@ -32,6 +32,7 @@ import numpy as np
 
 from pyopticfilm.asic.gl128_loader import LIVE_REGS
 from pyopticfilm.device.protocol import FilmModel
+from pyopticfilm.device.tables_135i import REG_1C_STEP_SHIFT_MASK
 from pyopticfilm.exceptions import AsicError, ScanError
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calib_gl128_loader import split_toggle_lines
@@ -56,6 +57,8 @@ _IMAGE_PASS_REGS: dict[int, int] = {
     0xA2: 0x00, 0xA3: 0x00, 0xA4: 0x00, 0xA6: 0x00, 0xA7: 0x00, 0xA8: 0x00, 0xA9: 0x00,
     0xAA: 0x00, 0xAC: 0x00, 0xAD: 0x01, 0xAE: 0x00, 0xAF: 0xFF,
 }
+#: ``0x1C``: its low bits carry the scan motor step-time shift.
+_REG_1C = 0x1C
 
 
 def loader_feed_steps(model: FilmModel, geometry: ScanGeometry, frame: int | None) -> int:
@@ -357,9 +360,22 @@ class Gl128LoaderScanSession(Gl128ScanSession):
         exposure_reg = (cache[0x7D] << 16) | (cache[0x7E] << 8) | cache[0x7F]
         self._set24(cache, r.REG_FEEDL, 1)
 
-        # Validate the scan motor table before the holder moves.
+        # Validate the scan motor table before the holder moves. A period
+        # above 16 bits (a long pass at 7200 / 3600 dpi) runs with the
+        # step-time shift in 0x1C[2:0]; every captured pass has 0.
         channel_exp = int(model.channel_exposure_for(dpi, exposure=exposure_reg))
         model.scan_motor_table(channel_exp)
+        step_shift = int(model.scan_motor_step_shift(channel_exp))
+        cache[_REG_1C] = (int(cache.get(_REG_1C, 0)) & ~REG_1C_STEP_SHIFT_MASK & 0xFF) | step_shift
+        if step_shift:
+            logger.warning(
+                "GL128 loader %d dpi scan motor period %d uses step-time shift %d "
+                "(0x1C=0x%02x); not yet verified on 135i hardware",
+                dpi,
+                channel_exp,
+                step_shift,
+                cache[_REG_1C],
+            )
 
         if getattr(self.asic, "_motor_moves_enabled", False):
             feed = loader_feed_steps(model, geometry, self._frame)

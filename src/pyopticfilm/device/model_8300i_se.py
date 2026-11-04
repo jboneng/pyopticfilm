@@ -60,6 +60,7 @@ from pyopticfilm.device.gl128_common import (
     REGISTER_DPISET,
     SCAN_REGS,
     Gl128Common,
+    ccd_stagger_rows,
 )
 from pyopticfilm.device.tables_8300i_se import (
     SLOPE_TABLE_FAST,
@@ -90,18 +91,24 @@ _SCAN_REGS_8300I: dict[int, int] = {
 # in Scan Lab TIFFs. Pre-mirror pattern (1, 0); mirror_x + odd/even width flips
 # post-mirror polarity so 1440 (odd W) and 2400 (even W) both match offline trials.
 # ASIC STAGGER bit stays clear (captures / Scan Lab runs). 1800 left empty (clean).
-_STAGGER_BY_DPI_8300I: dict[int, tuple[int, ...]] = {
+# Fractional values measured from the 8300i SilverFast PPI ladder captures
+# (2026-10-21) through this pipeline, as the pattern where the even/odd offset
+# crosses zero: 2400 = 1.13-1.14 rows (both colour passes; the SE / V2 1.25 left
+# +0.21 there, worse than (1, 0)), 7200 = 3.95 rows (no correction before; the
+# same 4-row CCD stagger as the SE / V2). 1440 is not captured and follows the
+# SE / V2 rule (ccd_stagger_rows: 0.8), unverified on 8300i hardware.
+_STAGGER_BY_DPI_8300I: dict[int, tuple[float, ...]] = {
     150: (),
     300: (),
     600: (),
     720: (),
     900: (),
     1200: (),
-    1440: (1, 0),
+    1440: (ccd_stagger_rows(1440), 0.0),
     1800: (),
-    2400: (1, 0),
+    2400: (1.15, 0.0),
     3600: (),
-    7200: (),
+    7200: (4, 0),
 }
 
 # SilverFast full-frame LINCNT; the same travel as the 8100 V2 ladder (V2 / 4).
@@ -291,7 +298,7 @@ class Model8300iSE(Gl128Common):
         """Round line-distance shifts (floor left ~0.8 G / ~0.6 B at 1440)."""
         return round(int(ld) * int(asic_dpi) / int(self.motor_base_ydpi))
 
-    def stagger_y_for(self, resolution: int) -> tuple[int, ...]:
+    def stagger_y_for(self, resolution: int) -> tuple[float, ...]:
         """Host column unstagger; see ``_STAGGER_BY_DPI_8300I``."""
         key = self.asic_dpi_for(resolution)
         return tuple(_STAGGER_BY_DPI_8300I.get(key, ()))
@@ -301,12 +308,22 @@ class Model8300iSE(Gl128Common):
 
         Half the SE/V2 ``exposure // oversample`` at every PPI in the SilverFast
         captures (1875 at 1800 dpi, 3750 at 3600, 15000 at 7200 with
-        ``0x1D=0x81``; ME-long 60000 gives 15000 at 3600).
+        ``0x1D=0x81``; ME-long 60000 gives 15000 at 3600). Assumes the
+        single-pass LINESEL (1 at 7200 dpi); image passes go through
+        :meth:`scan_motor_period_for`, which takes the pass's LINESEL.
         """
         base = int(exposure if exposure is not None else self.exposure_lperiod)
         oversample = self.oversample_for(resolution)
         reg_1d_lines = 2 if oversample == 1 else 1
         return base * reg_1d_lines // (2 * oversample)
+
+    def scan_motor_period_for(self, resolution: int, *, exposure: int, linesel: int) -> int:
+        """``exposure × (LINESEL + 1) × asic_dpi / 14400`` for an image pass.
+
+        15000 for the 15000 short pass at 7200 dpi (LINESEL 1), 21000 for a
+        42000 ME long pass there (LINESEL 0, unverified on hardware).
+        """
+        return int(exposure) * (int(linesel) + 1) * self.asic_dpi_for(resolution) // 14400
 
     def scan_motor_table(self, period: int) -> tuple[int, ...]:
         """Vendor acceleration ramp clamped at ``period`` (head 40404)."""

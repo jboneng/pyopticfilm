@@ -103,18 +103,59 @@ SCAN_RAMP: tuple[int, ...] = curve_periods(
 )
 
 
+#: Largest motor step-time shift (``0x1C[2:0]``) a scan pass may use. Each
+#: step doubles the time unit of every table word, so a period up to
+#: ``0xFFFF << shift`` fits. The vendor driver's table generator raises the
+#: shift until every word fits 16 bits and writes it back to ``0x1C[2:0]``;
+#: no capture has an image pass above 0 (every captured period fits), so a
+#: shift of 1 is the only one allowed until it is tested on hardware.
+SCAN_MOTOR_MAX_STEP_SHIFT = 1
+#: Low bits of ``0x1C`` that hold the step-time shift.
+REG_1C_STEP_SHIFT_MASK = 0x07
+
+
+def scan_motor_step_shift(period: int) -> int:
+    """Smallest ``0x1C[2:0]`` step-time shift whose table words fit 16 bits for ``period``.
+
+    0 for every captured pass (2333 / 4666 / 56000). Raises ``ValueError``
+    above :data:`SCAN_MOTOR_MAX_STEP_SHIFT`.
+    """
+    body = int(period)
+    if body < 0:
+        raise ValueError(f"scan motor period {body} is negative")
+    for shift in range(SCAN_MOTOR_MAX_STEP_SHIFT + 1):
+        if body >> shift <= 0xFFFF:
+            return shift
+    limit = (0xFFFF << SCAN_MOTOR_MAX_STEP_SHIFT) | ((1 << SCAN_MOTOR_MAX_STEP_SHIFT) - 1)
+    raise ValueError(
+        f"scan motor period {body} does not fit the AHB table's 16-bit words "
+        f"even with step-time shift {SCAN_MOTOR_MAX_STEP_SHIFT} (max {limit})"
+    )
+
+
+def _scan_ramp_for_shift(shift: int) -> tuple[int, ...]:
+    if shift == 0:
+        return SCAN_RAMP
+    return curve_periods(
+        MOTOR_CURVE[0],
+        MOTOR_CURVE[1] << MOTOR_STEP_SHIFT,
+        MOTOR_CURVE[2],
+        motor_table_divider(0xF8, 60, step_time_shift=shift),
+    )
+
+
 def scan_motor_table(period: int) -> tuple[int, ...]:
     """AHB ``0x10000000``/``0x10004000``/``0x10008000`` table for a scan move.
 
     Every entry is ``max(SCAN_RAMP[i], period)``: 4666 at 1200 dpi (10
-    ramp entries), 2333 at 600 dpi (34), a flat 56000 at 7200 dpi.
+    ramp entries), 2333 at 600 dpi (34), a flat 56000 at 7200 dpi. A period
+    above 16 bits uses :func:`scan_motor_step_shift`: the ramp is generated
+    with the halved divider and the period is ``period >> shift`` (the pass
+    must then write that shift to ``0x1C[2:0]``).
     """
     body = int(period)
-    if not 0 <= body <= 0xFFFF:
-        raise ValueError(
-            f"scan motor period {body} does not fit the AHB table's 16-bit words (0-65535)"
-        )
-    return tuple(max(v, body) for v in SCAN_RAMP)
+    shift = scan_motor_step_shift(body)
+    return tuple(max(v, body >> shift) for v in _scan_ramp_for_shift(shift))
 
 
 def scan_motor_period(exposure: int, y_dpi: int, *, reg_1d_lines: int = 0) -> int:

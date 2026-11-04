@@ -292,7 +292,7 @@ def test_film_loader_lab_kwargs_and_mock(tmp_path, monkeypatch):
     assert lab_crop_scan_meta(MODEL_135I, dpi=1200, crop_norm=(0.0, 0.2, 0.25, 0.6)) is None
     assert lab_scan_kwargs(MODEL_135I, dpi=600, kind="prescan", crop_norm=None, frame=None)["frame"] is None
     assert multi_pass_allowed_at(MODEL_135I, 1200) is True
-    assert multi_pass_allowed_at(MODEL_135I, 7200) is False
+    assert multi_pass_allowed_at(MODEL_135I, 7200) is True
 
     monkeypatch.setattr("pyopticfilm.scanner.default_cache_path", lambda: tmp_path / "calib.json")
     scanner, rec = open_lab_scanner(LabTarget(label="135i", model=MODEL_135I))

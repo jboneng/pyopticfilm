@@ -121,8 +121,11 @@ _MOVE_OWN_REGS: frozenset[int] = frozenset(
     {0x02, 0x0D, 0x0F, 0x25, 0x26, 0x27, 0x3D, 0x3E, 0x3F, 0xAE, 0xAF}
 )
 #: Frame-feed values that differ from the image pass's (every positioning
-#: feed in the previews and the 7200 dpi scan).
-_FRAME_FEED_REGS: dict[int, int] = {0x01: 0x22, 0x05: 0x48, 0xA6: 0x00, 0xA7: 0x00, 0xA8: 0x00, 0xA9: 0x00}
+#: feed in the previews and the 7200 dpi scan). ``0x1C = 0``: the feed ramp is
+#: built without a step-time shift, even when the image pass needs one.
+_FRAME_FEED_REGS: dict[int, int] = {
+    0x01: 0x22, 0x05: 0x48, 0x1C: 0x00, 0xA6: 0x00, 0xA7: 0x00, 0xA8: 0x00, 0xA9: 0x00,
+}
 #: Load reverse seek (``insert 35mm carrier``, second feed): ``0x1C = 0``,
 #: exposure 30000 and ``0x8A``-``0x92`` cleared.
 _REVERSE_SEEK_REGS: dict[int, int] = {
@@ -436,6 +439,9 @@ class Gl128Loader(Gl128):
         motor = r.MTRPWR | r.FASTFED | (r.MTRREV if reverse else 0)
         return {
             r.REG_0x02: motor,
+            # No step-time shift: every captured loader move has 0x1C = 0, and
+            # a long image pass may have left 0x1C[2:0] set.
+            0x1C: 0x00,
             0xAE: (ramp >> 8) & 0xFF,
             0xAF: ramp & 0xFF,
             0x3D: (feedl >> 16) & 0xFF,

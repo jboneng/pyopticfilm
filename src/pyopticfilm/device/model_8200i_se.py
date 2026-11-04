@@ -58,23 +58,33 @@ from pyopticfilm.device.gl128_common import (
     SCAN_REGS,
     SHADING_LINESEL_BY_DPI,
     Gl128Common,
+    ccd_stagger_rows,
 )
 
 # Host column Y unstagger (apply_y_stagger) for PPIs with native period-2 sawtooth
 # in Scan Lab TIFFs (2026-10-13). Pre-mirror pattern (1, 0); ASIC STAGGER bit stays
 # clear (session 13 / Scan Lab). Same host technique as the 8300i SE leaf.
-_STAGGER_BY_DPI_8200I_SE: dict[int, tuple[int, ...]] = {
+# 7200: even and odd output columns were 4 rows apart in the 2026-11-03 Scan Lab
+# TIFFs (full frame and a crop, both ME); (4, 0) is the CCD stagger the 8100 V2
+# leaf already corrects at 7200. Patterns are indexed by sensor column parity
+# (apply_y_stagger adds ``pixel_startx``), so crops starting on an odd column match.
+# 1440 / 2400: the same CCD stagger at those PPIs is fractional; the old (1, 0)
+# left a sawtooth on sharp edges at 2400. 1440 = 0.8 rows (ccd_stagger_rows;
+# 2026-11-03 scans leave 0.00). 2400 = 1.25 rows, measured: the zero crossing
+# between this scanner's (1, 0) and 4/3 scans is 1.24-1.28, and the 8100 V2
+# SilverFast ladder capture gives 1.23. The 4 x dpi / 7200 rule (1.333) overshoots.
+_STAGGER_BY_DPI_8200I_SE: dict[int, tuple[float, ...]] = {
     150: (),
     300: (),
     600: (),
     720: (),
     900: (),
     1200: (),
-    1440: (1, 0),
+    1440: (ccd_stagger_rows(1440), 0.0),
     1800: (),
-    2400: (1, 0),
+    2400: (1.25, 0.0),
     3600: (),
-    7200: (),
+    7200: (4, 0),
 }
 
 
@@ -168,7 +178,7 @@ class Model8200iSE(Gl128Common):
         """Round line-distance shifts (floor left ~0.8 G / ~0.6 B at 1440)."""
         return round(int(ld) * int(asic_dpi) / int(self.motor_base_ydpi))
 
-    def stagger_y_for(self, resolution: int) -> tuple[int, ...]:
+    def stagger_y_for(self, resolution: int) -> tuple[float, ...]:
         """Host column unstagger; see ``_STAGGER_BY_DPI_8200I_SE``."""
         key = self.asic_dpi_for(resolution)
         return tuple(_STAGGER_BY_DPI_8200I_SE.get(key, ()))

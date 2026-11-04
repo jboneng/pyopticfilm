@@ -228,7 +228,25 @@ DUMMY_BY_DPI: dict[int, int] = {
     7200: 0x17,
 }
 
-STAGGER_BY_DPI: dict[int, tuple[int, ...]] = {
+#: Rows (at native 7200 dpi) between the CCD's even and odd sensor columns.
+CCD_STAGGER_NATIVE_ROWS = 4
+
+
+def ccd_stagger_rows(asic_dpi: int) -> float:
+    """Even/odd column offset in output rows at ``asic_dpi``: 4 x dpi / 7200.
+
+    The stagger shows only where the column step ``7200 / asic_dpi`` is odd
+    (7200, 2400, 1440), so output columns alternate sensor parity; at an even
+    step (3600, 1800, ...) every output column has one parity. The rule holds
+    at 7200 (4 rows; captures 3.88-3.95) and 1440 (0.8; 8100 V2 capture 0.80,
+    8200i SE scans 0.00 left). It does **not** hold at 2400: measured 1.23-1.28
+    on the SE / V2 and 1.13 on the 8300i SE, not 1.333, so the leaves use
+    measured 2400 values instead of this function.
+    """
+    return CCD_STAGGER_NATIVE_ROWS * int(asic_dpi) / 7200
+
+
+STAGGER_BY_DPI: dict[int, tuple[float, ...]] = {
     150: (),
     300: (),
     600: (),
@@ -349,6 +367,7 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "full_frame_output_inches",
         "y_oversampled",
         "stagger_y_by_dpi",
+        "stagger_follows_sensor_column",
         "output_pixel_offset_by_dpi",
         "register_dpihw",
         "exposure_long",
@@ -358,6 +377,7 @@ GL128_SHARED_FIELDS: frozenset[str] = frozenset(
         "me_hardware_max_exposure",
         "me_long_clamp_min",
         "me_long_clamp_max",
+        "me_long_clamp_max_native",
         "me_max_exposure_ratio",
         "me_target_dense_dn",
         "me_dense_percentile",
@@ -452,9 +472,14 @@ class Gl128Common:
     full_frame_output_inches: float = 1.0
     y_oversampled: bool = True
 
-    stagger_y_by_dpi: Mapping[int, tuple[int, ...]] = field(
+    stagger_y_by_dpi: Mapping[int, tuple[float, ...]] = field(
         default_factory=lambda: dict(STAGGER_BY_DPI)
     )
+    #: Host unstagger patterns are indexed by sensor column parity, so a crop
+    #: that starts on an odd native column gets the pattern rotated by one. The
+    #: patterns were measured on full frames, which start on an even column
+    #: (242) on every GL128 flatbed leaf, so full frames are unchanged.
+    stagger_follows_sensor_column: bool = True
     output_pixel_offset_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(OUTPUT_PIXEL_OFFSET)
     )
@@ -469,9 +494,17 @@ class Gl128Common:
     me_long_clamp_min: int = 14_000
     #: Hard ceiling for adaptive ME colour-long ``REG_EXPOSURE``. At
     #: oversample == 1 (7200 dpi) :func:`pyopticfilm.scan.session_gl128.clamp_me_long`
-    #: still caps the channel word at 64000, because the AHB exposure table is
-    #: 16-bit and would wrap a value at or above 65536.
+    #: uses :attr:`me_long_clamp_max_native` instead, and never more than 64000,
+    #: because the AHB exposure table is 16-bit and would wrap a value at or
+    #: above 65536.
     me_long_clamp_max: int = 85_000
+    #: Ceiling for the ME colour-long ``REG_EXPOSURE`` at oversample == 1
+    #: (native 7200 dpi): the 16-bit scan motor table's margin. It was 42000
+    #: while a 64000 long pass dropped the 8200i SE off USB and hung the 8100
+    #: V2; both ran with LINESEL 1 on the long pass. With the pass's LINESEL
+    #: (:meth:`image_linesel_for`) the 8100 V2 completed full frames at 42000
+    #: and 64000 (2026-11-03).
+    me_long_clamp_max_native: int = 64_000
     me_max_exposure_ratio: float = 7.0
     me_target_dense_dn: float = 10000.0
     me_dense_percentile: float = 5.0
@@ -541,11 +574,13 @@ class Gl128Common:
     def multi_pass_allowed_at(self, resolution: int) -> bool:
         """Whether multi-exposure and Multi-Pass may run at ``resolution``.
 
-        Not at oversample 1 (native 7200 dpi): on the 8200i SE the ME long pass
-        (64000) drained at about 1 MB/s and the scanner dropped off USB part way
-        through the frame.
+        True at every resolution, native 7200 dpi included. At oversample 1 the
+        ME long pass is capped at :attr:`me_long_clamp_max_native` (64000) by
+        :func:`pyopticfilm.scan.session_gl128.clamp_me_long`. A subclass can
+        override this to restrict resolutions; ``Scanner.scan`` and
+        ``Gl128ScanSession.run`` raise ``ScanError`` where it returns False.
         """
-        return self.oversample_for(resolution) != 1
+        return True
 
     @property
     def multi_exposure_resolutions_dpi(self) -> tuple[int, ...]:
@@ -617,6 +652,61 @@ class Gl128Common:
         """Scan motor table period, ``exposure // oversample`` in the captures."""
         base = int(exposure if exposure is not None else self.exposure_lperiod)
         return base // self.oversample_for(resolution)
+
+    def scan_motor_period_for(self, resolution: int, *, exposure: int, linesel: int) -> int:
+        """Scan motor table period for an image pass: ``exposure x (LINESEL + 1) / oversample``.
+
+        28000 for the 14000 short pass at 7200 dpi (LINESEL 1), 42000 for the
+        42000 ME long pass there (LINESEL 0), 7000 / 10500 for 42000 at 1200 /
+        1800 dpi, all as SilverFast uploads them.
+        """
+        return self.channel_exposure_for(resolution, exposure=exposure) * (int(linesel) + 1)
+
+    def image_linesel_for(
+        self, resolution: int, *, exposure: int, manual: bool = False
+    ) -> int:
+        """``0x1D`` low bits (LINESEL) for an image pass.
+
+        SilverFast's scan motor table period is ``exposure x (LINESEL + 1) x
+        asic_dpi / motor_base_ydpi`` on every image pass in the captures: the
+        8100 V2 and 8200i SE PPI ladders, the ME short and long passes at 1200
+        and 1800 ppi (``0x80``, 14000 -> 2333 / 3500 and 42000 -> 7000 / 10500)
+        and the V2's 7200 ppi ME pair (``07_multi_exposure``): the short pass
+        writes ``0x81`` with a 28000 table for ``REG_EXPOSURE`` 14000, the long
+        pass ``0x80`` with a 42000 table for 42000. LINESEL 1 is only the native
+        7200 ppi short / single pass, whose doubled line period keeps a
+        full-width line from outrunning USB; the ME long pass runs one line
+        period per line.
+
+        So LINESEL is a property of the pass, not of the PPI: at oversample 1 a
+        driver-derived exposure below twice the short exposure gets 1, anything
+        else 0. A manual override runs the table at its own exposure and gets 0.
+        Writing ``0x81`` with a table equal to the exposure (the old per-PPI rule
+        on a 7200 ppi long pass) desyncs line timing from the motor and hangs
+        the scanner (PR #156).
+        """
+        if self.oversample_for(resolution) != 1 or manual:
+            return 0
+        return 1 if int(exposure) < 2 * int(self.exposure_short) else 0
+
+    def image_dummy_for(self, resolution: int, *, span: int, linesel: int) -> int:
+        """``0x2B`` for an image pass ``span`` native pixels wide.
+
+        :attr:`dummy_by_dpi` holds SilverFast's single-pass values,
+        ``ceil(lines x 6 x pixels / 8192)`` lines of buffer: one below 7200 ppi,
+        three at 7200 on the 8200i SE / 8100 V2 (``0x17``), four on the 8300i SE
+        (``0x1F``). A LINESEL 0 pass at 7200 ppi gets one line less: ``0x10`` on
+        the SE / V2 full frame, like the white shading strip (8100 V2
+        ``07_multi_exposure``, 7200 long pass); ``0x17`` on the 8300i SE by the
+        same rule, unverified. Unknown PPIs raise ``KeyError`` like the table.
+        """
+        asic_dpi = self.asic_dpi_for(resolution)
+        table = int(self.dummy_by_dpi[asic_dpi])
+        if self.oversample_for(resolution) == 1 and int(linesel) == 0:
+            line_bytes = 6 * int(span) * asic_dpi / _NATIVE_DPI
+            lines = max(1, int(table * 8192 // line_bytes) - 1)
+            return math.ceil(lines * line_bytes / 8192)
+        return table
 
     def scan_motor_table(self, period: int) -> tuple[int, ...]:
         """Words for AHB ``0x10000000``/``0x10004000``/``0x10008000``: flat ``period``."""

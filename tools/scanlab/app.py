@@ -461,7 +461,7 @@ class ScanLabWindow(QMainWindow):
         return target is not None and getattr(target.model, "asic", "") == "GL128"
 
     def _sync_pass_modes(self, *, busy: bool = False) -> None:
-        """Enable ME / Multi-Pass only on GL128 below native resolution."""
+        """Enable ME / Multi-Pass on GL128 where the model allows the current PPI."""
         target = self._current_target()
         allowed = (
             not busy

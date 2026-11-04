@@ -522,8 +522,6 @@ def test_scan_refusals(scanner, rec):
     scanner.load_holder()
     with pytest.raises(ScanError, match="loader travel"):
         scanner.scan(resolution=7200, frame=6)
-    with pytest.raises(ScanError, match="7200 dpi"):
-        scanner.scan(resolution=7200, multi_exposure=True)
     with pytest.raises(ValueError, match="mode='color'"):
         scanner.scan(resolution=600, mode="infrared")
 
@@ -686,12 +684,13 @@ def test_multi_pass_repeats_the_frame(scanner, rec):
 def test_me_long_cap_follows_the_135i_motor_word():
     from pyopticfilm.scan.session_gl128 import clamp_me_long
 
-    # Motor word = exposure * Ydpi / 3600 must stay at or under 64000.
-    # 42000 is the flatbed long exposure; at 7200 dpi that word is 84000.
-    assert clamp_me_long(MODEL_135I, 7200, 42000) == 32000
-    assert clamp_me_long(MODEL_135I, 7200, 84000) == 32000
-    assert MODEL_135I.channel_exposure_for(7200, exposure=32000) == 64000
-    assert clamp_me_long(MODEL_135I, 3600, 200000) == 64000
+    # Motor word = exposure * Ydpi / 3600; with step-time shift 1 it may
+    # reach 128000 (64000 in the table). 42000 at 7200 dpi is a word of 84000.
+    assert clamp_me_long(MODEL_135I, 7200, 42000) == 42000
+    assert clamp_me_long(MODEL_135I, 7200, 84000) == 64000
+    assert MODEL_135I.channel_exposure_for(7200, exposure=64000) == 128000
+    assert MODEL_135I.scan_motor_step_shift(128000) == 1
+    assert clamp_me_long(MODEL_135I, 3600, 200000) == 85000
     assert clamp_me_long(MODEL_135I, 1200, 200000) == 85000
     assert clamp_me_long(MODEL_8200I_SE, 3600, 200000) == 85000
     assert clamp_me_long(MODEL_8200I_SE, 7200, 42000) == 42000
@@ -703,14 +702,62 @@ def test_7200_long_exposure_is_clamped_before_the_motor_table(rec, tmp_path):
     asic.init()
     asic._motor_moves_enabled = False
     session = create_session(asic, MODEL_135I)
-    session._pass_exposure = 42000
+    session._pass_exposure = 84000
     rec.ahb.clear()
     session._configure(compute_geometry(7200, model=MODEL_135I))
     regs = rec.registers
-    assert _u(regs, 0x7D, 3) == 32000
+    # Clamped to 64000: a word of 128000, halved by step-time shift 1.
+    assert _u(regs, 0x7D, 3) == 64000
+    assert regs[0x1C] & 0x07 == 1
     motor = [blob for a, blob in rec.ahb if a == R.AHB_SCAN_MOTOR_0]
     assert _words(motor[0]) == (64000,) * 256
     sc.close()
+
+
+def test_7200_multi_exposure_short_at_timing_set_exposure(scanner, rec):
+    """The 7200 short pass runs the single pass's 28000; the long uses the step shift."""
+    scanner.load_holder()
+    rec.starts.clear()
+    scanner.scan(
+        resolution=7200,
+        multi_exposure=True,
+        me_long_mode="fixed",
+        area=(0.0, 0.0, 0.1, 0.1),
+        apply_calib=False,
+    )
+    images = [s for s in rec.starts if s[0x02] == 0x30]
+    feeds = [s for s in rec.starts if s[0x02] == 0x18]
+    assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(28000, 44000), (42000, 66000)]
+    assert [s[0x1C] & 0x07 for s in images] == [0, 1]
+    assert feeds and all(s[0x1C] & 0x07 == 0 for s in feeds)
+    assert scanner.last_me_debug.exposure_short == 28000
+    assert scanner.last_me_debug.exposure_long == 42000
+    # The eject after a shifted pass runs without the shift.
+    rec.starts.clear()
+    scanner.eject_holder()
+    assert rec.starts and all(s[0x1C] & 0x07 == 0 for s in rec.starts)
+
+
+def test_7200_multi_pass_runs_at_timing_set_exposure(scanner, rec):
+    scanner.load_holder()
+    rec.starts.clear()
+    scanner.scan(resolution=7200, n_passes=2, area=(0.0, 0.0, 0.1, 0.1), apply_calib=False)
+    images = [s for s in rec.starts if s[0x02] == 0x30]
+    assert [_u(s, 0x7D, 3) for s in images] == [28000, 28000]
+    assert [s[0x1C] & 0x07 for s in images] == [0, 0]
+
+
+def test_scan_motor_step_shift_limits():
+    from pyopticfilm.device.tables_135i import scan_motor_step_shift
+
+    assert [scan_motor_step_shift(p) for p in (2333, 4666, 56000, 65535)] == [0, 0, 0, 0]
+    assert scan_motor_step_shift(65536) == 1
+    assert scan_motor_step_shift(131071) == 1
+    with pytest.raises(ValueError, match="step-time shift"):
+        scan_motor_step_shift(131072)
+    # Shift 0 tables are unchanged (every captured pass).
+    assert scan_motor_table(4666) == tuple(max(v, 4666) for v in scan_motor_table(4666))
+    assert scan_motor_table(84000) == (42000,) * 256
 
 
 # --- loader watcher -----------------------------------------------------------

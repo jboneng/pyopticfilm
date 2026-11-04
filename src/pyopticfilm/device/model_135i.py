@@ -89,6 +89,7 @@ from pyopticfilm.device.tables_135i import (
     PANORAMA_FEED_STEPS,
     PANORAMA_HEIGHT_STEPS,
     REG_3B_BY_SUBKEY,
+    SCAN_MOTOR_MAX_STEP_SHIFT,
     SENSOR_SPEED,
     SLOPE_TABLE_FEED,
     SLOPE_TABLE_LOADER,
@@ -103,6 +104,7 @@ from pyopticfilm.device.tables_135i import (
     exposure_registers,
     image_line_margin,
     scan_motor_period,
+    scan_motor_step_shift,
     scan_motor_table,
     timing_set_for,
 )
@@ -394,15 +396,25 @@ class Model135i(Gl128Common):
         value = base if exposure is None else int(exposure)
         return exposure_registers(value, self.exposure_multiplier_for(resolution), base_exposure=base)
 
-    def me_long_exposure_cap(self, resolution: int) -> int:
-        """Largest long exposure whose scan motor word fits under 64000.
+    def me_short_exposure_for(self, resolution: int) -> int:
+        """Short / Multi-Pass slot exposure: the single pass's (28000 at 7200 dpi)."""
+        return self.image_exposure_for(resolution)
 
-        The word is ``exposure * Ydpi / 3600`` on this model (32000 at 7200
-        dpi, 64000 at 3600, 192000 at 1200), not ``exposure / oversample``
-        as on the flatbed GL128 models. 42000 at 7200 dpi would be a word
-        of 84000, which does not fit the table.
+    def me_long_exposure_cap(self, resolution: int) -> int:
+        """Largest long exposure whose scan motor word fits the table.
+
+        The word is ``exposure * Ydpi / 3600`` on this model, not
+        ``exposure / oversample`` as on the flatbed GL128 models. With the
+        step-time shift (:func:`~pyopticfilm.device.tables_135i.scan_motor_step_shift`,
+        up to :data:`~pyopticfilm.device.tables_135i.SCAN_MOTOR_MAX_STEP_SHIFT`)
+        the word may reach ``64000 << shift``: 64000 at 7200 dpi (word
+        128000, shift 1), 128000 at 3600. Shift 1 is not hardware-verified.
         """
-        return 64000 * 3600 // self.asic_dpi_for(resolution)
+        return (64000 << SCAN_MOTOR_MAX_STEP_SHIFT) * 3600 // self.asic_dpi_for(resolution)
+
+    def scan_motor_step_shift(self, period: int) -> int:
+        """``0x1C[2:0]`` for a scan motor ``period`` (0 unless it exceeds 16 bits)."""
+        return scan_motor_step_shift(period)
 
     def channel_exposure_for(self, resolution: int, *, exposure: int | None = None) -> int:
         """Scan motor period ``exposure * Ydpi / 3600`` (``0x1D = 0``)."""

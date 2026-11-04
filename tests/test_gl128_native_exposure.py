@@ -16,6 +16,7 @@ from pyopticfilm.exceptions import ScanError
 from pyopticfilm.scan.geometry import compute_geometry
 from pyopticfilm.scan.session_gl128 import (
     Gl128ScanSession,
+    check_gl128_multi_pass,
     gl128_multi_pass_allowed,
     native_line_floor,
 )
@@ -42,6 +43,79 @@ def _image_regs(model, dpi: int) -> dict[int, int]:
 @pytest.mark.parametrize(("dpi", "reg_1d"), [(3600, 0x80), (7200, 0x81)])
 def test_image_reg_0x1d_matches_vendor(model, dpi, reg_1d):
     assert _image_regs(model, dpi)[0x1D] == reg_1d
+
+
+def _image_regs_pass(model, dpi: int, **pass_state) -> dict[int, int]:
+    asic = MagicMock()
+    asic._motor_moves_enabled = False
+    asic.last_afe = None
+    asic.asic_shading_ready = True
+    asic._scan_method = "color"
+    session = Gl128ScanSession(asic, model)
+    session.se_regs = Gl128Registers()
+    session._lamp_requested = True
+    for key, value in pass_state.items():
+        setattr(session, key, value)
+    session._configure(compute_geometry(dpi, model=model, area=None))
+    regs = dict(asic.protocol.write_registers_batched.call_args[0][0])
+    regs["channel"] = asic.upload_tables.call_args.kwargs["channel_exposure"]
+    return regs
+
+
+@pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2])
+def test_se_v2_7200_me_long_pass_writes_linesel_0_and_two_line_buffer(model):
+    """8100 V2 07_multi_exposure, 7200 ppi: the ME long pass (REG_EXPOSURE
+    42000, 42000 table) writes 0x1D=0x80 and 0x2B=0x10; the short pass
+    (14000, 28000 table) 0x81 and 0x17. 0x81 on the long pass hung the V2
+    (PR #156)."""
+    long = _image_regs_pass(model, 7200, _pass_exposure=42000, _pass_long_exposure=True)
+    assert (long[0x1D], long[0x2B], long["channel"]) == (0x80, 0x10, 42000)
+    short = _image_regs_pass(model, 7200, _pass_exposure=14000)
+    assert (short[0x1D], short[0x2B], short["channel"]) == (0x81, 0x17, 28000)
+
+
+@pytest.mark.parametrize(("dpi", "dummy", "channel"), [(1200, 0x02, 7000), (3600, 0x04, 21000)])
+def test_se_me_long_pass_below_7200_keeps_linesel_0(dpi, dummy, channel):
+    """SE session 14 (1800) and V2 07_multi_exposure (1200): oversampled long
+    passes stay at 0x80 with the single-pass dummy and exposure / oversample."""
+    long = _image_regs_pass(MODEL_8200I_SE, dpi, _pass_exposure=42000, _pass_long_exposure=True)
+    assert (long[0x1D], long[0x2B], long["channel"]) == (0x80, dummy, channel)
+
+
+def test_8300i_se_7200_me_long_pass_follows_the_same_rule():
+    """No 8300i SE 7200 ME capture; by the shared rule the long pass gets
+    LINESEL 0, a table of exposure x 7200 / 14400 and one line less of buffer."""
+    long = _image_regs_pass(MODEL_8300I_SE, 7200, _pass_exposure=42000, _pass_long_exposure=True)
+    assert (long[0x1D], long[0x2B], long["channel"]) == (0x80, 0x17, 21000)
+    short = _image_regs_pass(MODEL_8300I_SE, 7200, _pass_exposure=15000)
+    assert (short[0x1D], short[0x2B], short["channel"]) == (0x81, 0x1F, 15000)
+
+
+@pytest.mark.parametrize("manual", [28000, 14000])
+def test_se_manual_7200_pass_linesel_follows_table(manual):
+    """A manual override runs the table at the exposure itself, so LINESEL is 0."""
+    regs = _image_regs_pass(MODEL_8200I_SE, 7200, _pass_exposure=manual, _pass_manual=True)
+    assert (regs[0x1D], regs["channel"]) == (0x80, manual)
+
+
+def test_image_linesel_and_dummy_rules():
+    v2 = MODEL_8100_V2
+    assert v2.image_linesel_for(7200, exposure=14000) == 1
+    assert v2.image_linesel_for(7200, exposure=42000) == 0
+    assert v2.image_linesel_for(7200, exposure=28000) == 0
+    assert v2.image_linesel_for(7200, exposure=14000, manual=True) == 0
+    assert v2.image_linesel_for(3600, exposure=14000) == 0
+    assert v2.scan_motor_period_for(7200, exposure=14000, linesel=1) == 28000
+    assert v2.scan_motor_period_for(7200, exposure=42000, linesel=0) == 42000
+    assert v2.scan_motor_period_for(1200, exposure=42000, linesel=0) == 7000
+    assert MODEL_8300I_SE.scan_motor_period_for(7200, exposure=15000, linesel=1) == 15000
+    assert MODEL_8300I_SE.scan_motor_period_for(7200, exposure=42000, linesel=0) == 21000
+    assert v2.image_dummy_for(7200, span=10368, linesel=1) == 0x17
+    assert v2.image_dummy_for(7200, span=10368, linesel=0) == 0x10
+    assert MODEL_8300I_SE.image_dummy_for(7200, span=10368, linesel=0) == 0x17
+    assert v2.image_dummy_for(3600, span=10368, linesel=0) == 0x04
+    with pytest.raises(KeyError):
+        v2.image_dummy_for(5000, span=10368, linesel=0)
 
 
 def _configure(model, dpi: int, **pass_state) -> tuple[int, int]:
@@ -111,33 +185,46 @@ def _session_pass_tables(dpi: int, **run_kwargs) -> list[tuple[int, int]]:
     return passes
 
 
-@pytest.mark.parametrize(
-    "run_kwargs",
-    [{"multi_exposure": True}, {"n_passes": 2}, {"multi_exposure": True, "n_passes": 2}],
-)
-def test_se_me_and_multi_pass_rejected_at_7200_before_any_pass(run_kwargs):
-    passes: list[tuple[int, int]] = []
-    with pytest.raises(ScanError, match="7200 dpi"):
-        passes = _session_pass_tables(7200, **run_kwargs)
-    assert passes == []
+def test_se_me_runs_at_7200():
+    passes = _session_pass_tables(7200, multi_exposure=True)
+    assert len(passes) == 2
+    # Short pass keeps the native line floor; the long table follows its REG.
+    assert passes[0] == (28000, 14000)
+    long_ch, long_reg = passes[1]
+    assert long_ch == long_reg
+    assert 28000 <= long_reg <= 64000
+
+
+def test_se_multi_pass_runs_at_7200():
+    assert _session_pass_tables(7200, n_passes=2) == [(28000, 14000), (28000, 14000)]
 
 
 @pytest.mark.parametrize("model", [MODEL_8200I_SE, MODEL_8100_V2, MODEL_8300I_SE])
-def test_multi_pass_allowed_below_native_only(model):
-    assert not gl128_multi_pass_allowed(model, 7200)
-    assert all(gl128_multi_pass_allowed(model, dpi) for dpi in model.resolutions_dpi if dpi != 7200)
-    below_native = tuple(dpi for dpi in model.resolutions_dpi if dpi != 7200)
-    assert model.multi_exposure_resolutions_dpi == below_native
-    assert model.multi_pass_resolutions_dpi == below_native
+def test_multi_pass_allowed_at_every_resolution(model):
+    assert all(gl128_multi_pass_allowed(model, dpi) for dpi in model.resolutions_dpi)
+    assert model.multi_exposure_resolutions_dpi == tuple(model.resolutions_dpi)
+    assert model.multi_pass_resolutions_dpi == tuple(model.resolutions_dpi)
+
+
+def test_check_gl128_multi_pass_still_rejects_disallowed_resolution():
+    class _Restricted:
+        model = "Restricted"
+
+        @staticmethod
+        def multi_pass_allowed_at(resolution: int) -> bool:
+            return resolution != 7200
+
+    with pytest.raises(ScanError, match="7200 dpi"):
+        check_gl128_multi_pass(_Restricted(), 7200, multi_exposure=True, n_passes=1)
+    check_gl128_multi_pass(_Restricted(), 3600, multi_exposure=True, n_passes=1)
 
 
 @pytest.mark.parametrize("run_kwargs", [{"multi_exposure": True}, {"n_passes": 2}])
-def test_scanner_rejects_7200_me_before_opening_asic(run_kwargs):
+def test_scanner_accepts_7200_me_and_multi_pass(run_kwargs):
     scanner = Scanner.open_fake(MODEL_8200I_SE)
     try:
-        with pytest.raises(ScanError, match="7200 dpi"):
-            scanner.scan(resolution=7200, area=_TINY, apply_calib=False, **run_kwargs)
-        assert not scanner._asic._initialized
+        img = scanner.scan(resolution=7200, area=_TINY, apply_calib=False, **run_kwargs)
+        assert img.rgb.size > 0
     finally:
         scanner.close()
 

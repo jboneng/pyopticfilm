@@ -37,9 +37,9 @@ Other OpticFilm models **enumerate and open**: you can read status, turn the lam
 
 - Color and infrared transparency scans at 150–7200 dpi (ASIC programs at ≥600 dpi; lower PPI shares the 600 dpi register set and is downsampled on the host; infrared is available only on supported hardware)
 - Infrared as a dust plane on `ScanImage.ir` (`mode="infrared"`, or `infrared=True` with colour; 8200i SE, 8300i SE, 7600i v1, and 7600i v2 among the hardware-tested set)
-- Multi-exposure (ME) on GL128 hardware-tested models (8200i SE, 8100 V2, and 8300i SE): short + adaptive long colour passes with host SNR/IVW merge into `ScanImage.rgb` (`multi_exposure=True`), or a SilverFast-style fixed long pass (`me_long_mode="fixed"`); bracket planes via `Scanner.last_me_debug`. Not available at 7200 dpi
+- Multi-exposure (ME) on GL128 hardware-tested models (8200i SE, 8100 V2, and 8300i SE): short + adaptive long colour passes with host SNR/IVW merge into `ScanImage.rgb` (`multi_exposure=True`), or a SilverFast-style fixed long pass (`me_long_mode="fixed"`); bracket planes via `Scanner.last_me_debug`. Available at every resolution, 7200 dpi included
 - Multi-exposure on the GL845 7600i v2 at every resolution: the long pass raises the line period (up to 65000) and uses the same merge; see the [7600i v2 notes](docs/opticfilm-7600i-v2.md)
-- Multi-Pass on GL128: repeat an already-validated exposure `n_passes` times (1–9) and stack the aligned repeats for an SNR gain — no new exposure/speed value is ever introduced, only repeats of the short pass (`n_passes>1`) or, combined with `multi_exposure=True`, of both the short and long ME passes (Adaptive Multi-Pass); per-slot stacking stats via `Scanner.last_multi_pass_debug`. Not available at 7200 dpi
+- Multi-Pass on GL128: repeat an already-validated exposure `n_passes` times (1–9) and stack the aligned repeats for an SNR gain — no new exposure/speed value is ever introduced, only repeats of the short pass (`n_passes>1`) or, combined with `multi_exposure=True`, of both the short and long ME passes (Adaptive Multi-Pass); per-slot stacking stats via `Scanner.last_multi_pass_debug`. Available at every resolution, 7200 dpi included
 - Manual exposure overrides on GL128 (`single_pass_exposure` / `me_short_exposure` / `me_long_exposure`) for testing/debugging: bypass the adaptive/hardware-max clamps and write an exact `REG_EXPOSURE` value (24-bit register range)
 - Optional crop via normalized `area` (`x1, y1, x2, y2` in 0–1)
 - GL128 dark/white shading calibration with on-disk cache (`~/.cache/pyopticfilm/calib_v2.json`)
@@ -54,7 +54,7 @@ Not implemented or out of scope here: iSRD infrared dust removal, SilverFast-sty
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release notes. Latest release: [v1.3.8 on GitHub](https://github.com/jboneng/pyopticfilm/releases/tag/v1.3.8).
+See [CHANGELOG.md](CHANGELOG.md) for release notes. Latest release: [v1.3.9 on GitHub](https://github.com/jboneng/pyopticfilm/releases/tag/v1.3.9).
 
 ## Requirements
 
@@ -131,8 +131,8 @@ with Scanner.open() as scanner:
 
 Multi-exposure (GL128 / hardware-tested models): short colour pass, then a
 **frame-adaptive** long pass. The long clamp is 14k–85k on all three
-hardware-tested GL128 models. Fallback 42000. Multi-exposure is not available
-at 7200 dpi (see **Resolution limits** below).
+hardware-tested GL128 models (14k–64k at 7200 dpi, the 16-bit motor table
+margin). Fallback 42000.
 The SNR/IVW-merged deliverable with film-base makeup is in ``rgb``. Bracket
 planes and fusion stats are on :attr:`~pyopticfilm.scanner.Scanner.last_me_debug`
 (Scan Lab / audit tooling only — not part of the NegPy-facing ``ScanImage``).
@@ -227,14 +227,14 @@ typically only needs these combinations, named as follows:
 | Fixed Multi-Exposure         | `True`  | `"fixed"` | `1` |
 | Fixed Multi-Pass             | `True`  | `"fixed"` | `2`–`9` |
 
-**Resolution limits.** Multi-exposure and Multi-Pass are not available at every
-resolution: on the GL128 models they are off at 7200 dpi. Before offering them
-for a resolution, check the model; `scan()` raises `ScanError` otherwise. Models
-without the attributes don't support the mode at all.
+**Resolution limits.** Check the model before you offer multi-exposure or
+Multi-Pass for a resolution; `scan()` raises `ScanError` where a mode is not
+allowed. The GL128 models allow both at every resolution, 7200 dpi included.
+Models without these attributes don't support the mode at all.
 
 ```python
 model = scanner.model
-me_dpis = getattr(model, "multi_exposure_resolutions_dpi", ())   # e.g. (3600, 2400, ...) — no 7200
+me_dpis = getattr(model, "multi_exposure_resolutions_dpi", ())   # e.g. (7200, 3600, 2400, ...)
 stack_dpis = getattr(model, "multi_pass_resolutions_dpi", ())     # n_passes > 1
 offer_me = dpi in me_dpis
 offer_multi_pass = dpi in stack_dpis

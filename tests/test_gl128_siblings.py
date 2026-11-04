@@ -192,22 +192,27 @@ def test_divergent_fields_match_capture_catalog():
     # Host assemble fixes (TIFF-validated): round ld_shift; period-2 unstagger @1440/2400.
     assert MODEL_8300I_SE.scaled_ld_shift(24, 1440) == 5
     assert MODEL_8300I_SE.scaled_ld_shift(48, 1440) == 10
-    assert MODEL_8300I_SE.stagger_y_for(1440) == (1, 0)
-    assert MODEL_8300I_SE.stagger_y_for(2400) == (1, 0)
+    assert MODEL_8300I_SE.stagger_y_for(1440) == (0.8, 0)
+    assert MODEL_8300I_SE.stagger_y_for(2400) == (1.15, 0)
+    assert MODEL_8300I_SE.stagger_y_for(7200) == (4, 0)
     assert MODEL_8300I_SE.stagger_y_for(1800) == ()
     assert MODEL_8200I_SE.scaled_ld_shift(24, 1440) == 5
     assert MODEL_8200I_SE.scaled_ld_shift(48, 1440) == 10
-    assert MODEL_8200I_SE.stagger_y_for(1440) == (1, 0)
-    assert MODEL_8200I_SE.stagger_y_for(2400) == (1, 0)
+    assert MODEL_8200I_SE.stagger_y_for(1440) == (0.8, 0)
+    assert MODEL_8200I_SE.stagger_y_for(2400) == (1.25, 0)
     assert MODEL_8200I_SE.stagger_y_for(1800) == ()
+    # 2026-11-03 TIFFs: 4-row even/odd offset at 7200, the V2's CCD stagger.
+    assert MODEL_8200I_SE.stagger_y_for(7200) == (4, 0)
+    assert MODEL_8200I_SE.stagger_follows_sensor_column
     # V2 (Scan Lab TIFF evidence 2026-10-16, see model_8100_v2._STAGGER_BY_DPI_8100_V2):
-    # rounded ld_shift like the SE leaves; host unstagger (4, 0) at 7200, (1, 0) at 1440/2400.
+    # rounded ld_shift like the SE leaves; host unstagger (4, 0) at 7200 and the
+    # fractional CCD stagger 4 x dpi / 7200 at 1440 / 2400 (0.8 / 1.333 rows).
     assert MODEL_8100_V2.scaled_ld_shift(24, 1440) == 5
     assert MODEL_8100_V2.scaled_ld_shift(48, 1440) == 10
     assert MODEL_8100_V2.scaled_ld_shift(24, 7200) == 24
     assert MODEL_8100_V2.stagger_y_for(7200) == (4, 0)
-    assert MODEL_8100_V2.stagger_y_for(1440) == (1, 0)
-    assert MODEL_8100_V2.stagger_y_for(2400) == (1, 0)
+    assert MODEL_8100_V2.stagger_y_for(1440) == (0.8, 0)
+    assert MODEL_8100_V2.stagger_y_for(2400) == (1.25, 0)
     assert MODEL_8100_V2.stagger_y_for(3600) == ()
     assert MODEL_8100_V2.stagger_y_for(1800) == ()
     assert dict(MODEL_8200I_SE.max_image_lincnt_by_feed2) == {
