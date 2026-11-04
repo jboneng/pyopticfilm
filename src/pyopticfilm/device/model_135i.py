@@ -97,6 +97,7 @@ from pyopticfilm.device.tables_135i import (
     SPEED1_REGS,
     SPEED2_MASKED,
     SPEED2_REGS,
+    STAGGERED_LINE,
     TOGGLE_MASKED,
     TOGGLE_REGS,
     WINDOW_ORIGIN,
@@ -106,6 +107,7 @@ from pyopticfilm.device.tables_135i import (
     scan_motor_period,
     scan_motor_step_shift,
     scan_motor_table,
+    scan_step_count,
     timing_set_for,
 )
 
@@ -154,22 +156,25 @@ _DUMMY_BY_DPI_135I: dict[int, int] = {
     720: 0x0A,  # filled (no capture; nearest measured)
     900: 0x0D,  # filled (no capture; nearest measured)
     1200: 0x0D,  # measured
-    1800: 0x0D,  # filled (no capture; nearest measured)
-    3600: 0x17,  # filled (no capture; nearest measured)
+    1800: 0x10,  # contributor's QuickScan table (capture not in the local set)
+    3600: 0x1B,  # measured (QuickScan 2400 and 3600 dpi IR, hardware X 3600)
     7200: 0x17,  # measured
 }
 
-# Image-pass 0xA5/0xAB by asic dpi.
+# Image-pass 0xA5/0xAB (STEPNO) by asic dpi at the timing set's exposure:
+# scan_step_count of that pass's motor table. Measured 0x23 (600), 0x0B (1200),
+# 0x01 (7200) in VueScan, 0x03 (3600) in QuickScan, 0x06 (1800) in the
+# contributor's table; the rest follow the same rule. The session derives it
+# from each pass's own period (a long pass runs fewer ramp entries).
 _PIXEL_CLOCK_BY_DPI_135I: dict[int, int] = {
-    150: 0x23,  # filled (asic 600)
-    300: 0x23,  # filled (asic 600)
-    600: 0x23,  # measured
-    720: 0x23,  # filled (no capture; nearest measured)
-    900: 0x0B,  # filled (no capture; nearest measured)
-    1200: 0x0B,  # measured
-    1800: 0x0B,  # filled (no capture; nearest measured)
-    3600: 0x01,  # filled (no capture; nearest measured)
-    7200: 0x01,  # measured
+    dpi: scan_step_count(scan_motor_period(14000 * max(1, EXPOSURE_MULTIPLIER[timing_set_for(max(dpi, 600))]), max(dpi, 600)))
+    for dpi in RESOLUTIONS_135I
+}
+#: STEPNO of the filled-in 42000 long pass, by the same rule (the session
+#: uses the actual long exposure).
+_PIXEL_CLOCK_LONG_BY_DPI_135I: dict[int, int] = {
+    dpi: scan_step_count(min(scan_motor_period(42000, max(dpi, 600)), 0x1FFFF))
+    for dpi in RESOLUTIONS_135I
 }
 
 # Frame image LINCNT: two sensor lines per output line plus the line margin.
@@ -192,11 +197,19 @@ assert set(_LADDER_LINCNT_BY_DPI_135I) == set(RESOLUTIONS_135I)
 _SHADING_DARK_135I: dict[int, tuple[int, int, int]] = {
     600: (0x06, 0x01, 0x30),  # measured (panorama preview)
     1200: (0x02, 0x01, 0x30),  # measured (35 mm preview)
+    3600: (0x04, 0x01, 0x30),  # measured (QuickScan 3600 dpi IR; 2400 writes 2b=1f)
+    7200: (0x02, 0x01, 0x30),  # unchanged 1200 values: no 7200 calibration capture
 }
 _SHADING_WHITE_135I: dict[int, tuple[int, int, int]] = {
     600: (0x07, 0x0B, 0x0B),  # measured (panorama preview)
     1200: (0x0D, 0x0B, 0x0B),  # measured (35 mm preview)
+    3600: (0x1F, 0x04, 0x04),  # measured (QuickScan 2400 and 3600 dpi IR)
+    7200: (0x0D, 0x0B, 0x0B),  # unchanged 1200 values: no 7200 calibration capture
 }
+#: ``0x1D`` LINESEL on the dark and white strips by asic dpi: 1 at hardware X
+#: 3600 (QuickScan 2400 and 3600 dpi IR, both strips; the flatbeds' SilverFast
+#: writes the same at 3600). The AFE strips and every image pass keep 0.
+_SHADING_LINESEL_135I: dict[int, int] = {3600: 1}
 
 # Per-scan constants outside the timing sets, from every measured image pass:
 # 0x04/0x05 scan selects, 0x0B scan clock, 0x1C/0x1D, window origin 0x80-0x81.
@@ -267,9 +280,9 @@ class Model135i(Gl128Common):
     pixel_clock_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(_PIXEL_CLOCK_BY_DPI_135I)
     )
-    #: Filled: no long-exposure capture; the short-pass clocks.
+    #: No long-exposure capture: the STEPNO rule at the filled-in 42000.
     pixel_clock_long_by_dpi: Mapping[int, int] = field(
-        default_factory=lambda: dict(_PIXEL_CLOCK_BY_DPI_135I)
+        default_factory=lambda: dict(_PIXEL_CLOCK_LONG_BY_DPI_135I)
     )
     dummy_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(_DUMMY_BY_DPI_135I))
     #: Toggle-mode overlay at the ``Speed2`` subkeys (300-3600). Use
@@ -294,8 +307,10 @@ class Model135i(Gl128Common):
     #: a visible and an IR line per output line.
     usb_image_lincnt_half_lines: bool = False
     image_lincnt_per_line: int = 2
-    #: ``0x1D`` is 0 on every measured shading strip.
-    shading_linesel_by_dpi: Mapping[int, int] = field(default_factory=dict)
+    #: ``0x1D`` LINESEL of the dark and white strips (1 at hardware X 3600).
+    shading_linesel_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(_SHADING_LINESEL_135I)
+    )
     resolutions_dpi: tuple[int, ...] = RESOLUTIONS_135I
     register_dpiset_by_dpi: Mapping[int, int] = field(
         default_factory=lambda: dict(_REGISTER_DPISET_135I)
@@ -412,6 +427,10 @@ class Model135i(Gl128Common):
         """
         return (64000 << SCAN_MOTOR_MAX_STEP_SHIFT) * 3600 // self.asic_dpi_for(resolution)
 
+    def scan_step_count(self, period: int) -> int:
+        """``0xA5``/``0xAB`` (STEPNO) for a scan motor ``period`` (:func:`~pyopticfilm.device.tables_135i.scan_step_count`)."""
+        return scan_step_count(period)
+
     def scan_motor_step_shift(self, period: int) -> int:
         """``0x1C[2:0]`` for a scan motor ``period`` (0 unless it exceeds 16 bits)."""
         return scan_motor_step_shift(period)
@@ -443,6 +462,35 @@ class Model135i(Gl128Common):
         if key not in table:
             key = min(table, key=lambda k: abs(int(k) - int(key)))
         return table[key]
+
+    def stagger_y_for(self, resolution: int) -> tuple[float, ...]:
+        """Host column unstagger: ``(4, 0)`` at 7200 dpi, none under ``Speed2``.
+
+        The INI's ``StaggeredLine = 4``: even and odd sensor columns are 4
+        native rows apart, and the vendor driver re-registers them on the
+        host at X = 7200 (visible and IR alike); ``0x01`` ``STAGGER`` stays
+        clear in VueScan's 7200 dpi image pass. ``Speed2`` (3600 / D) bins
+        column pairs, so no output column mixes parities. The pattern follows
+        the sensor column (``stagger_phase = pixel_startx``); the 135i window
+        starts on column 35, so its sign is not yet checked on a 7200 dpi scan.
+        """
+        if self.asic_dpi_for(resolution) == 7200:
+            return (float(STAGGERED_LINE), 0.0)
+        return ()
+
+    def shading_strip_linesel(self, resolution: int) -> int:
+        """``0x1D`` LINESEL for a dark or white strip at ``resolution``."""
+        return int(self.shading_linesel_by_dpi.get(self.asic_dpi_for(resolution), 0))
+
+    def afe_strip_line_period(self, resolution: int, pixels: int) -> int:
+        """``LPERIOD`` of an AFE strip of ``pixels``: ``10807 + px/4``, ``/2`` at hardware X 3600.
+
+        Measured 10935 / 12103 (probe / wide) at 600 and 1200 dpi, 11063 /
+        13399 at 2400 and 3600 dpi (QuickScan). 7200 has no capture and keeps
+        ``/4``.
+        """
+        divisor = 2 if self.asic_dpi_for(resolution) == 3600 else 4
+        return LPERIOD_BASE + int(pixels) // divisor
 
     # --- loader ----------------------------------------------------------
 

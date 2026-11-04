@@ -244,3 +244,39 @@ def test_firmware_serial_never_changes_the_135i_boot_map(serial):
 
 def test_135i_is_not_scan_ready():
     assert model_is_scan_ready(MODEL_135I) is False
+
+
+# --- STEPNO (0xA5/0xAB) ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("period", "stepno"),
+    [
+        (2333, 0x23),  # 600 dpi, VueScan panorama / QuickScan 600 IR
+        (4666, 0x0B),  # 1200 dpi, VueScan preview
+        (56000, 0x01),  # 7200 dpi, VueScan frame scan
+        (9333, 0x04),  # 2400 dpi (hardware X 3600), QuickScan
+        (14000, 0x03),  # 3600 dpi, QuickScan (same table as scan_motor_table(14000))
+        (7000, 0x06),  # 1800 dpi, contributor's QuickScan table
+    ],
+)
+def test_scan_step_count_matches_every_measured_pass(period, stepno):
+    from pyopticfilm.device.tables_135i import scan_step_count
+
+    assert scan_step_count(period) == stepno
+
+
+def test_quickscan_3600_table_is_ours():
+    # QuickScan 3600 dpi IR, AHB 0x10000000: 54484, 16345, then 14000.
+    assert scan_motor_table(14000)[:3] == (54484, 16345, 14000)
+    assert scan_motor_table(14000)[3:] == (14000,) * 253
+
+
+def test_image_pass_register_tables_follow_the_captures():
+    assert MODEL_135I.pixel_clock_by_dpi[3600] == 0x03
+    assert MODEL_135I.pixel_clock_by_dpi[1800] == 0x06
+    assert MODEL_135I.dummy_by_dpi[3600] == 0x1B
+    assert MODEL_135I.dummy_by_dpi[1800] == 0x10
+    # The captured resolutions keep their values.
+    assert {d: MODEL_135I.pixel_clock_by_dpi[d] for d in (600, 1200, 7200)} == {600: 0x23, 1200: 0x0B, 7200: 0x01}
+    assert {d: MODEL_135I.dummy_by_dpi[d] for d in (600, 1200, 7200)} == {600: 0x0A, 1200: 0x0D, 7200: 0x17}

@@ -59,6 +59,11 @@ _IMAGE_PASS_REGS: dict[int, int] = {
 }
 #: ``0x1C``: its low bits carry the scan motor step-time shift.
 _REG_1C = 0x1C
+#: Largest raw toggle-mode buffer one pass may need. The buffer is allocated
+#: after the feed and the image START, and splitting it copies both halves, so
+#: the peak is about twice this. A 7200 dpi frame is 1.3 GB and a 3600 dpi
+#: whole strip 2.1 GB; a 7200 dpi whole strip (8.3 GB) is refused.
+MAX_PASS_RAW_BYTES = 3 * 1024**3
 
 
 def loader_feed_steps(model: FilmModel, geometry: ScanGeometry, frame: int | None) -> int:
@@ -99,6 +104,12 @@ class LoaderImagePipeline(ImagePipeline):
 
 class Gl128LoaderScanSession(Gl128ScanSession):
     """Toggle-mode RGB+IR frame and strip scans on the OpticFilm 135i loader."""
+
+    #: The loader's calibration strips run at the timing set's exposure, not
+    #: the pass's, so a remeasure before the long pass would repeat the same
+    #: dark and white strips. The long pass uses the normal calibration, as
+    #: the vendor's long pass does (one longer pass, same AFE and shading).
+    remeasure_shading_for_long = False
 
     def __init__(self, asic, model, calibrator=None) -> None:  # type: ignore[no-untyped-def]
         super().__init__(asic, model, calibrator)
@@ -158,6 +169,13 @@ class Gl128LoaderScanSession(Gl128ScanSession):
         check_gl128_multi_pass(
             self.model, geometry.resolution, multi_exposure=multi_exposure, n_passes=n_passes
         )
+        if geometry.total_bytes > MAX_PASS_RAW_BYTES:
+            where = "The whole-strip scan" if frame is None else "This scan"
+            raise ScanError(
+                f"{where} at {geometry.resolution} dpi needs {geometry.total_bytes / 1e9:.1f} GB "
+                f"per pass (limit {MAX_PASS_RAW_BYTES / 1e9:.1f} GB). Scan a smaller area or a "
+                "lower resolution."
+            )
         if me_long_exposure is not None:
             # Ceiling only, so the merge's long/short ratio is the exposure
             # the motor table is built from. A manual value under the floor stays.
@@ -367,6 +385,11 @@ class Gl128LoaderScanSession(Gl128ScanSession):
         model.scan_motor_table(channel_exp)
         step_shift = int(model.scan_motor_step_shift(channel_exp))
         cache[_REG_1C] = (int(cache.get(_REG_1C, 0)) & ~REG_1C_STEP_SHIFT_MASK & 0xFF) | step_shift
+        # STEPNO from this pass's own table: a long pass has fewer ramp
+        # entries above its period than the short pass at the same dpi.
+        stepno = int(model.scan_step_count(channel_exp))
+        cache[0xA5] = stepno
+        cache[0xAB] = stepno
         if step_shift:
             logger.warning(
                 "GL128 loader %d dpi scan motor period %d uses step-time shift %d "

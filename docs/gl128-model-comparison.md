@@ -1003,7 +1003,7 @@ half.
 | Holder | `holder_present()`: `HOMESNR` with `0x32` bit 1 set, then restored (`0x32` bit 2 and `0x100` bit 7 follow the same arm state). `is_at_home()`: `HOMESNR` with `0x32` bit 1 cleared, then restored; it is also 1 with no holder loaded, so `holder_loaded()` is set only by a seek ending on the sensor and cleared by eject, removal, init or a lost park, and `require_holder_loaded()` needs it. `eject_requested()`: interrupt byte `0x48` | `insert 35mm carrier`, `holder eject`, tester readings |
 | Load | `load_holder()`: 0.5 s, clear `0x32` bit 1, 7200 forward (load ramp); reverse seek until `HOMESNR` (`0x1C = 0`, exposure 30000, `0x8A`–`0x92 = 0`) only when `HOMESNR` dropped and the motor is idle (`0x101` bit 0, `0x100` bit 1), otherwise eject | insert, both feeds |
 | Eject | `eject_holder()`: the QuickScan order above; off the loader home, a reverse seek straight back, `FEEDL` = the 73722-step travel | `holder eject`, QuickScan capture |
-| Home | `home()`: the load's two moves (1 inch in, then the reverse seek) when a holder is in the slot and off the loader home; after a lost park, the eject's seek alone; no move with the slot empty. Only on request: `scan()`, `calibrate()` and `warmup()` do not home this model after `init()`, since a holder off the loader home may be at the end of a strip or just outside the slot, and a scan or calibration raises | insert, both feeds |
+| Home | `home()`: when a holder is in the slot and off the loader home, the eject's straight reverse seek, but only when the driver moved it inward (a frame feed or load inch with no seek or park since, or a lost park); with the position unknown (after `init()`) it raises and leaves the holder to an eject. Never the vendor's inch inward first, which from deep in a strip would pass the loader travel. `load_holder()` refuses a holder the armed sensor reads inward of the home. No move with the slot empty. Only on request: `scan()`, `calibrate()` and `warmup()` do not home this model after `init()`, since a holder off the loader home may be at the end of a strip or just outside the slot, and a scan or calibration raises | insert, both feeds |
 | Scan clock | `0x8C` boot value, `03 = 20 30 20 30`, about 75 ms, `0x8C` scan value. VueScan also writes `31 = fe` in that gap, which is not replayed | every scan capture |
 | Strip start | `0x0D` = `00 01 05 07`, then `01`, `0F = 01`; `0x0F = 0` is never written (no capture has it) | every 135i capture |
 | `0x32` | every write starts from the last value written, never the readback (bits 3–5 change from read to read with the toggle on). From the init table's `0x1F` that gives VueScan's `bd` lit and `9d` dark at 600 and 1200 dpi | panorama, preview, 135i run |
@@ -1075,19 +1075,33 @@ are not replayed.
 - The two front-panel GPIO requests VueScan sends at the end of each frame
   (`0x8B` idx `0x0B` and `0x0F`) and the `0x8D` request after the image read
   are not sent.
-- `StaggeredLine = 4` (odd/even pixels at 7200 dpi) is in the line margin but
-  not applied to the image, as on the other GL128 models.
+- `StaggeredLine = 4` (odd/even pixels at 7200 dpi): the host unstaggers
+  `(4, 0)` at 7200 dpi on the visible and IR halves (`stagger_y_for`),
+  following the sensor column (`stagger_phase = pixel_startx`, 35 on this
+  model). The sign is not yet checked on a 7200 dpi 135i scan.
 - No 135i multi-exposure capture: the long exposure and its `0x90` are
   filled in, and the proportional `0x90` is a guess for adaptive long
   exposures that are not a whole multiple of the short one. Open: whether the
-  long pass needs `0x28` changed too, and whether it should reuse the normal
-  shading. As on the flatbed models, the shading is measured again at the
-  loader home before the first long pass.
+  long pass needs `0x28` changed too. The long pass reuses the normal
+  calibration (`remeasure_shading_for_long = False`): the loader's strips run
+  at the timing set's exposure whatever the pass, and the vendor's long pass
+  keeps the normal AFE and shading.
 - The image `LINCNT` margin is the INI rule (`ceil(48·Y/7200) + 1`, plus 4 at
   7200 dpi: 53 / 9 / 5); VueScan uses its own margins, so it is not checked
   on the wire.
-- Dummy and pixel clocks at 720, 900, 1800 and 3600 dpi, and shading strips
-  at 7200 dpi, are filled from the nearest measured rung.
+- STEPNO (`0xA5`/`0xAB`) comes from each pass's scan motor table: the
+  entries above the period, plus 1 (`scan_step_count`). It reproduces 600,
+  1200 and 7200 (VueScan), 2400 and 3600 (QuickScan, whose 3600 table is this
+  one word for word) and 1800 (contributor's table).
+- Image `0x2B`: 3600 is QuickScan's `0x1B` and 1800 the contributor's `0x10`;
+  720 and 900 are filled from the nearest measured rung.
+- Calibration strips at hardware X 3600 follow QuickScan's 2400 / 3600 dpi
+  runs: AFE `LPERIOD` `10807 + px/2` (11063 / 13399), dark and white strips
+  `0x1D = 1`, dark `(0x04, 0x01, 0x30)`, white `(0x1F, 0x04, 0x04)`. 7200 dpi
+  strips keep the 1200 dpi values: no capture calibrates at 7200.
+- Whole-strip and frame passes are refused before any move when one pass's
+  raw buffer would exceed 3 GiB (`MAX_PASS_RAW_BYTES`): a 7200 dpi whole strip
+  is 8.3 GB.
 - Multi-exposure and the plain (non-toggle) IR and colour modes are not
   captured; the session always scans in toggle mode.
 - Bulk image payloads: a capture with a larger snap length would show the

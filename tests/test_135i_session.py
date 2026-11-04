@@ -228,13 +228,42 @@ def test_at_home_reads_homesnr_with_the_stop_armed(scanner, rec):
 # --- home -------------------------------------------------------------------------
 
 
-def test_home_feeds_in_before_the_reverse_seek(scanner, rec):
+def test_home_refuses_from_an_unknown_position(scanner, rec):
+    # After init the driver does not know where an off-home holder is: deep in
+    # a strip, an inward inch would pass the loader travel.
     scanner.asic.init()
     rec.at_home = False
     rec.starts.clear()
+    with pytest.raises(AsicError, match="position is unknown"):
+        scanner.home()
+    assert rec.starts == []
+
+
+def test_home_after_a_frame_feed_seeks_straight_back(scanner, rec):
+    asic = scanner.asic
+    scanner.load_holder()
+    asic.position_for_frame(feed_steps=60198, scan_regs={})
+    rec.at_home = False
+    rec.starts.clear()
     scanner.home()
-    assert [(_u(s, 0x3D, 3), s[0x02], s[0x32] & 0x02) for s in rec.starts] == [(6690, 0x18, 0), (71490, 0x1C, 0)]
-    assert scanner.asic.is_at_home()
+    # No inward inch: one reverse seek over the whole travel, stopped by the sensor.
+    assert [(_u(s, 0x3D, 3), s[0x02], s[0x32] & 0x02) for s in rec.starts] == [(MODEL_135I.loader_travel_steps(), 0x1C, 0)]
+    assert asic.is_at_home() and asic.holder_loaded()
+
+
+def test_load_refuses_a_holder_inside_the_loader(scanner, rec):
+    # Armed HOMESNR = 0 with a holder in the slot: inward of home. A load's
+    # inch from there could pass the loader travel (e.g. 73722 + 7200).
+    scanner.asic.init()
+    rec.at_home = False
+    rec.starts.clear()
+    with pytest.raises(AsicError, match="inside the loader"):
+        scanner.load_holder()
+    assert rec.starts == []
+    scanner.asic._park_ok = False  # also after a lost park
+    with pytest.raises(AsicError, match="inside the loader"):
+        scanner.load_holder()
+    assert rec.starts == []
 
 
 def test_home_after_a_lost_park_seeks_straight_back(scanner, rec):
@@ -248,19 +277,21 @@ def test_home_after_a_lost_park_seeks_straight_back(scanner, rec):
     assert asic._park_ok is True
 
 
-def test_home_does_not_seek_while_the_sensor_stays_set(scanner, rec, monkeypatch):
+def test_load_does_not_seek_while_the_sensor_stays_set(scanner, rec, monkeypatch):
     asic = scanner.asic
     asic.init()
-    rec.at_home = False
     rec.starts.clear()
+    ejected = []
 
     def feed_onto_sensor(*_a, **_k):
         rec.at_home = True
 
     monkeypatch.setattr(asic, "_loader_move", feed_onto_sensor)
-    with pytest.raises(AsicError, match="stayed set"):
-        asic.home()
-    assert rec.starts == []
+    monkeypatch.setattr(asic, "eject_holder", lambda **_k: ejected.append(True))
+    with pytest.raises(AsicError, match="did not load"):
+        asic.load_holder()
+    assert rec.starts == [] and ejected == [True]
+    assert asic._holder_inward is False
 
 
 def test_scan_does_not_home_after_init(scanner, rec):
@@ -583,6 +614,8 @@ def test_multi_exposure_runs_two_fed_passes(scanner, rec):
     assert [_u(f, 0x3D, 3) for f in feeds] == [6438, 6438]
     # Short 14000 / 0x90 11000; the fixed long 42000 scales both three times.
     assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(14000, 11000), (42000, 33000)]
+    # STEPNO follows each pass's table: 0x23 at period 2333, 0x06 at 7000.
+    assert [(s[0xA5], s[0xAB]) for s in images] == [(0x23, 0x23), (0x06, 0x06)]
     assert scanner.last_me_debug.exposure_long == 42000
     assert img.rgb.shape == (896, 864, 3) and img.ir.shape == (896, 864)
 
@@ -729,6 +762,7 @@ def test_7200_multi_exposure_short_at_timing_set_exposure(scanner, rec):
     feeds = [s for s in rec.starts if s[0x02] == 0x18]
     assert [(_u(s, 0x7D, 3), _u(s, 0x90, 3)) for s in images] == [(28000, 44000), (42000, 66000)]
     assert [s[0x1C] & 0x07 for s in images] == [0, 1]
+    assert [s[0xA5] for s in images] == [0x01, 0x01]
     assert feeds and all(s[0x1C] & 0x07 == 0 for s in feeds)
     assert scanner.last_me_debug.exposure_short == 28000
     assert scanner.last_me_debug.exposure_long == 42000
@@ -811,3 +845,109 @@ def test_watch_loader_loads_on_insert_and_ejects_on_button(scanner, rec):
     # The load ran its two moves (6690 forward, 71490 reverse), then the eject (3090).
     feeds = [_u(s, 0x3D, 3) for s in rec.starts if s[0x02] in (0x18, 0x1C)]
     assert feeds == [6690, 71490, 3090]
+
+
+def test_3600_configure_matches_the_quickscan_image_pass(rec, tmp_path):
+    """QuickScan 3600 dpi IR image START: DPISET 1200, a5/ab 03, 2b 1b, 1d 00."""
+    sc = Scanner.open_fake(MODEL_135I, rec, calib_cache=tmp_path / "c.json")
+    asic = sc.asic
+    asic.init()
+    asic._motor_moves_enabled = False
+    session = create_session(asic, MODEL_135I)
+    rec.ahb.clear()
+    session._configure(compute_geometry(3600, model=MODEL_135I))
+    regs = rec.registers
+    assert (_u(regs, 0x2C, 2), _u(regs, 0x7D, 3), regs[0xA5], regs[0xAB], regs[0x2B]) == (1200, 14000, 0x03, 0x03, 0x1B)
+    assert regs[0x1D] == 0x00 and regs[0x1C] & 0x07 == 0
+    motor = [blob for a, blob in rec.ahb if a == R.AHB_SCAN_MOTOR_0]
+    assert _words(motor[0])[:3] == (54484, 16345, 14000)
+    sc.close()
+
+
+def test_3600_calibration_strips_match_quickscan(scanner, rec):
+    """QuickScan 3600 dpi IR: AFE probe/wide LPERIOD 11063 / 13399, dark and white 0x1D = 1."""
+    scanner.load_holder()
+    rec.starts.clear()
+    scanner.calibrate(resolution=3600)
+    afe = [s for s in rec.starts if s[0x03] == 0x30 and _u(s, 0x25, 3) == 2]
+    strips = [s for s in rec.starts if s[0x02] == 0x00 and _u(s, 0x25, 3) == 256]
+    dark = [s for s in strips if s[0x03] == 0x20]
+    white = [s for s in strips if s[0x01] & 0x20]
+    assert sorted({_u(s, 0x28, 3) for s in afe}) == [11063, 13399]
+    assert all(s[0x1D] == 0x00 for s in afe)
+    assert dark and all((s[0x1D], s[0x2B], s[0xA5], s[0xAB]) == (0x01, 0x04, 0x01, 0x30) for s in dark)
+    assert white and all((s[0x1D], s[0x2B], s[0xA5], s[0xAB]) == (0x01, 0x1F, 0x04, 0x04) for s in white)
+
+
+def test_1200_calibration_strips_unchanged(scanner, rec):
+    scanner.load_holder()
+    rec.starts.clear()
+    scanner.calibrate(resolution=1200)
+    strips = [s for s in rec.starts if _u(s, 0x25, 3) in (2, 256)]
+    assert strips and all(s[0x1D] == 0x00 for s in strips)
+    afe = [s for s in strips if _u(s, 0x25, 3) == 2]
+    assert sorted({_u(s, 0x28, 3) for s in afe}) == [10935, 12103]
+
+
+def test_whole_strip_at_7200_is_refused_before_any_move(scanner, rec):
+    scanner.load_holder()
+    rec.starts.clear()
+    rec.writes.clear()
+    with pytest.raises(ScanError, match="per pass"):
+        scanner.scan(resolution=7200, frame=None)
+    assert rec.starts == [] and rec.writes == []
+
+
+def test_pass_size_limit_admits_a_7200_frame_and_a_3600_strip():
+    from pyopticfilm.scan.geometry import compute_strip_geometry
+    from pyopticfilm.scan.session_gl128_loader import MAX_PASS_RAW_BYTES
+
+    assert compute_geometry(7200, model=MODEL_135I).total_bytes < MAX_PASS_RAW_BYTES
+    assert compute_strip_geometry(3600, model=MODEL_135I).total_bytes < MAX_PASS_RAW_BYTES
+    assert compute_strip_geometry(7200, model=MODEL_135I).total_bytes > MAX_PASS_RAW_BYTES
+
+
+def test_me_long_pass_reuses_the_calibration(scanner, rec):
+    scanner.load_holder()
+    rec.starts.clear()
+    scanner.scan(resolution=600, multi_exposure=True, me_long_mode="fixed")
+    strips = [s for s in rec.starts if s[0x02] == 0x00 and _u(s, 0x25, 3) == 256]
+    dark = [s for s in strips if s[0x03] == 0x20]
+    white = [s for s in strips if s[0x01] & 0x20]
+    images = [s for s in rec.starts if s[0x02] == 0x30]
+    assert (len(dark), len(white), len(images)) == (1, 1, 2)
+    # Both passes run with the measured tables (DVDSET).
+    assert all(s[0x01] & 0x20 for s in images)
+
+
+def test_7200_geometry_unstaggers_by_sensor_column():
+    g = compute_geometry(7200, model=MODEL_135I)
+    assert (g.stagger_y, g.num_staggered_lines, g.stagger_phase) == ((4, 0), 4, 35)
+    # After the 48-row blue shift the buffer still holds the 4 stagger rows.
+    pairs = g.optical_line_count // g.lincnt_per_line
+    assert pairs - g.shift_b >= g.lines + g.num_staggered_lines
+    for dpi in (600, 1200, 3600):
+        assert compute_geometry(dpi, model=MODEL_135I).stagger_y == ()
+
+
+def test_7200_unstagger_aligns_a_four_row_column_offset():
+    """A horizontal edge read 4 rows later on every other sensor column comes out straight."""
+    from dataclasses import replace
+
+    from pyopticfilm.scan.session_gl128_loader import LoaderImagePipeline, plane_geometry
+
+    g = compute_geometry(7200, model=MODEL_135I, area=(0.0, 0.0, 0.01, 0.01))
+    plane = plane_geometry(g)
+    g = replace(g, shift_r=0, shift_g=0, shift_b=0)
+    rows, width = plane.optical_line_count, g.pixels
+    img = np.full((rows, width, 3), 1000, dtype="<u2")
+    edge = 40
+    for x in range(width):
+        # Sensor column parity = (pixel_startx + x); odd columns lag by 4 rows.
+        lag = 4 if (g.pixel_startx + x) % 2 == 0 else 0
+        img[edge + lag :, x, :] = 50000
+    pipe = LoaderImagePipeline(MODEL_135I)
+    out = pipe.assemble(memoryview(img.tobytes()), g, planar=False, expose_base=False)
+    col = out[:, :, 1]
+    first_bright = [int(np.argmax(col[:, x] > 25000)) for x in range(col.shape[1])]
+    assert len(set(first_bright)) == 1

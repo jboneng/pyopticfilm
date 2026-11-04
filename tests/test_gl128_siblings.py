@@ -97,7 +97,8 @@ def test_135i_divergent_fields_match_capture_catalog():
     assert (m.exposure_lperiod, m.exposure_short) == (14000, 14000)
     assert m.image_lincnt_per_line == 2
     assert m.usb_image_lincnt_half_lines is False
-    assert dict(m.shading_linesel_by_dpi) == {}
+    # QuickScan 2400 / 3600 dpi IR: dark and white strips write 0x1D = 1.
+    assert dict(m.shading_linesel_by_dpi) == {3600: 1}
     for dpi, (dpiset, lperiod, dummy, clk) in {
         600: (200, 11023, 0x0A, 0x23),
         1200: (400, 11239, 0x0D, 0x0B),

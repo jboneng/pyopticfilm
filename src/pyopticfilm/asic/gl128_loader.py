@@ -8,11 +8,13 @@ usbmon captures of a 135i and the Plustek model INI
 
 * **Moves** drive the film holder, not a carriage. Every move programs a
   255-step ramp at each end (``0xAE``-``0xAF``) and ``FEEDL = n - 510``, and
-  ends on the ``0x101`` status alone (no ``wIndex = 0x21`` probe). Loading or
-  homing a holder is one inch forward then a reverse seek of up to ten inches
-  to the loader sensor (``HOMESNR``); a frame is one forward feed from there;
-  the image pass parks with ``AGOHOME``. There is no host-side motor stop:
-  only the armed loader sensor ends a reverse seek early.
+  ends on the ``0x101`` status alone (no ``wIndex = 0x21`` probe). Loading a
+  holder from the entry is one inch forward then a reverse seek of up to ten
+  inches to the loader sensor (``HOMESNR``); a frame is one forward feed from
+  there; the image pass parks with ``AGOHOME``. A holder the driver moved
+  inward is sought straight back; one at an unknown position is left to an
+  eject. There is no host-side motor stop: only the armed loader sensor ends
+  a reverse seek early.
 * **Sensors**: with ``0x32`` bit 1 set, ``HOMESNR`` reads "holder in the slot".
   With it clear (stop armed) it reads 0 for a holder inward of the loaded
   position and 1 otherwise, which includes an empty slot and a holder at the
@@ -54,7 +56,6 @@ from pyopticfilm.device.tables_135i import (
     LOADER_LOAD_FORWARD_STEPS,
     LOADER_LOAD_REVERSE_STEPS,
     LOADER_RECOVERY_SEEK_STEPS,
-    LPERIOD_BASE,
     STATUS2_MOTMFLG,
     STATUS2_REG,
     WINDOW_ORIGIN,
@@ -96,7 +97,6 @@ from pyopticfilm.scan.calib_gl128_loader import (
     split_shading_blob,
     strip_bytes,
     strip_column_means,
-    strip_line_period,
     unity_shading_table,
     validate_gains,
     validate_ir_white,
@@ -182,11 +182,19 @@ class Gl128Loader(Gl128):
         self._holder_seen: bool | None = None
         #: A seek ended on the loader sensor and no eject or init followed.
         self._holder_loaded = False
+        #: Where the holder is relative to the loader home, as far as this
+        #: driver commanded it: ``True`` inward (a feed left home and no seek
+        #: or park has returned it), ``False`` at the home or outward,
+        #: ``None`` unknown (after ``init()``, e.g. a new process after a
+        #: crash mid-strip). The armed sensor reads 0 inward of home, so it
+        #: cannot tell a deep holder from one it never saw move.
+        self._holder_inward: bool | None = None
 
     def init(self, *, force: bool = False) -> None:
         if self._initialized and not force:
             return
         self._holder_loaded = False
+        self._holder_inward = None
         super().init(force=force)
         self._reg_cache[HOLDER_SENSOR_REG] = int(self.model.init_regs[HOLDER_SENSOR_REG]) & 0xFF
 
@@ -341,6 +349,7 @@ class Gl128Loader(Gl128):
         if previous is None or present == previous:
             return None
         self._holder_loaded = False
+        self._holder_inward = False
         return "inserted" if present else "removed"
 
     def require_holder_loaded(self, where: str) -> None:
@@ -362,9 +371,12 @@ class Gl128Loader(Gl128):
         Returns False, without seeking, when ``HOMESNR`` stayed set.
         """
         self._set_home_stop(armed=True)
+        self._holder_inward = True
         self._loader_move(LOADER_LOAD_FORWARD_STEPS, use_slow_slope=True, timeout_s=timeout_s)
         status = self.read_status_reliable()
         if status.is_at_home:
+            # The holder never left the sensor: it did not engage.
+            self._holder_inward = False
             return False
         if not self._motor_idle(status):
             raise MotorTimeoutError("Loader motor still running after the one-inch feed; reverse seek not started.")
@@ -384,8 +396,14 @@ class Gl128Loader(Gl128):
             self.init()
         if not self.holder_present():
             raise AsicError("No film holder in the loader: insert one, then load it.")
-        if not self._homesnr(armed=False):
-            raise AsicError("Loader sensor does not see the holder; eject it and insert it again.")
+        if not self.is_at_home():
+            # Armed, HOMESNR reads 1 at the entry, at the home and ejected, and
+            # 0 inward of the home. A load starts with an inch inward, which
+            # from deep in the strip would pass the loader travel.
+            raise AsicError(
+                "The film holder is inside the loader, past the loader home; a load "
+                "would feed it further in. Eject it (Scanner.eject_holder) first."
+            )
         time.sleep(LOADER_DELAY_S)
         if not self._feed_in_then_seek_home(timeout_s=timeout_s):
             logger.warning("GL128 loader sensor did not clear on the load feed; ejecting the holder")
@@ -412,6 +430,7 @@ class Gl128Loader(Gl128):
         if not self._homesnr(armed=False):
             logger.info("GL128 loader eject: no holder in the slot")
             self._holder_loaded = False
+            self._holder_inward = False
             return
         self._set_home_stop(armed=True)
         if not self.read_status_reliable().is_at_home:
@@ -428,6 +447,7 @@ class Gl128Loader(Gl128):
             self._loader_move(LOADER_EJECT_STEPS, timeout_s=timeout_s)
         finally:
             self._write(_REG_09, 0x00)
+        self._holder_inward = False
         logger.info("GL128 film holder ejected")
 
     # --- motion -----------------------------------------------------------
@@ -517,6 +537,7 @@ class Gl128Loader(Gl128):
         self._settle_after_move()
         self._park_ok = True
         self._holder_loaded = True
+        self._holder_inward = False
         logger.info("GL128 loader at home")
 
     def feed(self, steps: int, *, timeout_s: float = 30.0) -> None:
@@ -566,6 +587,7 @@ class Gl128Loader(Gl128):
             }
         )
         logger.info("GL128 loader frame feed FEEDL=%d from home (status 0x%02x)", steps, start.raw)
+        self._holder_inward = True
         self._start_move(regs, use_slow_slope=False)
         end = self._wait_move(timeout_s=timeout_s, until_home=False, steps=steps)
         if end.is_at_home:
@@ -614,6 +636,7 @@ class Gl128Loader(Gl128):
                 self.wait_until_at_home(timeout_s=60.0)
                 self._settle_after_move()
                 self._reg_cache[r.REG_0x02] = int(reg02) & ~r.AGOHOME
+                self._holder_inward = False
                 logger.info("GL128 loader parked at home after the scan")
             except MotorTimeoutError as exc:
                 self._park_ok = False
@@ -623,13 +646,16 @@ class Gl128Loader(Gl128):
             logger.error("GL128 loader stop_motor: %s (holder position unknown)", exc)
 
     def home(self, *, timeout_s: float = 30.0, wait: bool = True) -> None:
-        """Bring a holder in the slot back to the loader home.
+        """Bring a holder that is inward of the loader home back to it.
 
-        Normally :meth:`_feed_in_then_seek_home`. After a lost park the holder
-        may sit at the end of a strip, where another inch would pass the
-        captured travel, so it seeks straight back. With a good park flag this
-        still feeds that inch: for a holder deep in the strip use
-        :meth:`eject_holder`.
+        Nothing moves when the armed sensor reads the home (also an empty
+        slot, a holder at the entry or ejected) or when no holder is in the
+        slot. Off the home, the holder is sought straight back to the sensor
+        only when this driver moved it inward (a frame feed or load inch with
+        no seek or park since, or a lost park). With the position unknown
+        (after ``init()``) it raises instead: the vendor's home starts with an
+        inch inward, which from deep in a strip would pass the loader travel,
+        and a reverse seek from outward of the home gets no sensor edge.
         """
         del wait
         self._require_motor_enabled()
@@ -639,15 +665,15 @@ class Gl128Loader(Gl128):
         if not self._homesnr(armed=False):
             logger.info("GL128 loader home: no holder in the slot, nothing to move")
             return
-        if not self._park_ok:
+        if self._holder_inward or not self._park_ok:
             self._set_home_stop(armed=True)
             self._seek_home(steps=LOADER_RECOVERY_SEEK_STEPS, timeout_s=timeout_s)
             return
-        if not self._feed_in_then_seek_home(timeout_s=timeout_s):
-            raise AsicError(
-                "Loader sensor stayed set after the one-inch feed; holder position unknown. "
-                "Eject the holder and load it again."
-            )
+        raise AsicError(
+            "Film holder is off the loader home and its position is unknown (for example "
+            "after a restart mid-scan). Eject it (Scanner.eject_holder): the eject seeks "
+            "back to the loader sensor first. If it is at the entry, pull it out and insert it again."
+        )
 
     def park(self, *, timeout_s: float = 30.0) -> None:
         self.home(timeout_s=timeout_s)
@@ -764,7 +790,7 @@ class Gl128Loader(Gl128):
             strpixel=WINDOW_ORIGIN,
             endpixel=WINDOW_ORIGIN + pixels,
             dpiset=AFE_DPISET,
-            lperiod=strip_line_period(pixels, LPERIOD_BASE),
+            lperiod=self.model.afe_strip_line_period(resolution, pixels),
             clocks=afe_strip_clocks(self.model.asic_dpi_for(resolution), wide=wide),
             dark=False,
         )
@@ -875,6 +901,8 @@ class Gl128Loader(Gl128):
             clocks=self.model.shading_strip_clocks(resolution, dvdset=dvdset),
             dark=not dvdset,
         )
+        linesel = int(self.model.shading_strip_linesel(resolution)) & 0x1F
+        regs[0x1D] = (int(regs.get(0x1D, 0)) & ~0x1F & 0xFF) | linesel
         self.apply_timing_gpio(resolution)
         return self._acquire_loader_strip(
             regs,

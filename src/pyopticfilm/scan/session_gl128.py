@@ -176,6 +176,9 @@ class Gl128ScanSession(ScanSession):
     The 8300i SE uses the same session path with leaf-specific tables.
     """
 
+    #: Measure shading again at home before the first ME long pass.
+    remeasure_shading_for_long: bool = True
+
     def __init__(
         self,
         asic: AsicDriver,
@@ -843,7 +846,7 @@ class Gl128ScanSession(ScanSession):
                 exposure=exp_long,
                 long_pass=True,
                 manual=long_manual,
-                remeasure_first=True,
+                remeasure_first=self.remeasure_shading_for_long,
             )
 
         if n_passes > 1:

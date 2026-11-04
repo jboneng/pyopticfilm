@@ -158,6 +158,23 @@ def scan_motor_table(period: int) -> tuple[int, ...]:
     return tuple(max(v, body >> shift) for v in _scan_ramp_for_shift(shift))
 
 
+def scan_step_count(period: int) -> int:
+    """``0xA5``/``0xAB`` (STEPNO) for a scan pass: table entries above the period, plus 1.
+
+    The entries of :func:`scan_motor_table` slower than the pass period are
+    the acceleration ramp. Reproduces every measured image pass: 0x23 at 600
+    dpi (period 2333), 0x0B at 1200 (4666), 0x01 at 7200 (56000) in the
+    VueScan captures; 0x04 at 2400 (9333) and 0x03 at 3600 (14000) in the
+    QuickScan captures, whose 3600 dpi table is word for word this one; 0x06 at
+    1800 (7000) in the contributor's QuickScan table. The flatbed tables,
+    with one head entry, give SilverFast's 0x02 by the same rule.
+    """
+    body = int(period)
+    table = scan_motor_table(body)
+    word = body >> scan_motor_step_shift(body)
+    return sum(1 for v in table if v > word) + 1
+
+
 def scan_motor_period(exposure: int, y_dpi: int, *, reg_1d_lines: int = 0) -> int:
     """Scan motor step period ``exposure * (0x1D[4:0] + 1) * Ydpi / MotorDPI``.
 

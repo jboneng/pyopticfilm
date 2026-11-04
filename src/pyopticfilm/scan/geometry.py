@@ -268,10 +268,20 @@ def _film_loader_geometry(
     shift_r = _scaled_ld_shift(model.ld_shift_r, asic_dpi, model)
     shift_g = _scaled_ld_shift(model.ld_shift_g, asic_dpi, model)
     shift_b = _scaled_ld_shift(model.ld_shift_b, asic_dpi, model)
+    # 7200 dpi: the CCD's even/odd columns sit StaggeredLine rows apart; the
+    # line margin already reads those rows. Same rule for the IR half.
+    stagger_y, num_staggered = _stagger_for(resolution, model)
     return ScanGeometry(
         resolution=resolution,
         pixels=pixels,
         lines=lines,
+        stagger_y=stagger_y,
+        num_staggered_lines=num_staggered,
+        stagger_phase=(
+            int(pixel_startx)
+            if stagger_y and getattr(model, "stagger_follows_sensor_column", False)
+            else 0
+        ),
         startx=first,
         starty=round(y1 * int(model.frame_slot_steps(strip=strip))),
         pixel_startx=pixel_startx,
