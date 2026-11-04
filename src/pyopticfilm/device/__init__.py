@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Device models and selection."""
 
+from pyopticfilm.device.model_135i import MODEL_135I, Model135i
 from pyopticfilm.device.model_7200 import MODEL_7200, Model7200
 from pyopticfilm.device.model_7200i import MODEL_7200_V2, MODEL_7200I, Model7200i
 from pyopticfilm.device.model_7300 import MODEL_7300, MODEL_7400_V1, Model7300
@@ -30,6 +31,7 @@ from pyopticfilm.device.sensor_lookup import (
 
 __all__ = [
     "KNOWN_MODELS",
+    "MODEL_135I",
     "MODEL_7200",
     "MODEL_7200I",
     "MODEL_7200_V2",
@@ -47,6 +49,7 @@ __all__ = [
     "AsicDriver",
     "FilmModel",
     "Gl128Model",
+    "Model135i",
     "Model7200",
     "Model7200i",
     "Model7300",

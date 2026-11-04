@@ -5,11 +5,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from pyopticfilm.asic.registers import Gl128Registers, Gl845Registers
 from pyopticfilm.device.protocol import FilmModel
 from pyopticfilm.exceptions import UsbError
 from pyopticfilm.usb.device import VID_PLUSTEK, UsbDeviceInfo
 from pyopticfilm.usb.protocol import (
+    GPIO_READ,
+    GPIO_WRITE,
     REGISTER_LINK_OK,
     REQUEST_BUFFER,
     REQUEST_REGISTER,
@@ -81,6 +85,8 @@ class FakeUsbTransport:
     bulk_in_queue: list[bytes] = field(default_factory=list)
     request_register: dict[int, int] = field(default_factory=dict)
     errors: list[BaseException] = field(default_factory=list)
+    #: Interrupt endpoint reports, oldest first; an empty queue reads as no event.
+    interrupt_queue: list[bytes] = field(default_factory=list)
     aborted: int = 0
     abort_drain_bytes: int = 42
 
@@ -155,6 +161,13 @@ class FakeUsbTransport:
         self.aborted += 1
         return int(self.abort_drain_bytes)
 
+    def read_intr(self, timeout_ms: int | None = None) -> bytes:
+        del timeout_ms
+        self._raise_queued_error()
+        if self.interrupt_queue:
+            return bytes(self.interrupt_queue.pop(0))
+        return b""
+
     def queue_error(self, exc: BaseException) -> None:
         """Raise ``exc`` on the next control or bulk transfer."""
         self.errors.append(exc)
@@ -190,6 +203,12 @@ class FakeUsbTransport:
         request = int(txn.request or 0)
         value = int(txn.value or 0)
         index = int(txn.index or 0)
+
+        if rtype == REQUEST_TYPE_IN and (value & 0xFF) == GPIO_READ:
+            return bytes(int(txn.length or 0))
+
+        if rtype == REQUEST_TYPE_OUT and (value & 0xFF) == GPIO_WRITE:
+            return b""
 
         if rtype == REQUEST_TYPE_IN and request == REQUEST_BUFFER:
             if (value & 0xFF) != VALUE_GET_REGISTER:
@@ -390,3 +409,92 @@ class MockScannerTransport(FakeUsbTransport):
             out[i + 1] = (val >> 8) & 0xFF
         self._bulk_offset += size
         return bytes(out)
+
+
+@dataclass
+class MockFilmLoaderTransport(MockScannerTransport):
+    """Fake OpticFilm 135i: holder sensor, loader moves and lit toggle-mode lines.
+
+    ``HOMESNR`` reads :attr:`at_home` (the loaded position) while ``0x32``
+    bit 1 is clear and :attr:`holder_present` while it is set, and ``0x32``
+    bit 2 reads the same. A START with the motor off is a
+    stationary strip (stays home, data ready); a reverse move (``0x02``
+    bit 2) ends at the loader home. Bulk data is flat per line type:
+    :attr:`dark_level` with the lamp off, otherwise :attr:`visible_level` on
+    visible lines and :attr:`ir_level` on IR lines (even lines while the
+    toggle bit ``0x19`` bit 3 is set). AFE strips (``DPISET = 1200``, two lines) carry
+    :attr:`black_level` on their first 31 columns.
+    """
+
+    holder_present: bool = True
+    dark_level: int = 1200
+    black_level: int = 2600
+    visible_level: tuple[int, int, int] = (40000, 41000, 42000)
+    ir_level: int = 30000
+    _reverse: bool = False
+    _stream: int = 0
+
+    def _status_byte(self) -> int:
+        v = super()._status_byte() & ~_R.STATUS_HOMESNR
+        if self._homesnr_level():
+            v |= _R.STATUS_HOMESNR
+        return v & 0xFF
+
+    def _homesnr_level(self) -> bool:
+        armed = not self.registers.get(0x32, 0) & 0x02
+        return bool(self.at_home if armed else self.holder_present)
+
+    def _before_register_read(self, addr: int) -> None:
+        if addr == 0x32:
+            value = self.registers.get(0x32, 0) & ~0x04 & 0xFF
+            self.registers[0x32] = value | (0x04 if self._homesnr_level() else 0x00)
+        super()._before_register_read(addr)
+
+    def _after_register_write(self, addr: int, value: int) -> None:
+        if addr == 0x0F and value & 0xFF == 0x01:
+            self._stream = 0
+            motor = self.registers.get(0x02, 0) & 0xFF
+            if not motor & _SE.MTRPWR:
+                self.feed_finished = True
+                self._sync_status()
+                return
+            self._reverse = bool(motor & _SE.MTRREV)
+        super()._after_register_write(addr, value)
+
+    def _tick_motion(self) -> None:
+        moving = self.motor_enabled
+        super()._tick_motion()
+        if moving and not self.motor_enabled and self._reverse:
+            self._reverse = False
+            self.at_home = True
+            self.feed_finished = False
+            self._sync_status()
+
+    def _u(self, addr: int, width: int) -> int:
+        out = 0
+        for i in range(width):
+            out = (out << 8) | (self.registers.get(addr + i, 0) & 0xFF)
+        return out
+
+    def _bulk_in_bytes(self, size: int) -> bytes:
+        span = max(1, self._u(0x85, 3) - self._u(0x82, 3))
+        dpiset = self._u(0x2C, 2)
+        speed = 1 if self.registers.get(0x18, 0) & 0x10 else 2
+        per_unit = 6 if speed == 1 else 3
+        pixels = max(1, span * max(1, dpiset) * per_unit // (7200 // speed))
+        samples = (self._stream + np.arange(0, size - size % 2, 2, dtype=np.int64)) // 2
+        self._stream += size
+        line = samples // (pixels * 3)
+        column = (samples // 3) % pixels
+        channel = samples % 3
+        if not self.registers.get(0x03, 0) & 0x10:
+            values = np.full(samples.shape, self.dark_level, dtype=np.uint16)
+        else:
+            values = np.asarray(self.visible_level, dtype=np.uint16)[channel]
+            if self.registers.get(0x19, 0) & 0x08:
+                values = np.where(line % 2 == 0, np.uint16(self.ir_level), values)
+            if dpiset == 1200 and self._u(0x25, 3) == 2:
+                values = np.where(column < 31, np.uint16(self.black_level), values)
+        out = values.astype("<u2").tobytes()
+        return out + bytes(size - len(out))
+

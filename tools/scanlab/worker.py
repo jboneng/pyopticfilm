@@ -76,8 +76,12 @@ class ScanWorker(QObject):
     failed = pyqtSignal(str)
     busy_changed = pyqtSignal(bool)
     calib_cleared = pyqtSignal(str)
-    #: target, apply_calib
-    request_prescan = pyqtSignal(object, bool)
+    #: target, apply_calib, frame (film loaders: -1 = whole strip; 0 elsewhere)
+    request_prescan = pyqtSignal(object, bool, int)
+    #: target, action ("load" | "eject") — film-loader holder moves
+    request_holder = pyqtSignal(object, str)
+    #: status-bar text after a holder move
+    holder_done = pyqtSignal(str)
     #: :class:`ScanRequest` (geometry already computed from crop_norm)
     request_scan = pyqtSignal(object)
 
@@ -175,6 +179,7 @@ class ScanWorker(QObject):
         note in __init__ for why connecting earlier silently breaks queued
         dispatch even with an explicit connection type."""
         self.request_prescan.connect(self.run_prescan, type=Qt.ConnectionType.QueuedConnection)
+        self.request_holder.connect(self.run_holder, type=Qt.ConnectionType.QueuedConnection)
         self.request_scan.connect(self.run_scan, type=Qt.ConnectionType.QueuedConnection)
         self.request_forensic_connect.connect(self._forensic_connect, type=Qt.ConnectionType.QueuedConnection)
         self.request_forensic_disconnect.connect(self._forensic_disconnect, type=Qt.ConnectionType.QueuedConnection)
@@ -325,6 +330,7 @@ class ScanWorker(QObject):
         self,
         target: LabTarget,
         apply_calib: bool = False,
+        frame: int = 0,
     ) -> None:
         self._run(
             target,
@@ -334,7 +340,31 @@ class ScanWorker(QObject):
             me=False,
             crop=None,
             apply_calib=bool(apply_calib),
+            frame=None if int(frame) < 0 else int(frame),
         )
+
+    def run_holder(self, target: LabTarget, action: str) -> None:
+        """Load or eject the film holder (film-loader models)."""
+        self.busy_changed.emit(True)
+        self._is_busy = True
+        self._forensic_apply_poll(False, 0)
+        try:
+            scanner = self.ensure_open(target)
+            self._usb_divider(f"HOLDER {action.upper()}")
+            if action == "load":
+                scanner.load_holder()
+                self.holder_done.emit("Film holder loaded")
+            elif action == "eject":
+                scanner.eject_holder()
+                self.holder_done.emit("Film holder ejected")
+            else:
+                raise ValueError(f"unknown holder action {action!r}")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            self._is_busy = False
+            self.busy_changed.emit(False)
+            self._forensic_apply_poll(*self._forensic_poll_wanted)
 
     def run_scan(self, request: ScanRequest) -> None:
         self._run(
@@ -371,6 +401,7 @@ class ScanWorker(QObject):
         n_passes: int = 1,
         align_passes: bool = True,
         scan_kw: dict[str, Any] | None = None,
+        frame: int | None = 0,
     ) -> None:
         self.busy_changed.emit(True)
         self._is_busy = True
@@ -381,7 +412,7 @@ class ScanWorker(QObject):
             scanner = self.ensure_open(target)
             apply_lab_motor_acoustic(scanner, target)
             if scan_kw is None:
-                scan_kw = lab_scan_kwargs(target.model, dpi=dpi, kind=kind, crop_norm=crop)
+                scan_kw = lab_scan_kwargs(target.model, dpi=dpi, kind=kind, crop_norm=crop, frame=frame)
             if kind == "prescan":
                 self._usb_divider(f"PRESCAN {dpi} dpi")
                 image = scanner.scan(

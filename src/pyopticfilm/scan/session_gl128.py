@@ -78,7 +78,10 @@ def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
     ``min(model max, 64000 * oversample(resolution))`` so a native 7200 dpi
     pass cannot overflow the 16-bit scan motor table. At oversample 1 it is
     also capped at ``me_long_clamp_max_native`` (64000, the same margin; a
-    model can lower it).
+    model can lower it). A model whose motor word is not ``exposure /
+    oversample`` (the 135i: ``exposure * Ydpi / 3600``) then applies
+    ``me_long_exposure_cap`` on top, so 7200 dpi caps at 32000 and the
+    table word stays 64000.
     """
     lo = int(model.me_long_clamp_min)
     hi = int(model.me_long_clamp_max)
@@ -88,6 +91,9 @@ def clamp_me_long(model: Gl128Model, resolution: int, exp_long: int) -> int:
         native_max = getattr(model, "me_long_clamp_max_native", None)
         if native_max is not None:
             hi = min(hi, int(native_max))
+    cap_fn = getattr(model, "me_long_exposure_cap", None)
+    if callable(cap_fn):
+        hi = min(hi, int(cap_fn(resolution)))
     return min(max(int(exp_long), lo), hi)
 
 
@@ -169,6 +175,9 @@ class Gl128ScanSession(ScanSession):
 
     The 8300i SE uses the same session path with leaf-specific tables.
     """
+
+    #: Measure shading again at home before the first ME long pass.
+    remeasure_shading_for_long: bool = True
 
     def __init__(
         self,
@@ -544,8 +553,23 @@ class Gl128ScanSession(ScanSession):
             exp_short = int(single_pass_exposure)
         else:
             short_manual = False
-            exp_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
-        exp_long = int(getattr(model, "exposure_long", exp_short * 3))
+        # A model whose single pass changes REG_EXPOSURE with the resolution
+        # (135i: 28000 at 7200 dpi) gives the short slot that exposure, and its
+        # long-pass constants (sized for the 14000 short) scale with it; the
+        # flatbed models keep exposure_short everywhere and a scale of 1.
+        base_short = int(getattr(model, "exposure_short", model.exposure_lperiod))
+        short_fn = getattr(model, "me_short_exposure_for", None)
+        if callable(short_fn):
+            slot_short = int(short_fn(int(geometry.resolution if geometry is not None else resolution)))
+        else:
+            slot_short = base_short
+
+        def _me_scaled(value: int) -> int:
+            return int(value) * slot_short // base_short if base_short > 0 else int(value)
+
+        if not short_manual:
+            exp_short = slot_short
+        exp_long = _me_scaled(int(getattr(model, "exposure_long", base_short * 3)))
         # Unset: the ME merge fits its noise model from each scan's pass pair.
         noise_alpha = getattr(model, "me_noise_alpha", None)
         noise_beta = getattr(model, "me_noise_beta", None)
@@ -756,7 +780,7 @@ class Gl128ScanSession(ScanSession):
             elif me_long_mode == "fixed":
                 # SilverFast-style: the model's fixed long exposure on every
                 # frame, no metering, still inside the driver's safety clamp.
-                requested = int(getattr(model, "me_fixed_long_exposure", exp_long))
+                requested = _me_scaled(int(getattr(model, "me_fixed_long_exposure", exp_long)))
                 exp_long = clamp_me_long(model, geometry.resolution, requested)
                 fixed_reason = "fixed" if exp_long == requested else "fixed (clamped)"
                 logger.info(
@@ -788,8 +812,13 @@ class Gl128ScanSession(ScanSession):
                     black_level=float(getattr(model, "me_black_level", 0.0)),
                     dense_percentile=float(getattr(model, "me_dense_percentile", 5.0)),
                     target_dense_dn=float(getattr(model, "me_target_dense_dn", 10000.0)),
-                    adaptive_min=int(
-                        getattr(model, "me_adaptive_min_exposure", exp_long)
+                    # Clamped like the max, so a scaled floor above the motor
+                    # cap (135i 7200 dpi: 84000 > 64000) meets it instead of
+                    # tripping the min > max fallback.
+                    adaptive_min=clamp_me_long(
+                        model,
+                        geometry.resolution,
+                        _me_scaled(int(getattr(model, "me_adaptive_min_exposure", exp_long))),
                     ),
                     adaptive_max=adaptive_max,
                     hardware_max=hardware_max,
@@ -830,7 +859,7 @@ class Gl128ScanSession(ScanSession):
                 exposure=exp_long,
                 long_pass=True,
                 manual=long_manual,
-                remeasure_first=True,
+                remeasure_first=self.remeasure_shading_for_long,
             )
 
         if n_passes > 1:
@@ -995,6 +1024,12 @@ class Gl128ScanSession(ScanSession):
             return full_lines * line
         return min(line, remaining)
 
+    def _bulk_index(self, geometry: ScanGeometry, *, first: bool) -> int:
+        """``wIndex`` of a chunk announce: RAM for calibration, the image stream otherwise."""
+        del first
+        r = self.se_regs
+        return r.BULK_INDEX_RAM if geometry.disable_buffer_full_move else r.BULK_INDEX_IMAGE
+
     def _acquire(
         self,
         geometry: ScanGeometry,
@@ -1006,14 +1041,8 @@ class Gl128ScanSession(ScanSession):
         del wait_feed  # GL128 feeds synchronously in _configure
         self._wait_data(cancel)
 
-        r = self.se_regs
         proto = self.asic.protocol
         total = geometry.total_bytes
-        index = (
-            r.BULK_INDEX_RAM
-            if geometry.disable_buffer_full_move
-            else r.BULK_INDEX_IMAGE
-        )
 
         chunk_max = max(1, int(getattr(self.model, "image_read_chunk_bytes", IMAGE_CHUNK_BYTES)))
         read_exact = (
@@ -1036,7 +1065,7 @@ class Gl128ScanSession(ScanSession):
                 remaining = total - got
                 want = self._chunk_bytes(geometry, remaining, chunk_max)
                 p0 = time.perf_counter()
-                proto.bulk_read_begin(want, index=index)
+                proto.bulk_read_begin(want, index=self._bulk_index(geometry, first=got == 0))
                 self._bulk_stream_active = True
                 try:
                     chunk = read_exact(want)

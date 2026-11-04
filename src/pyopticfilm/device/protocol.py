@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from pyopticfilm.asic.status import ScannerStatus
@@ -210,6 +210,18 @@ class Gl128Model(FilmModel, Protocol):
     def lincnt_for_travel_mm(self, travel_mm: float, resolution: int) -> int: ...
 
     def ladder_lincnt_for(self, resolution: int) -> int: ...
+
+    #: Boot hooks (``Gl128.asic_boot`` / ``Gl128.init``). The shared defaults on
+    #: ``Gl128Common`` replay the 8200i SE / 8100 V2 / 8300i SE cold boot.
+    def boot_blobs(self) -> tuple[tuple[int, bytes], ...]: ...
+
+    def boot_writes_layout_and_gpo(self) -> bool: ...
+
+    def boot_vendor_steps(self) -> tuple[tuple[Any, ...], ...]: ...
+
+    def boot_uploads_tables(self) -> bool: ...
+
+    def firmware_register_overrides(self, firmware: str | None) -> dict[int, int]: ...
 
 
 @runtime_checkable
