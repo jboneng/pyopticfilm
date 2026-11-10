@@ -335,6 +335,10 @@ def _geometry_from_mm(
         alignment = int(getattr(model, "pixel_alignment", 16))
         if alignment > 1 and asic_dpi > 1200:
             pixels = (pixels // alignment) * alignment
+        if span_align <= 1:
+            # An odd line width shears ~1 px/row into a diamond, as on the SE below
+            # (7600i v2 full frame at 900 dpi: 1287 px).
+            pixels -= pixels % 2
         optical_pixels = pixels * optical_res // asic_dpi
         # SE: keep native span coherent with USB line length. Session 13
         # spans are always % 4 == 0; at factor 4 (1800 dpi) that alone still
