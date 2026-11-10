@@ -577,6 +577,31 @@ def test_gl845_init_stops_scan_left_running_by_dead_session():
         scanner.close()
 
 
+def test_gl845_init_clears_scan_left_by_a_finished_scan():
+    from pyopticfilm.device.select import MODEL_7600I_V2
+
+    transport = MockScannerTransport()
+    scanner = Scanner.open_fake(MODEL_7600I_V2, transport=transport)
+    try:
+        regs = Gl845Registers()
+        # A scan or home seek that ran to its end: the motor stopped by itself and
+        # SCAN stayed set, with the buffer empty.
+        transport.registers[0x01] = 0x22 | regs.SCAN
+        transport._sync_status()
+        aborts: list[int] = []
+        scanner.asic.protocol.abort_bulk_stream = lambda: aborts.append(1) or 0
+        resets: list[int] = []
+        real_reset = scanner.asic.soft_reset
+        scanner.asic.soft_reset = lambda: resets.append(1) or real_reset()
+
+        scanner.asic.init()
+
+        assert aborts == [] and resets == []
+        assert not transport.registers[0x01] & regs.SCAN
+    finally:
+        scanner.close()
+
+
 def test_gl845_init_leaves_idle_scanner_alone():
     from pyopticfilm.device.select import MODEL_7600I_V2
 

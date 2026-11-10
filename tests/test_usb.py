@@ -8,6 +8,7 @@ from scanners.fake_usb import FakeUsbTransport as FakeTransport
 
 from pyopticfilm.exceptions import UsbError
 from pyopticfilm.usb.device import (
+    PID_OPTICFILM_7600I,
     PID_OPTICFILM_8200I,
     PID_OPTICFILM_8200I_SE,
     VID_PLUSTEK,
@@ -120,6 +121,35 @@ def test_abort_bulk_stream_calls_transport():
     transport = FakeTransport()
     assert GenesysUsbProtocol(transport).abort_bulk_stream() == 42
     assert transport.aborted == 1
+
+
+class _ResettableDevice:
+    def __init__(self) -> None:
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+@pytest.mark.parametrize(("platform", "resets"), [("darwin", 0), ("linux", 1), ("win32", 1)])
+def test_close_after_aborted_bulk_resets_except_on_macos(monkeypatch, platform, resets):
+    import sys
+
+    import usb.util
+
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(usb.util, "release_interface", lambda *_a, **_k: None)
+    monkeypatch.setattr(usb.util, "dispose_resources", lambda *_a, **_k: None)
+    handle = UsbDeviceHandle(UsbDeviceInfo(vendor_id=VID_PLUSTEK, product_id=PID_OPTICFILM_7600I))
+    dev = _ResettableDevice()
+    handle._dev = dev
+    handle._claimed = True
+    handle._needs_usb_reset = True
+
+    handle.close()
+
+    assert dev.resets == resets
+    assert not handle.is_open
 
 
 def test_abort_bulk_stream_without_transport_method():

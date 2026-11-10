@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
@@ -436,13 +437,18 @@ class UsbDeviceHandle:
 
             # leave EP0 wedged for the next open unless we reset the device.
             if self._needs_usb_reset:
-                try:
-                    # Reset while still claimed — more reliable on WinUSB than
-                    # after release_interface.
-                    self._dev.reset()
-                    logger.info("USB device reset after aborted bulk stream")
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("USB reset after aborted bulk failed: %s", exc)
+                if sys.platform == "darwin":
+                    # libusb on macOS can only re-enumerate on reset. This process's cached
+                    # device then has no interface, so every later open fails ENODEV.
+                    logger.info("USB reset after aborted bulk stream skipped on macOS")
+                else:
+                    try:
+                        # Reset while still claimed — more reliable on WinUSB than
+                        # after release_interface.
+                        self._dev.reset()
+                        logger.info("USB device reset after aborted bulk stream")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("USB reset after aborted bulk failed: %s", exc)
                 self._needs_usb_reset = False
             if self._claimed:
                 try:

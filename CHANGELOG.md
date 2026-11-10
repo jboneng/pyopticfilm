@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **GL845 on macOS: every scan after the first failed with `[Errno 19] No such device` until a power cycle** (7600i v2, seen in NegPy, which reopens the scanner for each scan). A scan or home seek that runs to its end leaves SCAN set, and the next warm `init()` took it for a scan left running by a dead process. It drained the bulk stream and flagged a USB reset; that scan then timed out (`[Errno 60]`). The reset on close re-enumerated the scanner, which libusb on macOS cannot open again in the same process. `init()` now only clears SCAN when the buffer is empty and the motor is idle, and `close()` skips the USB reset on macOS (`clear_halt` still runs). `scripts/repro_reopen_scans.py` scans several times in one process, reopening each time.
+  - **Hardware.** Not yet run on hardware. The failure and fix follow from a NegPy log on a 7600i v2 (macOS, libusb 1.0.30) and libusb's macOS reset path; mock tests cover both changes.
+
 ## [1.3.9] - 2026-11-03
 
 ### Added
