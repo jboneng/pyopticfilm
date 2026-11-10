@@ -135,6 +135,17 @@ def test_geometry_for_each_canonical_model():
         assert g.register_dpiset == model.register_dpiset_by_dpi[dpi]
 
 
+def test_full_frame_line_width_is_even_at_every_resolution():
+    # An odd line width shears the image ~1 px/row into a diamond (7600i v2 at 900 dpi).
+    for model in KNOWN_MODELS:
+        for dpi in model.resolutions_dpi:
+            try:
+                g = compute_geometry(dpi, model=model)
+            except ValueError:
+                continue  # no sensor map (the 7600i v1 replays captures there)
+            assert g.pixels % 2 == 0, f"{model.model} at {dpi} dpi: {g.pixels} px"
+
+
 def test_infrared_caps():
     assert MODEL_8200I.supports_infrared is True
     assert MODEL_7600I_V2.supports_infrared is True

@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **GL845 on macOS: every scan after the first failed with `[Errno 19] No such device` until a power cycle** (7600i v2, seen in NegPy, which reopens the scanner for each scan). A scan or home seek that runs to its end leaves SCAN set, and the next warm `init()` took it for a scan left running by a dead process. It drained the bulk stream and flagged a USB reset; that scan then timed out (`[Errno 60]`). The reset on close re-enumerated the scanner, which libusb on macOS cannot open again in the same process. `init()` now only clears SCAN when the buffer is empty and the motor is idle, and `close()` skips the USB reset on macOS (`clear_halt` still runs). `scripts/repro_reopen_scans.py` scans several times in one process, reopening each time.
+  - **Hardware.** On a 7600i v2 (macOS, libusb 1.0.30), `scripts/repro_reopen_scans.py --infrared --scans 3` (900 dpi colour + IR) passed all three scans. After each scan reg 0x01 read 0x03 (SCAN set) with the buffer empty and the motor idle; before scans 2 and 3 `init()` only cleared SCAN and booted warm. No bulk stream was aborted, so the macOS reset skip did not run; a mock test covers it.
+- **GL845 900 dpi full-frame scans were sheared about 1 px per row into a diagonal X** (7600i v2; the 8200i shares the geometry). The full frame was 1287 px wide at 900 dpi, and an odd line width shears the image, as it did on the 8200i SE. The width is now made even: 1286 px, END 10544. 1800, 3600 and 7200 dpi are multiples of 16 already and are unchanged. The same rule makes the gated GL843/GL842 models' 900 dpi frame 1274 px instead of 1275; GL128 models and the 7600i v1 are unchanged.
+  - **Hardware.** On a 7600i v2 at 900 dpi, each row's content lined up with the next row at ±1 px (the left of the frame +1, the right −1), and the holder edges crossed the frame as an X. The X showed after a cold boot, after a warm boot, and with auto exposure on or off. At 1286 px, rows line up at 0 px with auto exposure and with LPERIOD 14000, and the frame matches a 1800 dpi scan of the same film.
+
 ## [1.3.9] - 2026-11-03
 
 ### Added

@@ -12,7 +12,7 @@ from pyopticfilm.scan.geometry import compute_calib_geometry, compute_geometry
 @pytest.mark.parametrize(
     ("dpi", "pixels", "lines", "lincnt"),
     [
-        (900, 1287, 885, 891),
+        (900, 1286, 885, 891),
         (1800, 2560, 1771, 1783),
         (3600, 5136, 3543, 3567),
         (7200, 10288, 7086, 7138),

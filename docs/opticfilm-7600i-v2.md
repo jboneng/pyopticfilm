@@ -139,6 +139,13 @@ white → re-home.
   until a power cycle. `Gl845.init()` now checks a warm ASIC for this first:
   it clears SCAN, drains the bulk stream and soft-resets. Cold boots skip the
   check, which keeps the 8200i golden trace intact.
+- **A scan or home seek that runs to its end** also leaves SCAN set: the motor
+  stops by itself, so `stop_motor` has nothing to stop. With the buffer empty and
+  the motor idle, `init()` only clears SCAN. It does not drain or soft-reset.
+- **macOS:** `UsbDeviceHandle.close()` skips the USB reset that follows an
+  aborted bulk stream. libusb on macOS can only re-enumerate the device, and the
+  same process then gets `[Errno 19] No such device` on every reopen.
+  `scripts/repro_reopen_scans.py` reopens the scanner for each scan, as NegPy does.
 - **Recovery** from `is_motor_enabled=True` / not at home: `scanner.warmup()`
   (init + home), or
   `tools/bringup_gl845_8200i.py --model 7600i-v2 --allow-unvalidated --steps init,home`.
