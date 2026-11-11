@@ -319,10 +319,18 @@ class Gl845:
         A host that dies mid-scan leaves SCAN set and image data in the buffer.
         Sending motor commands into that state hung a 7600i v2 until power-cycled,
         so clear SCAN, drain the bulk stream, and let ``init`` soft-reset.
+
+        A scan or home seek that runs to its end also leaves SCAN set: the motor
+        stops by itself, so ``stop_motor`` finds it idle and skips the write, as
+        SANE does. With the buffer empty and the motor idle, only clear SCAN.
         """
         reg01 = self.protocol.read_register(self.registers.REG_0x01)
         status = self.read_status()
-        if not (reg01 & self.registers.SCAN) and status.is_buffer_empty and not status.is_motor_enabled:
+        if status.is_buffer_empty and not status.is_motor_enabled:
+            if reg01 & self.registers.SCAN:
+                logger.info("Clearing SCAN left set by a finished scan (reg01=0x%02x)", reg01)
+                self.protocol.write_register(self.registers.REG_0x01, reg01 & ~self.registers.SCAN)
+                self._reg_cache[0x01] = reg01 & ~self.registers.SCAN
             return False
         logger.warning(
             "Stopping a scan left running by an earlier session (reg01=0x%02x status=0x%02x)",
