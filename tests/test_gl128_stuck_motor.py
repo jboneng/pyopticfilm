@@ -94,14 +94,49 @@ def test_reset_only_warns_when_agohome_is_still_armed(caplog):
     assert any("scan engine not idle" in r.getMessage() for r in caplog.records)
 
 
-def test_reset_only_warns_when_carriage_is_not_at_home(caplog):
+def test_reset_raises_when_motor_stuck_away_from_home():
+    """#165, 8100 V2: the same latched MOTORENB with the carriage off home (0xc1)."""
     usb = StuckMock()
     asic = _asic(usb)
     usb.stuck = True
     usb.away = True
-    with caplog.at_level(logging.WARNING, logger="pyopticfilm"):
+    with pytest.raises(ScannerStuckError, match=r"status 0xc1.*away from home"):
         asic._reset_stationary_scan_engine(where="AFE strip")
-    assert any("scan engine not idle" in r.getMessage() for r in caplog.records)
+
+
+def _register_writes(asic: Gl128, monkeypatch) -> list[tuple[int, int]]:
+    writes: list[tuple[int, int]] = []
+    original = asic.protocol.write_register
+
+    def record(address: int, value: int, *a, **k):
+        writes.append((int(address), int(value) & 0xFF))
+        return original(address, value, *a, **k)
+
+    monkeypatch.setattr(asic.protocol, "write_register", record)
+    return writes
+
+
+def test_reset_never_writes_start(monkeypatch):
+    """Any 0x0F write launches an operation; with 0x02 armed it drives the motor (#165)."""
+    asic = _asic(StuckMock())
+    writes = _register_writes(asic, monkeypatch)
+    asic._reset_stationary_scan_engine(where="AFE strip")
+    assert writes, "the reset should write 0x02 and 0x01"
+    assert all(addr != asic.registers.REG_START for addr, _ in writes)
+
+
+def test_reset_disarms_the_motor_before_clearing_scan(monkeypatch):
+    """After a re-init 0x02 holds the boot value 0x78; it must be cleared first."""
+    usb = StuckMock()
+    asic = _asic(usb)
+    asic.image_pass_since_init = True
+    asic.reinit_before_stationary_strips()
+    assert usb.registers[0x02] & (_R.MTRPWR | _R.AGOHOME)  # armed by the boot table
+    writes = _register_writes(asic, monkeypatch)
+    asic._reset_stationary_scan_engine(where="AFE strip")
+    addrs = [addr for addr, _ in writes]
+    assert addrs[:2] == [0x02, 0x01]
+    assert writes[0] == (0x02, 0x00)
 
 
 def test_scan_stops_before_any_feed_when_stuck(tmp_path: Path, monkeypatch):

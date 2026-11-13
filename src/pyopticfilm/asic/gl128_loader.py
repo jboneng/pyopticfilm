@@ -169,9 +169,6 @@ _UPLOAD_SETTLE_S = 0.1
 class Gl128Loader(Gl128):
     """GL128 film-loader driver (OpticFilm 135i)."""
 
-    #: No capture writes ``0x0F = 0``, in any session on this model.
-    _stationary_reset_clears_start = False
-
     def __init__(self, protocol, model: Gl128Model) -> None:  # type: ignore[no-untyped-def]
         super().__init__(protocol, model)
         #: Toggle mode keeps the visible and IR halves of every line apart, so
