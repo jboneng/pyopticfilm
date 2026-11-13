@@ -421,26 +421,30 @@ class Gl128:
         kind = "motorized" if motorized else "stationary"
         raise ScanError(f"{where}: no {kind} data ready within {timeout_s:.0f}s (last status=0x{last:02x})")
 
-    #: Write ``START = 0`` and clear the counters in
-    #: :meth:`_reset_stationary_scan_engine`.
-    _stationary_reset_clears_start: bool = True
-
     def _reset_stationary_scan_engine(self, *, where: str) -> None:
         """Abort a leftover image SCAN so stationary geometry writes stick.
 
         Park leaves hardware ``0x02`` armed (``MTRPWR|AGOHOME``) and ``0x01``
-        at ``0x22``. The next AFE START with AGOHOME still set hangs as
-        ``0xcd`` (HOME|BUFEMPTY|LAMP|MOTORENB). Confirm SCAN/motor from
-        hardware — the cache drops AGOHOME after park without writing it.
+        at ``0x22``; :meth:`reinit_before_stationary_strips` leaves ``0x02``
+        at the boot value ``0x78`` (``MTRPWR|AGOHOME|FASTFED``). The next AFE
+        START with AGOHOME still set hangs as ``0xcd``
+        (HOME|BUFEMPTY|LAMP|MOTORENB). Confirm SCAN/motor from hardware — the
+        cache drops AGOHOME after park without writing it.
+
+        Disarm ``0x02`` before anything else, and never write ``0x0F`` here.
+        Any ``0x0F`` write launches an operation (``0x00`` only means without
+        the scan motor), and clearing SCAN with AGOHOME armed starts a park.
+        This reset used to write ``0x0F = 0`` first, with ``0x02`` still armed:
+        the motor came on (status ``d9``/``f9``) and the following
+        ``0x02 = 0`` cut its power mid-move. Usually that ended at home; on an
+        8100 V2 (#165) the carriage had left the home sensor and
+        ``MOTORENB`` stayed latched (``0xc1``) until a power-cycle. No vendor
+        capture writes ``0x0F = 0``; the strip START writes CLRCNT itself.
         """
         r = self.registers
         motor_mask = r.MTRPWR | r.AGOHOME | r.FASTFED
-        if self._stationary_reset_clears_start:
-            self._write(r.REG_START, 0x00)
-        self._write(r.REG_0x01, _CANCEL_REG01)
         self._write(r.REG_0x02, 0x00)
-        if self._stationary_reset_clears_start:
-            self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
+        self._write(r.REG_0x01, _CANCEL_REG01)
         deadline = time.monotonic() + _STATIONARY_IDLE_WAIT_S
         last01 = last02 = last_st = -1
         status = None
@@ -461,27 +465,26 @@ class Gl128:
                         (last01 | r.SHDAREA) & ~r.SCAN & ~r.DVDSET,
                     )
                 return
-            if last01 & r.SCAN:
-                self._write(r.REG_0x01, (last01 | r.SHDAREA) & ~r.SCAN & ~r.DVDSET)
+            # Disarm first: clearing SCAN with AGOHOME armed starts a park.
             if last02 & motor_mask:
                 self._write(r.REG_0x02, 0x00)
+            if last01 & r.SCAN:
+                self._write(r.REG_0x01, (last01 | r.SHDAREA) & ~r.SCAN & ~r.DVDSET)
             time.sleep(0.02)
-        # Motor power off and the carriage at home, yet MOTORENB stays set for
-        # the whole wait (a healthy settle takes ~20 ms). Seen on an 8200i SE
-        # after a colour pass: every later strip START hangs and only a
-        # power-cycle clears it. Retrying, feeding or waiting for a park cannot
-        # help, so stop here instead of driving the motor.
-        if (
-            status is not None
-            and (last02 & motor_mask) == 0
-            and status.is_at_home
-            and status.is_motor_enabled
-        ):
+        # Motor power off, yet MOTORENB stays set for the whole wait (a healthy
+        # settle takes ~20 ms). Only a power-cycle clears it, with the carriage
+        # at home (8200i SE after a colour pass, 0xc9) or away from it (8100
+        # V2, #165, 0xc1). Retrying, feeding or parking cannot help, and a park
+        # only grinds the motor, so stop here.
+        if status is not None and (last02 & motor_mask) == 0 and status.is_motor_enabled:
+            where_head = (
+                "at home" if status.is_at_home else "away from home; it returns on power-up"
+            )
             raise ScannerStuckError(
                 f"GL128 {where}: the scanner reports its motor running (status "
                 f"0x{last_st:02x}) with motor power off, and it did not clear in "
-                f"{_STATIONARY_IDLE_WAIT_S:.0f} s. Switch the scanner off and on, "
-                "then retry the scan."
+                f"{_STATIONARY_IDLE_WAIT_S:.0f} s (carriage {where_head}). Switch "
+                "the scanner off and on, then retry the scan."
             )
         logger.warning(
             "GL128 %s: scan engine not idle (0x01=%#04x 0x02=%#04x status=0x%02x)",
