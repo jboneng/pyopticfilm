@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
     `Scanner.open_fake(MODEL_135I)` runs all of it against the new `MockFilmLoaderTransport`, and Scan Lab's MOCK mode has Frame, Whole strip, Load holder and Eject holder controls. On real USB, Scan Lab's **Override safety HW gate** also arms the 135i loader motor for bring-up. Setup goldens: `tests/traces/python/135i/`.
 
-  The model stays `scan_ready=False`: on real hardware `scan()`, `calibrate()`, `home()`, `park()`, `load_holder()` and `eject_holder()` stay locked unless the motor is armed for bring-up (`Scanner.arm_bringup_motor()`). One 135i hardware run so far, with an earlier commit: load, eject and one 600 dpi IR frame. Details: `docs/gl128-model-comparison.md` §11.
+  **Status: experimental.** The model stays `scan_ready=False`: on real hardware `scan()`, `calibrate()`, `home()`, `park()`, `load_holder()` and `eject_holder()` stay locked unless the motor is armed for bring-up (`Scanner.arm_bringup_motor()`). In a first hardware session on an earlier commit, a 135i loaded and ejected a holder and scanned one 600 dpi RGB+IR frame. In a second session, load and eject worked but every run stopped in calibration. The fixes for those failures, the whole strip, 1200–7200 dpi, multi-exposure and Multi-Pass have not yet run on a 135i. The README's "OpticFilm 135i status" section lists what is tested. Details: `docs/gl128-model-comparison.md` §11.
 
 ### Fixed
 
