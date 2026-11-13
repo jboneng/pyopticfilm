@@ -19,6 +19,7 @@ Support is one of:
 | OpticFilm 8300i SE | `07b3:181f` | GL128 | **Hardware tested** (IR capable) |
 | OpticFilm 7600i v1 | `07b3:0c3b` | GL843 | **Hardware tested** ([notes](docs/opticfilm-7600i-v1.md)) |
 | OpticFilm 7600i v2 | `07b3:0c3b` | GL845 | **Hardware tested** (IR capable; [notes](docs/opticfilm-7600i-v2.md)) |
+| OpticFilm 135i | `07b3:1436` | GL128 | Experimental (film loader, RGB+IR in one pass; scan locked, [status](#opticfilm-135i-status), [notes](docs/gl128-model-comparison.md#11-opticfilm-135i-07b31436--capture-synthesis)) |
 | OpticFilm 8200i | `07b3:130d` | GL845 | Protocol validated (setup traces; scan locked) |
 | OpticFilm 8100 | `07b3:130c` | GL845 | Experimental |
 | OpticFilm 7500i | `07b3:0c13` | GL843 | Experimental |
@@ -356,6 +357,21 @@ Code for additional OpticFilm variants is included so enumeration, model selecti
 - `Scanner._ensure_scan_ready()` blocks scan, calibrate, home, and park on non-scan-ready models
 - GL128 motor moves stay disabled unless the model is scan-ready
 - Protocol-validated (currently OpticFilm 8200i setup traces) is not hardware support
+
+### OpticFilm 135i status
+
+The 135i is **experimental** and `scan_ready=False`. On real hardware, `scan()`, `calibrate()`, `home()`, `park()`, `load_holder()` and `eject_holder()` raise unless the loader motor is armed for bring-up with `Scanner.arm_bringup_motor()` (Scan Lab: **Override safety HW gate**). `Scanner.open_fake(MODEL_135I)` runs the whole loader and scan path against a mock.
+
+| Path | Hardware status |
+|------|-----------------|
+| Load and eject the holder; refusing to scan an unloaded holder | Worked in both hardware sessions |
+| One 600 dpi RGB+IR frame (calibration, feed, image pass, park) | Worked once, in the first session |
+| Calibration in the second session | Failed: the white strip read too dark or clipped (`0x32` lamp bits), and the first AFE strip sometimes returned no data. Changes aimed at both are in (cause of the second unproven), not yet run on a 135i |
+| Whole strip, Multi-Pass and multi-exposure at 600 dpi | Tried in the second session, stopped in calibration; no image yet |
+| 1200–3600 dpi | Not yet run on a 135i |
+| 7200 dpi (calibration, unstagger, motor step shift) | Not yet run on a 135i |
+
+If you own a 135i and can run the test plan, see the open "OpticFilm 135i hardware validation" issue.
 
 If you have a non-scan-ready OpticFilm and want to help validate scanning, open an issue with your exact USB IDs (`bcdDevice` matters for some models) and we can work through capture-based bring-up. How traces are recorded and compared is in [docs/scanner-validation.md](docs/scanner-validation.md).
 

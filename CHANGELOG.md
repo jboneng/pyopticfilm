@@ -6,12 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **OpticFilm 135i** (`07b3:1436`, GL128) model, `Model135i` / `MODEL_135I`, not scan-ready. The 135i is a motorised film loader that scans RGB and IR in one pass. The leaf carries what its VueScan captures and the Plustek model data for this scanner show:
+  - **Boot:** its own boot register map, clocks and GPIO requests. `init()` replays the captured open sequence.
+  - **Motor:** tables generated from the model's motor curve, which reproduce every captured table word for word.
+  - **Per-resolution settings:** the two sensor timing sets, the RGB+IR (toggle) and colour scan overlays, and the window and line-period rules.
+  - **Loader:** the holder sensor, load, eject and frame-feed constants.
+  - **Session:** `Gl128Loader` and `Gl128LoaderScanSession` drive the loader and RGB+IR toggle mode, replaying the VueScan programs:
+    - `Scanner.holder_present()`, `load_holder()` and `eject_holder()` (in the vendor's order, seeking back first when the holder is off the loader home), and `home()`, which seeks a holder the driver moved inward straight back to the loader sensor. `scan()`, `calibrate()` and `warmup()` never home this model on their own: with the holder off the loader home a scan or calibration raises, and a holder must have been loaded by `load_holder()` (`Scanner.holder_loaded()`), since the sensor also reads "at home" for an empty slot or a holder at the entry;
+    - `scan(frame=n)` feeds to 35 mm frame `n` of the loaded holder; `area` is normalised over that frame's slot;
+    - `scan(frame=None)` scans the whole strip in one pass, as VueScan's panorama preview does (feed 6414, 66600 steps);
+    - every pass scans a visible and an IR line per output line, so `scan(infrared=True)` returns RGB and IR from one pass, registered to the same line;
+    - calibration at the loader home fills a visible and an IR shading bank, and `calibrate(mode="infrared")` runs the same calibration as `"color"`;
+    - multi-exposure and Multi-Pass work as on the flatbed GL128 models, 7200 dpi included, one feed per pass; the long exposure is filled in, since there is no 135i multi-exposure capture;
+    - `Scanner.watch_loader(stop=...)` polls the holder sensor and eject button like VueScan, loading on insert and ejecting on the button.
+
+    `Scanner.open_fake(MODEL_135I)` runs all of it against the new `MockFilmLoaderTransport`, and Scan Lab's MOCK mode has Frame, Whole strip, Load holder and Eject holder controls. On real USB, Scan Lab's **Override safety HW gate** also arms the 135i loader motor for bring-up. Setup goldens: `tests/traces/python/135i/`.
+
+  **Status: experimental.** The model stays `scan_ready=False`: on real hardware `scan()`, `calibrate()`, `home()`, `park()`, `load_holder()` and `eject_holder()` stay locked unless the motor is armed for bring-up (`Scanner.arm_bringup_motor()`). In a first hardware session on an earlier commit, a 135i loaded and ejected a holder and scanned one 600 dpi RGB+IR frame. In a second session, load and eject worked but every run stopped in calibration. The fixes for those failures, the whole strip, 1200–7200 dpi, multi-exposure and Multi-Pass have not yet run on a 135i. The README's "OpticFilm 135i status" section lists what is tested. Details: `docs/gl128-model-comparison.md` §11.
+
 ### Fixed
 
+- **OpticFilm 135i multi-exposure and Multi-Pass at 7200 dpi.** The short pass (and every Multi-Pass repeat) ran at 14000, half the 28000 a single 7200 dpi pass uses; it now uses the single pass's exposure (`me_short_exposure_for`). The 135i's motor word is `exposure × Ydpi / 3600`, so at 7200 dpi the 16-bit table held a long pass of at most 32000, barely above the short. A pass whose word exceeds 16 bits now sets the motor step-time shift (`0x1C[2:0] = 1`), which halves every table word, so the long pass can reach 64000 at 7200 dpi. Every captured pass needs no shift and is unchanged; loader moves and frame feeds always run with `0x1C = 0`. The shift is not yet tested on 135i hardware.
+- **OpticFilm 135i: a load or home could feed a holder past the end of the loader travel.** Both started with the vendor's inch inward, even from deep in a strip (a crash or unplug mid-scan, or a lost park), which could take the holder up to 7200 steps past the longest captured travel. `load_holder()` now refuses a holder the armed sensor reads inward of the home, and `home()` seeks back without the inch when the driver moved the holder inward, and raises when the position is unknown (eject seeks back instead).
+- **OpticFilm 135i 3600 dpi image pass and odd resolutions used guessed motor settings.** STEPNO (`0xA5`/`0xAB`, the scan motor's acceleration steps) is now computed from each pass's motor table; the rule reproduces every captured pass, and at 3600 dpi it gives QuickScan's `0x03` where the old table had `0x01` (720, 900 and 1800 change too, and the long pass gets its own). `0x2B` at 3600 dpi is QuickScan's `0x1B`, at 1800 the contributor's `0x10`.
+- **OpticFilm 135i 3600 dpi calibration strips used the 1200 dpi timing.** The dark and white strips now write `0x1D = 1` and QuickScan's 3600 dpi clocks, and the AFE strips its doubled line period, as in QuickScan's 2400 and 3600 dpi runs.
+- **OpticFilm 135i 7200 dpi scans had no odd/even unstagger.** The INI's `StaggeredLine = 4` puts even and odd sensor columns 4 rows apart; both the visible and the IR half are now unstaggered `(4, 0)`, following the sensor column. The sign is not yet checked on a 135i scan.
+- **OpticFilm 135i multi-exposure re-ran the dark and white strips before the long pass.** The loader's strips ignore the pass exposure, so they came out the same; the long pass now reuses the calibration.
+- **OpticFilm 135i whole-strip scans at 7200 dpi failed after the holder moved.** The 8.3 GB raw buffer was allocated after the feed and START. A pass over 3 GiB is now refused before any move.
 - **GL845 on macOS: every scan after the first failed with `[Errno 19] No such device` until a power cycle** (7600i v2, seen in NegPy, which reopens the scanner for each scan). A scan or home seek that runs to its end leaves SCAN set, and the next warm `init()` took it for a scan left running by a dead process. It drained the bulk stream and flagged a USB reset; that scan then timed out (`[Errno 60]`). The reset on close re-enumerated the scanner, which libusb on macOS cannot open again in the same process. `init()` now only clears SCAN when the buffer is empty and the motor is idle, and `close()` skips the USB reset on macOS (`clear_halt` still runs). `scripts/repro_reopen_scans.py` scans several times in one process, reopening each time.
   - **Hardware.** On a 7600i v2 (macOS, libusb 1.0.30), `scripts/repro_reopen_scans.py --infrared --scans 3` (900 dpi colour + IR) passed all three scans. After each scan reg 0x01 read 0x03 (SCAN set) with the buffer empty and the motor idle; before scans 2 and 3 `init()` only cleared SCAN and booted warm. No bulk stream was aborted, so the macOS reset skip did not run; a mock test covers it.
 - **GL845 900 dpi full-frame scans were sheared about 1 px per row into a diagonal X** (7600i v2; the 8200i shares the geometry). The full frame was 1287 px wide at 900 dpi, and an odd line width shears the image, as it did on the 8200i SE. The width is now made even: 1286 px, END 10544. 1800, 3600 and 7200 dpi are multiples of 16 already and are unchanged. The same rule makes the gated GL843/GL842 models' 900 dpi frame 1274 px instead of 1275; GL128 models and the 7600i v1 are unchanged.
   - **Hardware.** On a 7600i v2 at 900 dpi, each row's content lined up with the next row at ±1 px (the left of the frame +1, the right −1), and the holder edges crossed the frame as an X. The X showed after a cold boot, after a warm boot, and with auto exposure on or off. At 1286 px, rows line up at 0 px with auto exposure and with LPERIOD 14000, and the frame matches a 1800 dpi scan of the same film.
+
+### Notes for integrators
+
+- GL128 family for the 135i:
+  - Six fields move from `Gl128Common` to the per-leaf divergent catalog, each declared on every leaf: `resolutions_dpi`, `register_dpiset_by_dpi`, `lperiod_by_dpi`, `feed_steps_per_inch`, `init_regs`, `memory_layout_regs`. The 8200i SE, 8100 V2 and 8300i SE keep their values.
+  - `Gl128.asic_boot()` / `init()` read new `Gl128Common` hooks: `boot_blobs()`, `boot_writes_layout_and_gpo()`, `boot_vendor_steps()`, `boot_uploads_tables()`.
+  - `gl128_firmware_variant()` now delegates to `firmware_register_overrides()`.
+  - New `GenesysUsbProtocol.write_vendor()` / `read_vendor()`.
+  - `MockScannerTransport` accepts GPIO (`0x8A`/`0x8B`) requests; `FakeUsbTransport` has an `interrupt_queue` read by `read_intr()`.
+  - New class flag `Gl128Common.film_loader` (`False`; `True` on `Model135i`) selects `pyopticfilm.asic.gl128_loader.Gl128Loader` in `create_asic`, `pyopticfilm.scan.session_gl128_loader.Gl128LoaderScanSession` in `create_session`, and the frame-slot geometry in `compute_geometry`.
+  - `Gl128ScanSession._bulk_index(geometry, *, first)` picks each image chunk's `wIndex`; the flatbed models are unchanged.
+  - `Scanner.scan(..., frame=0)`: any `frame` other than 0 raises `ValueError` on models without a film loader.
+  - `clamp_me_long()` uses a model's `me_long_exposure_cap(resolution)` when it has one (135i); the flatbed models keep `64000 · oversample`.
 
 ## [1.3.9] - 2026-11-03
 

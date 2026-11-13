@@ -190,6 +190,28 @@ class GenesysUsbProtocol:
             payload,
         )
 
+    def write_vendor(self, value: int, index: int, data: bytes | bytearray) -> None:
+        """Vendor control OUT with ``wValue``/``wIndex`` and ``data``.
+
+        ``bRequest`` follows the Windows ``usbscan.sys`` rule the vendor
+        drivers rely on: ``REQUEST_BUFFER`` (0x04) for transfers longer than
+        one byte, ``REQUEST_REGISTER`` (0x0C) for a single byte.
+        """
+        payload = bytes(data)
+        request = REQUEST_BUFFER if len(payload) > 1 else REQUEST_REGISTER
+        self._transport.control_msg(
+            REQUEST_TYPE_OUT, request, int(value) & 0xFFFF, int(index) & 0xFFFF, payload
+        )
+
+    def read_vendor(self, value: int, index: int, length: int) -> bytes:
+        """Vendor control IN of ``length`` bytes (same ``bRequest`` rule as above)."""
+        request = REQUEST_BUFFER if int(length) > 1 else REQUEST_REGISTER
+        return bytes(
+            self._transport.control_msg(
+                REQUEST_TYPE_IN, request, int(value) & 0xFFFF, int(index) & 0xFFFF, int(length)
+            )
+        )
+
     def read_usb_speed_byte(self) -> int:
         """Cold-init probe used by SANE ``sanei_genesys_asic_init`` (REQUEST_REGISTER)."""
         return self.read_request_register(0x00)
