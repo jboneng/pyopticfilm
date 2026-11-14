@@ -636,6 +636,8 @@ class Gl128ScanSession(ScanSession):
                         calib = self.calibrator.ensure_colour_asic_shading(geometry)
                 else:
                     self.calibrator.measure_ir_host_flatten(geometry)
+            elif method == "infrared":
+                self._drop_ir_host_flatten()
 
             logger.info(
                 "GL128 pass %s dpi=%d area=%s feed2=%d lincnt=%d str=%d end=%d %dx%d",
@@ -760,7 +762,7 @@ class Gl128ScanSession(ScanSession):
                 long_pass=False,
                 manual=short_manual,
             )
-            ir_plane = self._infrared_plane(ir_raw)
+            ir_plane = self._infrared_plane(ir_raw, host_downsample=geometry.host_downsample)
 
         assert rgb_short is not None
 
@@ -1066,11 +1068,12 @@ class Gl128ScanSession(ScanSession):
                 want = self._chunk_bytes(geometry, remaining, chunk_max)
                 p0 = time.perf_counter()
                 proto.bulk_read_begin(want, index=self._bulk_index(geometry, first=got == 0))
+                # Cleared only when the chunk arrives whole. A read that raises
+                # (USB error, timeout, interrupt) leaves the flag set so
+                # ``_end_scan`` aborts the half-read bulk IN stream.
                 self._bulk_stream_active = True
-                try:
-                    chunk = read_exact(want)
-                finally:
-                    self._bulk_stream_active = False
+                chunk = read_exact(want)
+                self._bulk_stream_active = False
                 if not chunk:
                     raise ScanError(f"Bulk stream ended after {got} of {total} bytes")
                 n = min(len(chunk), remaining)

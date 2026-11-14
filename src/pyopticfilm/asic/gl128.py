@@ -23,7 +23,7 @@ Differences from :class:`~pyopticfilm.asic.gl845.Gl845` that matter here:
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Literal
 
 from pyopticfilm.asic.buttons import BUTTON_IDS, Button
@@ -269,6 +269,10 @@ class Gl128:
         self.last_afe: AfeFrontend | None = None
         #: ASIC dpi whose AFE strip timing :attr:`last_afe` was measured under.
         self.last_afe_dpi: int | None = None
+        #: Scan method (light source) :attr:`last_afe` belongs to. Colour and
+        #: infrared codes differ widely, so colour calibration reuses
+        #: :attr:`last_afe` only when this is ``"transparency"``.
+        self.last_afe_method: ScanMethod | None = None
         #: An image pass ran since the last boot: the next stationary strip block
         #: must re-initialise the ASIC first (see :meth:`reinit_before_stationary_strips`).
         self.image_pass_since_init: bool = False
@@ -421,26 +425,35 @@ class Gl128:
         kind = "motorized" if motorized else "stationary"
         raise ScanError(f"{where}: no {kind} data ready within {timeout_s:.0f}s (last status=0x{last:02x})")
 
-    #: Write ``START = 0`` and clear the counters in
-    #: :meth:`_reset_stationary_scan_engine`.
-    _stationary_reset_clears_start: bool = True
-
     def _reset_stationary_scan_engine(self, *, where: str) -> None:
         """Abort a leftover image SCAN so stationary geometry writes stick.
 
         Park leaves hardware ``0x02`` armed (``MTRPWR|AGOHOME``) and ``0x01``
-        at ``0x22``. The next AFE START with AGOHOME still set hangs as
-        ``0xcd`` (HOME|BUFEMPTY|LAMP|MOTORENB). Confirm SCAN/motor from
-        hardware — the cache drops AGOHOME after park without writing it.
+        at ``0x22``; :meth:`reinit_before_stationary_strips` leaves ``0x02``
+        at the boot value ``0x78`` (``MTRPWR|AGOHOME|FASTFED``). The next AFE
+        START with AGOHOME still set hangs as ``0xcd``
+        (HOME|BUFEMPTY|LAMP|MOTORENB). Confirm SCAN/motor from hardware — the
+        cache drops AGOHOME after park without writing it.
+
+        Disarm ``0x02`` before anything else, and never write ``0x0F`` here.
+        Any ``0x0F`` write launches an operation (``0x00`` only means without
+        the scan motor), and clearing SCAN with AGOHOME armed starts a park.
+        This reset used to write ``0x0F = 0`` first. On an 8100 V2 that set
+        ``MOTORENB`` in every reset (status ``d9``/``f9``): for one status
+        poll (about 20 ms) with ``0x02`` already clear, for six or seven with
+        ``0x02`` still armed. The bit is also set during every stationary
+        strip, so it shows an operation running, not that the motor moved.
+        One reset on that unit (#165) ended with the carriage off the home
+        sensor and ``MOTORENB`` latched (``0xc1``) until a power-cycle. That
+        the ``0x0F`` write caused it is likely but not proven: the stall has
+        not been reproduced. Without the write the status stays ``d8``
+        through the reset. No vendor capture writes ``0x0F = 0``; the strip
+        START writes CLRCNT itself.
         """
         r = self.registers
         motor_mask = r.MTRPWR | r.AGOHOME | r.FASTFED
-        if self._stationary_reset_clears_start:
-            self._write(r.REG_START, 0x00)
-        self._write(r.REG_0x01, _CANCEL_REG01)
         self._write(r.REG_0x02, 0x00)
-        if self._stationary_reset_clears_start:
-            self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
+        self._write(r.REG_0x01, _CANCEL_REG01)
         deadline = time.monotonic() + _STATIONARY_IDLE_WAIT_S
         last01 = last02 = last_st = -1
         status = None
@@ -461,27 +474,26 @@ class Gl128:
                         (last01 | r.SHDAREA) & ~r.SCAN & ~r.DVDSET,
                     )
                 return
-            if last01 & r.SCAN:
-                self._write(r.REG_0x01, (last01 | r.SHDAREA) & ~r.SCAN & ~r.DVDSET)
+            # Disarm first: clearing SCAN with AGOHOME armed starts a park.
             if last02 & motor_mask:
                 self._write(r.REG_0x02, 0x00)
+            if last01 & r.SCAN:
+                self._write(r.REG_0x01, (last01 | r.SHDAREA) & ~r.SCAN & ~r.DVDSET)
             time.sleep(0.02)
-        # Motor power off and the carriage at home, yet MOTORENB stays set for
-        # the whole wait (a healthy settle takes ~20 ms). Seen on an 8200i SE
-        # after a colour pass: every later strip START hangs and only a
-        # power-cycle clears it. Retrying, feeding or waiting for a park cannot
-        # help, so stop here instead of driving the motor.
-        if (
-            status is not None
-            and (last02 & motor_mask) == 0
-            and status.is_at_home
-            and status.is_motor_enabled
-        ):
+        # Motor power off, yet MOTORENB stays set for the whole wait (a healthy
+        # settle takes ~20 ms). Only a power-cycle clears it, with the carriage
+        # at home (8200i SE after a colour pass, 0xc9) or away from it (8100
+        # V2, #165, 0xc1). Retrying, feeding or parking cannot help, and a park
+        # only grinds the motor, so stop here.
+        if status is not None and (last02 & motor_mask) == 0 and status.is_motor_enabled:
+            where_head = (
+                "at home" if status.is_at_home else "away from home; it returns on power-up"
+            )
             raise ScannerStuckError(
                 f"GL128 {where}: the scanner reports its motor running (status "
                 f"0x{last_st:02x}) with motor power off, and it did not clear in "
-                f"{_STATIONARY_IDLE_WAIT_S:.0f} s. Switch the scanner off and on, "
-                "then retry the scan."
+                f"{_STATIONARY_IDLE_WAIT_S:.0f} s (carriage {where_head}). Switch "
+                "the scanner off and on, then retry the scan."
             )
         logger.warning(
             "GL128 %s: scan engine not idle (0x01=%#04x 0x02=%#04x status=0x%02x)",
@@ -571,6 +583,52 @@ class Gl128:
         reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA) & ~r.SCAN & ~r.DVDSET
         self._write(r.REG_0x01, reg01)
 
+    def _read_strip_stream(
+        self,
+        size: int,
+        *,
+        stop: Callable[[], object],
+        chunk_max: int | None = None,
+    ) -> bytearray:
+        """Read a calibration strip of ``size`` bytes from RAM; may return short.
+
+        If a read raises (USB error, timeout, interrupt) the stream is left
+        half-read. ``stop`` then stops the strip (clear SCAN) and the bulk IN
+        pipe is aborted, in that order, before the error propagates: a pipe
+        left open makes later control transfers time out.
+        """
+        r = self.registers
+        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
+        buf = bytearray()
+        try:
+            while len(buf) < size:
+                want = size - len(buf)
+                if chunk_max is not None:
+                    want = min(int(chunk_max), want)
+                chunk = self.protocol.bulk_read_chunk(want)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+        except BaseException:
+            try:
+                stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GL128 strip stop after failed read: %s", exc)
+            # The strip was begun as one stream of ``size`` bytes: drain all
+            # of what is left, not the transport's few-transfer default.
+            pending = size - len(buf)
+            try:
+                drained = self.protocol.abort_bulk_stream(pending_bytes=pending)
+                logger.info(
+                    "GL128 bulk abort after failed strip read drained=%d of %d pending",
+                    drained,
+                    pending,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GL128 bulk abort after failed strip read: %s", exc)
+            raise
+        return buf
+
     def acquire_afe_strip(
         self,
         size: int = AFE_STRIP_BYTES,
@@ -605,13 +663,9 @@ class Gl128:
         if last_exc is not None:
             raise last_exc
 
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
-        buf = bytearray()
-        while len(buf) < size:
-            chunk = self.protocol.bulk_read_chunk(min(size - len(buf), size))
-            if not chunk:
-                break
-            buf.extend(chunk)
+        buf = self._read_strip_stream(
+            size, stop=lambda: self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
+        )
         self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
         if len(buf) < size:
             raise ScanError(f"AFE strip short read: {len(buf)} of {size} bytes")
@@ -683,6 +737,7 @@ class Gl128:
         self.apply_frontend(result)
         self.last_afe = result
         self.last_afe_dpi = scan_dpi
+        self.last_afe_method = "infrared" if infrared else "transparency"
         logger.info(
             "GL128 AFE %s dpi=%d pre_offsets=%s wide_means=(%.0f,%.0f,%.0f) gains=%s offsets=%s",
             "infrared" if infrared else "colour",
@@ -919,13 +974,12 @@ class Gl128:
                 self._write(r.REG_0x02, 0x00)
             raise
 
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
-        buf = bytearray()
-        while len(buf) < size:
-            chunk = self.protocol.bulk_read_chunk(min(65536, size - len(buf)))
-            if not chunk:
-                break
-            buf.extend(chunk)
+        # On a failed read, clearing SCAN also lets AGOHOME (white) park the head.
+        buf = self._read_strip_stream(
+            size,
+            chunk_max=65536,
+            stop=lambda: self._update_bits(r.REG_0x01, clear_bits=r.SCAN),
+        )
         # Clear SCAN so AGOHOME (armed during white) parks, then drop motor.
         self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
         if dvdset:
@@ -1358,6 +1412,7 @@ class Gl128:
             self.upload_tables(resolution=max(self.model.resolutions_dpi))
         self.last_afe = None
         self.last_afe_dpi = None
+        self.last_afe_method = None
         self.image_pass_since_init = False
         self.asic_shading_ready = False
         self.last_ir_host_white = None

@@ -177,6 +177,30 @@ def test_colour_ir_scan_calibrates_ir_between_colour_and_ir_passes():
     calibrator.find_for_scan.assert_not_called()
 
 
+@pytest.mark.parametrize("kwargs", [{"infrared": True}, {"mode": "infrared"}])
+def test_uncalibrated_ir_scan_does_not_flatten_with_an_earlier_profile(monkeypatch, kwargs):
+    """apply_calib=False: a profile left by an earlier scan fits another window."""
+    from pyopticfilm.scan import calib_gl128
+
+    session, _usb = _mock_gl128_session_armed()
+    session.asic.last_ir_host_white = [40000] * 6000
+    session.asic.ir_host_flatten_ready = True
+    calls: list[int] = []
+    orig = calib_gl128.flatten_ir_columns
+
+    def spy(plane, white, **kw):
+        calls.append(len(white))
+        return orig(plane, white, **kw)
+
+    monkeypatch.setattr(calib_gl128, "flatten_ir_columns", spy)
+    image = session.run(resolution=1800, area=_TINY, apply_calib=False, n_passes=1, **kwargs)
+
+    assert image.ir is not None
+    assert calls == []
+    assert session.asic.ir_host_flatten_ready is False
+    assert session.asic.last_ir_host_white is None
+
+
 def test_infrared_with_n_passes_greater_than_one_rejected():
     session, _usb = _mock_gl128_session_armed()
     with pytest.raises(ScanError):
@@ -266,3 +290,26 @@ def test_single_pass_exposure_ignored_for_adaptive_multi_pass_combo():
         single_pass_exposure=30000,
     )
     assert session.last_me_debug.exposure_short == MODEL_8200I_SE.exposure_short
+
+
+def test_usb_error_inside_a_chunk_read_aborts_the_bulk_stream(monkeypatch):
+    """A read that fails mid-chunk leaves the bulk IN stream half-read: abort it."""
+    from pyopticfilm.exceptions import UsbError
+
+    session, usb = _mock_gl128_session_armed()
+
+    def fail(*_args, **_kwargs):
+        raise UsbError("bulk IN timeout mid-chunk")
+
+    monkeypatch.setattr(session.asic.protocol, "bulk_read_exact", fail)
+    with pytest.raises(UsbError):
+        session.run(resolution=1800, area=_TINY, apply_calib=False, n_passes=1)
+
+    assert usb.aborted == 1
+    assert session._bulk_stream_active is False
+
+
+def test_completed_scan_does_not_abort_the_bulk_stream():
+    session, usb = _mock_gl128_session_armed()
+    session.run(resolution=1800, area=_TINY, apply_calib=False, n_passes=1)
+    assert usb.aborted == 0

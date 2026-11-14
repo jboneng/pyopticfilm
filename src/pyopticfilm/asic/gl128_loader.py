@@ -169,9 +169,6 @@ _UPLOAD_SETTLE_S = 0.1
 class Gl128Loader(Gl128):
     """GL128 film-loader driver (OpticFilm 135i)."""
 
-    #: No capture writes ``0x0F = 0``, in any session on this model.
-    _stationary_reset_clears_start = False
-
     def __init__(self, protocol, model: Gl128Model) -> None:  # type: ignore[no-untyped-def]
         super().__init__(protocol, model)
         #: Toggle mode keeps the visible and IR halves of every line apart, so
@@ -768,13 +765,9 @@ class Gl128Loader(Gl128):
         self._write(r.REG_0x01, reg01 | r.SCAN)
         self._write(r.REG_START, r.START_GO)
         self._wait_stationary_data_ready(timeout_s, where=where)
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
-        buf = bytearray()
-        while len(buf) < size:
-            chunk = self.protocol.bulk_read_chunk(min(65536, size - len(buf)))
-            if not chunk:
-                break
-            buf.extend(chunk)
+        buf = self._read_strip_stream(
+            size, chunk_max=65536, stop=lambda: self._write(r.REG_0x01, reg01)
+        )
         self._write(r.REG_0x01, reg01)
         if len(buf) < size:
             raise ScanError(f"{where}: short read {len(buf)} of {size} bytes")
@@ -895,6 +888,8 @@ class Gl128Loader(Gl128):
         self.apply_frontend(result)
         self.last_afe = result
         self.last_afe_dpi = scan_dpi
+        # Toggle mode: one set of codes serves the visible and the IR line.
+        self.last_afe_method = "transparency"
         logger.info(
             "GL128 loader AFE dpi=%d pre_offsets=%s visible_peaks=(%.0f,%.0f,%.0f) gains=%s offsets=%s",
             scan_dpi,

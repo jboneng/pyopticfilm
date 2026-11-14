@@ -31,7 +31,7 @@ from pyopticfilm.image import ScanImage
 from pyopticfilm.logging import get_logger
 from pyopticfilm.scan.calibrate import Calibrator
 from pyopticfilm.scan.geometry import MM_PER_INCH, ScanGeometry, compute_geometry
-from pyopticfilm.scan.pipeline import HOST_CALIB_BORDER_INSET, ImagePipeline
+from pyopticfilm.scan.pipeline import HOST_CALIB_BORDER_INSET, ImagePipeline, block_average_columns
 
 if TYPE_CHECKING:
     from pyopticfilm.scan.me_exposure import MeExposureDecision
@@ -179,7 +179,11 @@ class ScanSession:
                 if multi_pass_ok:
                     self._park_quietly()
                 raise
-            ir_plane = self._infrared_plane(rgb) if mode == "infrared" else None
+            ir_plane = (
+                self._infrared_plane(rgb, host_downsample=geometry.host_downsample)
+                if mode == "infrared"
+                else None
+            )
             return ScanImage(
                 rgb=rgb,
                 dpi=geometry.resolution,
@@ -285,7 +289,7 @@ class ScanSession:
                 ir_rgb = _pass(
                     replace(geometry, exposure_lperiod=ir_lperiod), "infrared", "infrared"
                 )
-                ir_plane = self._infrared_plane(ir_rgb)
+                ir_plane = self._infrared_plane(ir_rgb, host_downsample=geometry.host_downsample)
             if multi_exposure:
                 exp_long, decision = self._select_me_long(
                     rgb_short, exp_short, geometry.resolution, me_long_exposure
@@ -463,6 +467,8 @@ class ScanSession:
                         )
                     if expose_base:
                         calib = self._calib_for_exposure(calib, geometry, method)
+        elif method == "infrared":
+            self._drop_ir_host_flatten()
 
         if getattr(self.model, "asic", "") == "GL845":
             geometry = self._prefeed(geometry, method=method, cancel=cancel)
@@ -586,8 +592,26 @@ class ScanSession:
         )
         return exposure
 
-    def _infrared_plane(self, rgb):
-        """Build the HxW IR sidecar: green CCD plane + optional host flatten."""
+    def _drop_ir_host_flatten(self) -> None:
+        """Forget the IR white-strip profile before an uncalibrated IR pass.
+
+        The profile fits the window and resolution of the scan that measured
+        it. An IR pass that skips calibration (``apply_calib=False``) must not
+        flatten with it; the per-image flatten still runs.
+        """
+        if getattr(self.asic, "ir_host_flatten_ready", False):
+            logger.info("IR pass without calibration: dropping the earlier white-strip profile")
+        if hasattr(self.asic, "ir_host_flatten_ready"):
+            self.asic.ir_host_flatten_ready = False  # type: ignore[attr-defined]
+        if hasattr(self.asic, "last_ir_host_white"):
+            self.asic.last_ir_host_white = None  # type: ignore[attr-defined]
+
+    def _infrared_plane(self, rgb, *, host_downsample: int = 1):
+        """Build the HxW IR sidecar: green CCD plane + optional host flatten.
+
+        ``host_downsample`` is the pass geometry's: the white-strip profile has
+        one entry per ASIC column, the image one per ``host_downsample`` of them.
+        """
         from pyopticfilm.scan.calib_gl128 import (
             flatten_ir_columns,
             flatten_ir_image_columns,
@@ -599,6 +623,12 @@ class ScanSession:
             # The strip profile is in USB column order (starting at STRPIXEL);
             # ``rgb`` has already been mirrored by ``assemble`` on mirror_x models.
             white = list(white)
+            factor = int(host_downsample or 1)
+            if factor > 1 and len(white) >= plane.shape[1] * factor:
+                # Scans below the ASIC's lowest dpi are block-averaged on the
+                # host; average the profile the same way (USB order) instead
+                # of taking its first columns.
+                white = [round(v) for v in block_average_columns(white, factor).tolist()]
             if getattr(self.model, "mirror_x", False):
                 white = white[: plane.shape[1]][::-1]
             try:
