@@ -467,6 +467,8 @@ class ScanSession:
                         )
                     if expose_base:
                         calib = self._calib_for_exposure(calib, geometry, method)
+        elif method == "infrared":
+            self._drop_ir_host_flatten()
 
         if getattr(self.model, "asic", "") == "GL845":
             geometry = self._prefeed(geometry, method=method, cancel=cancel)
@@ -589,6 +591,20 @@ class ScanSession:
             "auto exposure: prescan peak=%.0f base=%d → %d (cap %d)", peak, base, exposure, hi
         )
         return exposure
+
+    def _drop_ir_host_flatten(self) -> None:
+        """Forget the IR white-strip profile before an uncalibrated IR pass.
+
+        The profile fits the window and resolution of the scan that measured
+        it. An IR pass that skips calibration (``apply_calib=False``) must not
+        flatten with it; the per-image flatten still runs.
+        """
+        if getattr(self.asic, "ir_host_flatten_ready", False):
+            logger.info("IR pass without calibration: dropping the earlier white-strip profile")
+        if hasattr(self.asic, "ir_host_flatten_ready"):
+            self.asic.ir_host_flatten_ready = False  # type: ignore[attr-defined]
+        if hasattr(self.asic, "last_ir_host_white"):
+            self.asic.last_ir_host_white = None  # type: ignore[attr-defined]
 
     def _infrared_plane(self, rgb, *, host_downsample: int = 1):
         """Build the HxW IR sidecar: green CCD plane + optional host flatten.
