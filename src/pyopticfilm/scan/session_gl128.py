@@ -1068,11 +1068,12 @@ class Gl128ScanSession(ScanSession):
                 want = self._chunk_bytes(geometry, remaining, chunk_max)
                 p0 = time.perf_counter()
                 proto.bulk_read_begin(want, index=self._bulk_index(geometry, first=got == 0))
+                # Cleared only when the chunk arrives whole. A read that raises
+                # (USB error, timeout, interrupt) leaves the flag set so
+                # ``_end_scan`` aborts the half-read bulk IN stream.
                 self._bulk_stream_active = True
-                try:
-                    chunk = read_exact(want)
-                finally:
-                    self._bulk_stream_active = False
+                chunk = read_exact(want)
+                self._bulk_stream_active = False
                 if not chunk:
                     raise ScanError(f"Bulk stream ended after {got} of {total} bytes")
                 n = min(len(chunk), remaining)

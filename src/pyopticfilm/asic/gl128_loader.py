@@ -765,13 +765,9 @@ class Gl128Loader(Gl128):
         self._write(r.REG_0x01, reg01 | r.SCAN)
         self._write(r.REG_START, r.START_GO)
         self._wait_stationary_data_ready(timeout_s, where=where)
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
-        buf = bytearray()
-        while len(buf) < size:
-            chunk = self.protocol.bulk_read_chunk(min(65536, size - len(buf)))
-            if not chunk:
-                break
-            buf.extend(chunk)
+        buf = self._read_strip_stream(
+            size, chunk_max=65536, stop=lambda: self._write(r.REG_0x01, reg01)
+        )
         self._write(r.REG_0x01, reg01)
         if len(buf) < size:
             raise ScanError(f"{where}: short read {len(buf)} of {size} bytes")
