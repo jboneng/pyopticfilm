@@ -99,6 +99,24 @@ def trim_to_optical_span(rgb: np.ndarray, geometry: ScanGeometry) -> np.ndarray:
     return np.ascontiguousarray(arr[:, :expected])
 
 
+def block_average_columns(profile: np.ndarray, factor: int) -> np.ndarray:
+    """Average a per-column calibration profile over ``factor`` USB columns.
+
+    Matches :meth:`ImagePipeline.apply_host_downsample`: output column ``j``
+    covers USB columns ``j * factor`` to ``(j + 1) * factor - 1`` and a
+    trailing partial block is dropped. ``profile`` is ``(columns,)`` or
+    ``(columns, channels)`` in USB column order; the result is float.
+    """
+    arr = np.asarray(profile, dtype=np.float64)
+    factor = int(factor)
+    if factor <= 1:
+        return arr
+    n = arr.shape[0] // factor
+    if n == 0:
+        return arr
+    return arr[: n * factor].reshape(n, factor, *arr.shape[1:]).mean(axis=1)
+
+
 class ImagePipeline:
     """Convert raw scanner bytes into HxWx3 uint16 RGB."""
 
@@ -515,6 +533,13 @@ class ImagePipeline:
                 rgb.shape[1],
             )
         host_calib = dark is not None and white is not None
+        factor = int(getattr(geometry, "host_downsample", 1) or 1)
+        if host_calib and factor > 1 and dark.shape[0] >= rgb.shape[1] * factor:
+            # The strips were read at the ASIC width; the image has been
+            # block-averaged since. Taking the first columns instead stretched
+            # one end of the profile across the whole line (150 / 300 dpi).
+            dark = np.rint(block_average_columns(dark, factor)).astype(np.uint16)
+            white = np.rint(block_average_columns(white, factor)).astype(np.uint16)
         if host_calib:
             rgb = self.apply_host_calib(
                 rgb, dark=dark, white=white, expose_base=expose_base
