@@ -177,6 +177,30 @@ def test_colour_ir_scan_calibrates_ir_between_colour_and_ir_passes():
     calibrator.find_for_scan.assert_not_called()
 
 
+@pytest.mark.parametrize("kwargs", [{"infrared": True}, {"mode": "infrared"}])
+def test_uncalibrated_ir_scan_does_not_flatten_with_an_earlier_profile(monkeypatch, kwargs):
+    """apply_calib=False: a profile left by an earlier scan fits another window."""
+    from pyopticfilm.scan import calib_gl128
+
+    session, _usb = _mock_gl128_session_armed()
+    session.asic.last_ir_host_white = [40000] * 6000
+    session.asic.ir_host_flatten_ready = True
+    calls: list[int] = []
+    orig = calib_gl128.flatten_ir_columns
+
+    def spy(plane, white, **kw):
+        calls.append(len(white))
+        return orig(plane, white, **kw)
+
+    monkeypatch.setattr(calib_gl128, "flatten_ir_columns", spy)
+    image = session.run(resolution=1800, area=_TINY, apply_calib=False, n_passes=1, **kwargs)
+
+    assert image.ir is not None
+    assert calls == []
+    assert session.asic.ir_host_flatten_ready is False
+    assert session.asic.last_ir_host_white is None
+
+
 def test_infrared_with_n_passes_greater_than_one_rejected():
     session, _usb = _mock_gl128_session_armed()
     with pytest.raises(ScanError):

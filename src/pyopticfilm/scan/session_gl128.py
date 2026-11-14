@@ -636,6 +636,8 @@ class Gl128ScanSession(ScanSession):
                         calib = self.calibrator.ensure_colour_asic_shading(geometry)
                 else:
                     self.calibrator.measure_ir_host_flatten(geometry)
+            elif method == "infrared":
+                self._drop_ir_host_flatten()
 
             logger.info(
                 "GL128 pass %s dpi=%d area=%s feed2=%d lincnt=%d str=%d end=%d %dx%d",
@@ -760,7 +762,7 @@ class Gl128ScanSession(ScanSession):
                 long_pass=False,
                 manual=short_manual,
             )
-            ir_plane = self._infrared_plane(ir_raw)
+            ir_plane = self._infrared_plane(ir_raw, host_downsample=geometry.host_downsample)
 
         assert rgb_short is not None
 
