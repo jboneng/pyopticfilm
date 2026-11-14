@@ -212,7 +212,7 @@ class SimulatedGl843V1Transport:
         self.read_phase += size
         return (pixel * (size // 6 + 2))[start : start + size]
 
-    def abort_bulk_in(self) -> int:
+    def abort_bulk_in(self, **_kwargs: object) -> int:
         self.aborts += 1
         return 0
 

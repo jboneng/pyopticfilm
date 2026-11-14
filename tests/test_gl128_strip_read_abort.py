@@ -32,7 +32,9 @@ def _fail_reads(asic, monkeypatch, order: list[str]) -> None:
     real_abort = asic.protocol.abort_bulk_stream
     monkeypatch.setattr(asic.protocol, "bulk_read_chunk", fail)
     monkeypatch.setattr(
-        asic.protocol, "abort_bulk_stream", lambda: order.append("abort") or real_abort()
+        asic.protocol,
+        "abort_bulk_stream",
+        lambda **kwargs: order.append("abort") or real_abort(**kwargs),
     )
 
 
@@ -84,3 +86,32 @@ def test_completed_strip_read_does_not_abort():
     asic = _asic(MODEL_8200I_SE, usb)
     asic.acquire_shading_strip(resolution=1800, dvdset=True)
     assert usb.aborted == 0
+
+
+def test_failed_strip_read_drains_the_whole_remainder(monkeypatch):
+    """A strip is one stream of a few MB; the default drain covers only ~240 kB of it."""
+    usb = MockScannerTransport()
+    asic = _asic(MODEL_8200I_SE, usb)
+    size = 2_000_000
+    reads: list[int] = []
+
+    def one_chunk_then_fail(want):
+        if reads:
+            raise UsbError("bulk IN timeout mid-strip")
+        reads.append(want)
+        return bytes(want)
+
+    monkeypatch.setattr(asic.protocol, "bulk_read_chunk", one_chunk_then_fail)
+    with pytest.raises(UsbError):
+        asic._read_strip_stream(size, chunk_max=65536, stop=lambda: None)
+
+    assert usb.abort_drain_limits == [size - 65536]
+
+
+def test_short_strip_abort_keeps_the_default_drain(monkeypatch):
+    usb = MockScannerTransport()
+    asic = _asic(MODEL_8200I_SE, usb)
+    _fail_reads(asic, monkeypatch, [])
+    with pytest.raises(UsbError):
+        asic._read_strip_stream(3072, stop=lambda: None)
+    assert usb.abort_drain_limits == [None]
