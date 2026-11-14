@@ -434,12 +434,17 @@ class Gl128:
         Disarm ``0x02`` before anything else, and never write ``0x0F`` here.
         Any ``0x0F`` write launches an operation (``0x00`` only means without
         the scan motor), and clearing SCAN with AGOHOME armed starts a park.
-        This reset used to write ``0x0F = 0`` first, with ``0x02`` still armed:
-        the motor came on (status ``d9``/``f9``) and the following
-        ``0x02 = 0`` cut its power mid-move. Usually that ended at home; on an
-        8100 V2 (#165) the carriage had left the home sensor and
-        ``MOTORENB`` stayed latched (``0xc1``) until a power-cycle. No vendor
-        capture writes ``0x0F = 0``; the strip START writes CLRCNT itself.
+        This reset used to write ``0x0F = 0`` first. On an 8100 V2 that set
+        ``MOTORENB`` in every reset (status ``d9``/``f9``): for one status
+        poll (about 20 ms) with ``0x02`` already clear, for six or seven with
+        ``0x02`` still armed. The bit is also set during every stationary
+        strip, so it shows an operation running, not that the motor moved.
+        One reset on that unit (#165) ended with the carriage off the home
+        sensor and ``MOTORENB`` latched (``0xc1``) until a power-cycle. That
+        the ``0x0F`` write caused it is likely but not proven: the stall has
+        not been reproduced. Without the write the status stays ``d8``
+        through the reset. No vendor capture writes ``0x0F = 0``; the strip
+        START writes CLRCNT itself.
         """
         r = self.registers
         motor_mask = r.MTRPWR | r.AGOHOME | r.FASTFED

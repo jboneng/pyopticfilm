@@ -117,7 +117,7 @@ def _register_writes(asic: Gl128, monkeypatch) -> list[tuple[int, int]]:
 
 
 def test_reset_never_writes_start(monkeypatch):
-    """Any 0x0F write launches an operation; with 0x02 armed it drives the motor (#165)."""
+    """Any 0x0F write launches an operation; the reset must not start one (#165)."""
     asic = _asic(StuckMock())
     writes = _register_writes(asic, monkeypatch)
     asic._reset_stationary_scan_engine(where="AFE strip")
