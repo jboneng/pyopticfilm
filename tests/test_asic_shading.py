@@ -88,6 +88,7 @@ def _afe_reuse_asic(searched_dpi):
     asic = _asic(motor=True)
     asic.last_afe = MagicMock(gains=(38, 30, 36), offsets=(19, 31, 23))
     asic.last_afe_dpi = searched_dpi
+    asic.last_afe_method = "transparency"
     asic._scan_method = "transparency"
 
     def run_asic_shading(**_kw):
@@ -116,6 +117,16 @@ def test_measure_researches_afe_when_strip_timing_differs(tmp_path: Path, search
     cal = Calibrator(asic, cache_path=tmp_path / "calib.json", model=MODEL_8200I_SE)
     cal.measure_colour_asic_shading(_geometry(3600))
     asic.search_afe.assert_called_once_with(method="transparency", resolution=3600)
+
+
+def test_measure_never_reuses_infrared_afe_codes(tmp_path: Path):
+    """After a colour + IR scan ``last_afe`` holds IR codes; ``calibrate()`` /
+    ``warmup()`` / ``lamp_on()`` then set the method back to transparency."""
+    asic = _afe_reuse_asic(1800)
+    asic.last_afe_method = "infrared"
+    cal = Calibrator(asic, cache_path=tmp_path / "calib.json", model=MODEL_8200I_SE)
+    cal.measure_colour_asic_shading(_geometry(2400))
+    asic.search_afe.assert_called_once_with(method="transparency", resolution=2400)
 
 
 def test_forced_calibration_researches_afe(tmp_path: Path):
