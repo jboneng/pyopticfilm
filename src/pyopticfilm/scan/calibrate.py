@@ -460,6 +460,7 @@ class Calibrator:
                 apply(fe)
             self.asic.last_afe = fe  # type: ignore[attr-defined]
             self.asic.last_afe_dpi = self._asic_dpi(entry.resolution)  # type: ignore[attr-defined]
+            self.asic.last_afe_method = "transparency"  # type: ignore[attr-defined]
             upload = getattr(self.asic, "upload_shading_table", None)
             if not callable(upload):
                 raise CalibrationError("ASIC has no upload_shading_table")
@@ -479,7 +480,10 @@ class Calibrator:
 
         Colour AFE codes from earlier in the session are reused when they were
         measured under this resolution's AFE strip timing (ME long-pass
-        remeasure, a dpi change within the same timing regime).
+        remeasure, a dpi change within the same timing regime). Codes from an
+        infrared search (``last_afe_method``) are never reused: after a colour +
+        IR scan ``last_afe`` holds the IR codes, whatever the current scan
+        method is.
         ``research_afe`` always runs a new search (``calibrate(force=True)``).
         """
         if self.asic is None:
@@ -497,7 +501,7 @@ class Calibrator:
                 reuse_afe = (
                     not (research_afe and attempt == 0)
                     and last_afe is not None
-                    and getattr(self.asic, "_scan_method", None) == "transparency"
+                    and getattr(self.asic, "last_afe_method", None) == "transparency"
                     and self._afe_timing_matches(getattr(self.asic, "last_afe_dpi", None), scan_dpi)
                 )
                 if callable(search) and not reuse_afe:
@@ -656,6 +660,7 @@ class Calibrator:
                     apply(fe)
                 self.asic.last_afe = fe  # type: ignore[attr-defined]
                 self.asic.last_afe_dpi = self._asic_dpi(hit.resolution)  # type: ignore[attr-defined]
+                self.asic.last_afe_method = "transparency"  # type: ignore[attr-defined]
                 self.asic.asic_shading_ready = False  # type: ignore[attr-defined]
             self.prefer_asic_shading = False
             self._active = hit
@@ -684,6 +689,7 @@ class Calibrator:
             return False
         colour_afe = getattr(asic, "last_afe", None)
         colour_afe_dpi = getattr(asic, "last_afe_dpi", None)
+        colour_afe_method = getattr(asic, "last_afe_method", None)
         reason = None
         try:
             with self._stationary_motor():
@@ -713,6 +719,7 @@ class Calibrator:
                     apply(colour_afe)
                 asic.last_afe = colour_afe  # type: ignore[attr-defined]
                 asic.last_afe_dpi = colour_afe_dpi  # type: ignore[attr-defined]
+                asic.last_afe_method = colour_afe_method  # type: ignore[attr-defined]
             logger.warning(
                 "GL128 IR calibration unavailable (%s); IR pass uses colour AFE codes "
                 "and the per-image flatten",

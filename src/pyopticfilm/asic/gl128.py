@@ -269,6 +269,10 @@ class Gl128:
         self.last_afe: AfeFrontend | None = None
         #: ASIC dpi whose AFE strip timing :attr:`last_afe` was measured under.
         self.last_afe_dpi: int | None = None
+        #: Scan method (light source) :attr:`last_afe` belongs to. Colour and
+        #: infrared codes differ widely, so colour calibration reuses
+        #: :attr:`last_afe` only when this is ``"transparency"``.
+        self.last_afe_method: ScanMethod | None = None
         #: An image pass ran since the last boot: the next stationary strip block
         #: must re-initialise the ASIC first (see :meth:`reinit_before_stationary_strips`).
         self.image_pass_since_init: bool = False
@@ -683,6 +687,7 @@ class Gl128:
         self.apply_frontend(result)
         self.last_afe = result
         self.last_afe_dpi = scan_dpi
+        self.last_afe_method = "infrared" if infrared else "transparency"
         logger.info(
             "GL128 AFE %s dpi=%d pre_offsets=%s wide_means=(%.0f,%.0f,%.0f) gains=%s offsets=%s",
             "infrared" if infrared else "colour",
@@ -1358,6 +1363,7 @@ class Gl128:
             self.upload_tables(resolution=max(self.model.resolutions_dpi))
         self.last_afe = None
         self.last_afe_dpi = None
+        self.last_afe_method = None
         self.image_pass_since_init = False
         self.asic_shading_ready = False
         self.last_ir_host_white = None

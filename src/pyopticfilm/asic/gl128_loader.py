@@ -895,6 +895,8 @@ class Gl128Loader(Gl128):
         self.apply_frontend(result)
         self.last_afe = result
         self.last_afe_dpi = scan_dpi
+        # Toggle mode: one set of codes serves the visible and the IR line.
+        self.last_afe_method = "transparency"
         logger.info(
             "GL128 loader AFE dpi=%d pre_offsets=%s visible_peaks=(%.0f,%.0f,%.0f) gains=%s offsets=%s",
             scan_dpi,
