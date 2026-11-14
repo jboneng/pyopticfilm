@@ -23,7 +23,7 @@ Differences from :class:`~pyopticfilm.asic.gl845.Gl845` that matter here:
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Literal
 
 from pyopticfilm.asic.buttons import BUTTON_IDS, Button
@@ -571,6 +571,45 @@ class Gl128:
         reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA) & ~r.SCAN & ~r.DVDSET
         self._write(r.REG_0x01, reg01)
 
+    def _read_strip_stream(
+        self,
+        size: int,
+        *,
+        stop: Callable[[], object],
+        chunk_max: int | None = None,
+    ) -> bytearray:
+        """Read a calibration strip of ``size`` bytes from RAM; may return short.
+
+        If a read raises (USB error, timeout, interrupt) the stream is left
+        half-read. ``stop`` then stops the strip (clear SCAN) and the bulk IN
+        pipe is aborted, in that order, before the error propagates: a pipe
+        left open makes later control transfers time out.
+        """
+        r = self.registers
+        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
+        buf = bytearray()
+        try:
+            while len(buf) < size:
+                want = size - len(buf)
+                if chunk_max is not None:
+                    want = min(int(chunk_max), want)
+                chunk = self.protocol.bulk_read_chunk(want)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+        except BaseException:
+            try:
+                stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GL128 strip stop after failed read: %s", exc)
+            try:
+                drained = self.protocol.abort_bulk_stream()
+                logger.info("GL128 bulk abort after failed strip read drained=%d", drained)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GL128 bulk abort after failed strip read: %s", exc)
+            raise
+        return buf
+
     def acquire_afe_strip(
         self,
         size: int = AFE_STRIP_BYTES,
@@ -605,13 +644,9 @@ class Gl128:
         if last_exc is not None:
             raise last_exc
 
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
-        buf = bytearray()
-        while len(buf) < size:
-            chunk = self.protocol.bulk_read_chunk(min(size - len(buf), size))
-            if not chunk:
-                break
-            buf.extend(chunk)
+        buf = self._read_strip_stream(
+            size, stop=lambda: self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
+        )
         self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
         if len(buf) < size:
             raise ScanError(f"AFE strip short read: {len(buf)} of {size} bytes")
@@ -919,13 +954,12 @@ class Gl128:
                 self._write(r.REG_0x02, 0x00)
             raise
 
-        self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_RAM_BASE)
-        buf = bytearray()
-        while len(buf) < size:
-            chunk = self.protocol.bulk_read_chunk(min(65536, size - len(buf)))
-            if not chunk:
-                break
-            buf.extend(chunk)
+        # On a failed read, clearing SCAN also lets AGOHOME (white) park the head.
+        buf = self._read_strip_stream(
+            size,
+            chunk_max=65536,
+            stop=lambda: self._update_bits(r.REG_0x01, clear_bits=r.SCAN),
+        )
         # Clear SCAN so AGOHOME (armed during white) parks, then drop motor.
         self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
         if dvdset:
