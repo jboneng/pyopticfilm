@@ -228,9 +228,12 @@ def image_crop_to_scan_area(model: Any, crop_norm: Area) -> Area:
     Scan Lab shows the assembled image after ``mirror_x``. The rubber-band is
     therefore in display space: flip X back to TA so STR/ENDPIXEL match the
     box the user drew.
+
+    A model that crops the delivered image on the host (``area_is_image_space``,
+    OpticFilm 7600i v1) takes ``area`` in display space already: no flip.
     """
     x1, y1, x2, y2 = clamp_area(crop_norm)
-    if getattr(model, "mirror_x", False):
+    if getattr(model, "mirror_x", False) and not getattr(model, "area_is_image_space", False):
         x1, x2 = 1.0 - x2, 1.0 - x1
     return clamp_area((x1, y1, x2, y2))
 

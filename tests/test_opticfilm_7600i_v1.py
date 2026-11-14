@@ -387,6 +387,36 @@ def test_crop_uses_normalised_area():
         crop(rgb, (0.5, 0, 0.5, 1))
 
 
+def test_scan_lab_crop_returns_the_region_drawn(monkeypatch, tmp_path):
+    """The session crops the mirrored image, so a display-space box must reach it unflipped."""
+    import time
+
+    from pyopticfilm import Scanner
+    from pyopticfilm.scan import session_7600i_v1
+    from pyopticfilm.scan.bringup import image_crop_to_scan_area, scan_area_to_image_crop
+    from tools.scanlab.backend import lab_scan_kwargs
+
+    box = (0.0, 0.0, 0.25, 1.0)  # the left quarter of the displayed frame
+    assert image_crop_to_scan_area(MODEL_7600I_V1, box) == box
+    assert scan_area_to_image_crop(MODEL_7600I_V1, box) == box
+    kwargs = lab_scan_kwargs(MODEL_7600I_V1, dpi=1440, kind="scan", crop_norm=box)
+    assert kwargs["area"] == box
+
+    real_assemble = session_7600i_v1.assemble
+
+    def ramp(raw, **kw):  # every pixel carries its displayed column
+        out = real_assemble(raw, **kw)
+        out[:] = np.arange(out.shape[1], dtype=np.uint16)[None, :, None]
+        return out
+
+    monkeypatch.setattr(session_7600i_v1, "assemble", ramp)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    with Scanner.open_fake(MODEL_7600I_V1, SimulatedGl843V1Transport(), calib_cache=tmp_path / "c.json") as scanner:
+        image = scanner.scan(**kwargs)
+    assert image.rgb.shape == (1402, 519, 3)
+    assert (int(image.rgb[0, 0, 0]), int(image.rgb[0, -1, 0])) == (0, 518)
+
+
 # --------------------------------------------------------------------------- end to end (simulated)
 
 
