@@ -291,7 +291,7 @@ class Gl128LoaderScanSession(Gl128ScanSession):
             expose_base=False,
             usb_end_drop=self.pipeline.last_usb_end_drop,
         )
-        return self._infrared_plane(ir_rgb)
+        return self._infrared_plane(ir_rgb, host_downsample=geometry.host_downsample)
 
     def acquire_raw(  # type: ignore[override]
         self,

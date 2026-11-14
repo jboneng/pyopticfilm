@@ -760,7 +760,7 @@ class Gl128ScanSession(ScanSession):
                 long_pass=False,
                 manual=short_manual,
             )
-            ir_plane = self._infrared_plane(ir_raw)
+            ir_plane = self._infrared_plane(ir_raw, host_downsample=geometry.host_downsample)
 
         assert rgb_short is not None
 
