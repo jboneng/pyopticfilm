@@ -360,17 +360,31 @@ class GenesysUsbProtocol:
             buf.extend(data)
         return bytes(buf)
 
-    def abort_bulk_stream(self) -> int:
+    def abort_bulk_stream(self, *, pending_bytes: int | None = None) -> int:
         """Abandon an in-flight :meth:`bulk_read_begin` stream (cancel / error).
 
         Drains residual bulk IN and clears endpoint halt when the transport
         supports it. Returns bytes drained, or 0 if unsupported.
+
+        ``pending_bytes`` is how much of the begun stream is still unread. The
+        transport drains a few transfers by default, enough for an image chunk.
+        A stream begun for more than that (a calibration strip is read as one
+        stream of a few MB) must pass its remainder: on an 8200i SE, bytes left
+        in a begun stream hung the scanner at the next open until a power-cycle.
         """
         abort = getattr(self._transport, "abort_bulk_in", None)
         if not callable(abort):
             logger.debug("abort_bulk_stream: transport has no abort_bulk_in")
             return 0
-        drained = int(abort())
+        default_cap = BULK_MAX_SIZE * 4
+        if pending_bytes is not None and int(pending_bytes) > default_cap:
+            try:
+                drained = int(abort(max_drain_bytes=int(pending_bytes)))
+            except TypeError:
+                logger.debug("abort_bulk_stream: transport takes no drain limit")
+                drained = int(abort())
+        else:
+            drained = int(abort())
         logger.info("abort_bulk_stream drained=%d", drained)
         return drained
 

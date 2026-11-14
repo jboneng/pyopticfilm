@@ -614,9 +614,16 @@ class Gl128:
                 stop()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GL128 strip stop after failed read: %s", exc)
+            # The strip was begun as one stream of ``size`` bytes: drain all
+            # of what is left, not the transport's few-transfer default.
+            pending = size - len(buf)
             try:
-                drained = self.protocol.abort_bulk_stream()
-                logger.info("GL128 bulk abort after failed strip read drained=%d", drained)
+                drained = self.protocol.abort_bulk_stream(pending_bytes=pending)
+                logger.info(
+                    "GL128 bulk abort after failed strip read drained=%d of %d pending",
+                    drained,
+                    pending,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GL128 bulk abort after failed strip read: %s", exc)
             raise

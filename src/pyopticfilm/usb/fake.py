@@ -89,6 +89,8 @@ class FakeUsbTransport:
     interrupt_queue: list[bytes] = field(default_factory=list)
     aborted: int = 0
     abort_drain_bytes: int = 42
+    #: ``max_drain_bytes`` of each :meth:`abort_bulk_in` call (None = transport default).
+    abort_drain_limits: list[int | None] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.registers.setdefault(_R.REG_0x41, IDLE_STATUS_REG41)
@@ -157,8 +159,9 @@ class FakeUsbTransport:
         )
         return len(payload)
 
-    def abort_bulk_in(self) -> int:
+    def abort_bulk_in(self, *, max_drain_bytes: int | None = None, **_kwargs: object) -> int:
         self.aborted += 1
+        self.abort_drain_limits.append(max_drain_bytes)
         return int(self.abort_drain_bytes)
 
     def read_intr(self, timeout_ms: int | None = None) -> bytes:
