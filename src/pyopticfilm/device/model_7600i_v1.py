@@ -58,6 +58,9 @@ class Model7600iV1:
     bpp_color: tuple[int, ...] = (16,)
     supports_infrared: bool = True
     mirror_x: bool = True
+    #: ``Scanner.scan(area=...)`` crops the delivered (already mirrored) image on the host, so
+    #: ``area`` is in image space. GL128 models program the sensor window from it (sensor space).
+    area_is_image_space: bool = True
     #: CCD dummy lines in the main scan: "none", "fewer" or "recorded" (SilverFast's).
     #: "fewer" keeps one dummy line at 7200 dpi to avoid stalls, zero at lower resolutions.
     dummy_lines: str = "fewer"
