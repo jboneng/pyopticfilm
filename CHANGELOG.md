@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Multi-exposure and Multi-Pass alignment and merging are faster, with unchanged output.** On a synthetic 17 MP frame (about 3600 dpi) on a 12-core laptop, aligning and merging four Multi-Pass frames took about 12 s instead of 28 s (the merge alone 4.5 s instead of 20 s), and a multi-exposure align and merge 9.5 to 12 s instead of 14.5 s. Merged images, transforms and merge statistics are bit-identical to 1.3.10 on that frame and in the tests; real scan pairs have not been re-run.
+  - **Multi-Pass merge:** `merge_n_passes` merges its row bands in parallel, as the exposure merge does.
+  - **Alignment warps:** the row warp and the shift-field warp read each resampling tap as a slice of one padded copy instead of gathering the source again per tap, about twice as fast.
+  - **Multi-exposure shift field:** its tiles are correlated in stacks, and the sub-pixel refinement no longer runs its matrix product from several threads at once, which was slower than taking turns.
+  - **Multi-exposure merge:** the band kernel works on channel-first planes. It is limited by memory traffic, so the gain there is small.
+  - `tools.bench_me_merge --timing-mp N` now runs without `--real`: it times each alignment and merge stage on a synthetic frame and prints a checksum of each stage's output.
+
 ## [1.3.10] - 2026-11-14
 
 ### Added
