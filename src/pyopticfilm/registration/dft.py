@@ -3,7 +3,14 @@
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
+
+# The localized DFT is a BLAS matrix product. Tiles are refined from worker threads,
+# and BLAS calls made from several threads at once ran ten times slower than the
+# same calls made in turn, so the product is taken one thread at a time.
+_MATMUL_LOCK = threading.Lock()
 
 
 def refine_peak_guizar(
@@ -64,7 +71,8 @@ def refine_peak_guizar(
 
     # corr_ups = kern_y @ cross @ kern_x  / (H W)  — but we only need argmax.
     c = np.asarray(cross_spectrum, dtype=np.complex128)
-    patch = (kern_y @ c) @ kern_x
+    with _MATMUL_LOCK:
+        patch = (kern_y @ c) @ kern_x
     patch = np.real(patch)
     imax = int(np.argmax(patch))
     pr, pc = divmod(imax, noc)
@@ -82,6 +90,43 @@ def refine_peak_guizar(
     elif dy < -h / 2:
         dy += h
     return float(dx), float(dy)
+
+
+def refine_peaks_guizar(
+    cross_spectra: np.ndarray,
+    peaks_y: np.ndarray,
+    peaks_x: np.ndarray,
+    *,
+    upsample_factor: int = 16,
+) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`refine_peak_guizar` over a ``(T, H, W)`` stack, one integer peak per spectrum.
+
+    Returns ``(dx, dy)`` arrays of length ``T``, each entry as the single call gives.
+    """
+    u = int(upsample_factor)
+    c = np.asarray(cross_spectra, dtype=np.complex128)
+    _, h, w = c.shape
+    peaks_y = np.asarray(peaks_y, dtype=np.float64)
+    peaks_x = np.asarray(peaks_x, dtype=np.float64)
+    nout = int(np.ceil(u * 1.5 * 2)) | 1
+    dftshift = float(np.trunc(nout / 2.0))
+    ky = np.arange(h, dtype=np.float64)
+    ky[ky >= (h + 1) // 2] -= h
+    kx = np.arange(w, dtype=np.float64)
+    kx[kx >= (w + 1) // 2] -= w
+    grid = np.arange(nout, dtype=np.float64)
+    ys = (grid - (dftshift - peaks_y * u)[:, None]) / u
+    xs = (grid - (dftshift - peaks_x * u)[:, None]) / u
+    kern_y = np.exp(2j * np.pi * (ys[:, :, None] * ky) / h)  # (T, nout, H)
+    kern_x = np.exp(2j * np.pi * (kx[:, None] * xs[:, None, :]) / w)  # (T, W, nout)
+    with _MATMUL_LOCK:
+        patch = np.real((kern_y @ c) @ kern_x)
+    pr, pc = np.divmod(patch.reshape(patch.shape[0], -1).argmax(axis=1), nout)
+    dy = (pr - dftshift) / u + peaks_y
+    dx = (pc - dftshift) / u + peaks_x
+    dx = np.where(dx >= w / 2, dx - w, np.where(dx < -w / 2, dx + w, dx))
+    dy = np.where(dy >= h / 2, dy - h, np.where(dy < -h / 2, dy + h, dy))
+    return dx, dy
 
 
 def brute_force_upsample_peak(

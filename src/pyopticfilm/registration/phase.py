@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pyopticfilm.registration.dft import refine_peak_guizar
+from pyopticfilm.registration.dft import refine_peak_guizar, refine_peaks_guizar
 
 
 def optimal_dft_size(n: int) -> int:
@@ -120,6 +120,40 @@ def phase_correlate(
         dx, dy = -float(rdx), -float(rdy)
 
     return dx, dy, response, peak_ratio
+
+
+def phase_correlate_batch(a: np.ndarray, b: np.ndarray, *, upsample: int) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`phase_correlate` with ``upsample`` over ``(T, h, w)`` stacks of tiles.
+
+    Returns ``(dx, dy)``, each of length ``T`` and equal to the per-tile call's.
+    Hundreds of small tiles cost far less as one stacked FFT than as one call
+    each, where the time goes to call overhead rather than the transforms.
+    Only the refined (``upsample > 1``) shift is computed.
+    """
+    if upsample <= 1:
+        raise ValueError("phase_correlate_batch needs upsample > 1")
+    a = np.ascontiguousarray(a, dtype=np.float32)
+    b = np.ascontiguousarray(b, dtype=np.float32)
+    if a.shape != b.shape or a.ndim != 3:
+        raise ValueError(f"expected matching (T, h, w) stacks, got {a.shape} and {b.shape}")
+    count, h, w = a.shape
+    win = hanning_window(h, w)
+    m, n = optimal_dft_size(h), optimal_dft_size(w)
+    wa = np.zeros((count, m, n), dtype=np.float32)
+    wb = np.zeros((count, m, n), dtype=np.float32)
+    wa[:, :h, :w] = a * win
+    wb[:, :h, :w] = b * win
+    cross = np.fft.rfft2(wa) * np.conj(np.fft.rfft2(wb))
+    mag = np.abs(cross)
+    eps = np.finfo(np.float32).eps * np.maximum(mag.max(axis=(1, 2)).astype(np.float64), 1.0)
+    cross = np.divide(cross, mag, out=np.zeros_like(cross), where=mag > eps.astype(np.float32)[:, None, None])
+    corr = np.fft.irfft2(cross, s=(m, n), norm="forward")
+    py, px = np.divmod(corr.reshape(count, -1).argmax(axis=1), n)
+    ix = np.where(px < n / 2, px, px - n)
+    iy = np.where(py < m / 2, py, py - m)
+    cross_full = np.fft.fft2(wa.astype(np.float64)) * np.conj(np.fft.fft2(wb.astype(np.float64)))
+    rdx, rdy = refine_peaks_guizar(cross_full, iy, ix, upsample_factor=upsample)
+    return -rdx, -rdy
 
 
 def phase_correlate_shift(
