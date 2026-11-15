@@ -122,3 +122,69 @@ def test_merge_n_passes_just_below_clip_end_is_not_black():
     frames = [np.full((4, 4, 3), 62256, dtype=np.uint16) for _ in range(3)]
     result = merge_n_passes(frames)
     assert np.all(result.rgb == 62256)
+
+
+def _reference_merge_n_passes(frames: list[np.ndarray]) -> tuple[np.ndarray, tuple[float, int, int]]:
+    """The single-threaded stack-and-median merge that :func:`merge_n_passes` must reproduce."""
+    from pyopticfilm.scan import exposure_merge as em
+
+    h, w = frames[0].shape[:2]
+    out = np.empty((h, w, 3), dtype=np.uint16)
+    conf_sum, n_conf, zero_count, outlier_count = 0.0, 0, 0, 0
+    for y0 in range(0, h, em._MERGE_CHUNK_ROWS):
+        y1 = min(h, y0 + em._MERGE_CHUNK_ROWS)
+        xs = [np.asarray(f[y0:y1], dtype=np.float32) for f in frames]
+        cs = [
+            em._smooth_confidence(x, floor=em._SNR_FLOOR, clip_start=em._SNR_CLIP_START, clip_end=em._SNR_CLIP_END)
+            for x in xs
+        ]
+        lumas = [x.mean(axis=2) for x in xs]
+        luma_median = np.median(np.stack(lumas, axis=0), axis=0)
+        weights = []
+        outlier_any = np.zeros((y1 - y0, w), dtype=bool)
+        for x, c, lum in zip(xs, cs, lumas, strict=True):
+            w_i = c / np.maximum(em._SNR_ALPHA * np.maximum(x, 0.0) + em._SNR_BETA, 1e-12)
+            is_outlier = np.abs(lum - luma_median) > em._LUMA_DISAGREE_TAU
+            weights.append(np.where(is_outlier[..., np.newaxis], 0.0, w_i))
+            outlier_any |= is_outlier
+        acc = weights[0] * xs[0]
+        w_sum = weights[0].copy()
+        all_zero_conf = cs[0] <= 1e-6
+        for x, c, w_i in zip(xs[1:], cs[1:], weights[1:], strict=True):
+            acc += w_i * x
+            w_sum += w_i
+            all_zero_conf &= c <= 1e-6
+        merged = acc / np.maximum(w_sum, 1e-12)
+        no_weight = w_sum <= 1e-9
+        plain_mean = np.mean(np.stack(xs, axis=0), axis=0)
+        merged = np.where(no_weight | all_zero_conf, plain_mean, merged)
+        out[y0:y1] = np.clip(merged, 0, 65535).astype(np.uint16)
+        conf_mean_pixel = np.mean(np.stack(cs, axis=0), axis=0)
+        conf_sum += float(conf_mean_pixel.sum())
+        n_conf += int(conf_mean_pixel.size)
+        zero_count += int(np.count_nonzero(np.all(no_weight, axis=-1)))
+        outlier_count += int(np.count_nonzero(outlier_any))
+    return out, (conf_sum / n_conf, outlier_count, zero_count)
+
+
+@pytest.mark.parametrize("n_frames", [2, 3, 4, 5])
+def test_merge_n_passes_matches_reference_merge(n_frames):
+    """Banded threads, the confidence lookup and the median selections change no bit."""
+    rng = np.random.default_rng(n_frames)
+    h, w = 300, 96  # three row bands, the last one short
+    base = rng.integers(0, 65536, (h, w, 3)).astype(np.float64)
+    base[:40] = rng.integers(0, 300, (40, w, 3))  # around the noise floor
+    base[40:80] = rng.integers(50000, 65536, (40, w, 3))  # through the clip ramp
+    frames = [np.clip(base + rng.normal(0.0, 150.0, base.shape), 0, 65535).astype(np.uint16) for _ in range(n_frames)]
+    frames[-1][100:140] = 65535 - frames[-1][100:140]  # one frame disagrees
+    for f in frames:
+        f[200:220] = rng.integers(0, 65536, (20, w, 3))  # every frame disagrees
+
+    result = merge_n_passes(frames)
+    expected_rgb, (mean_conf, outliers, zero_weight) = _reference_merge_n_passes(frames)
+
+    assert np.array_equal(result.rgb, expected_rgb)
+    stats = result.fusion_stats
+    assert stats.mean_confidence == mean_conf
+    assert (stats.outlier_pixels, stats.zero_weight_pixels) == (outliers, zero_weight)
+    assert outliers > 0

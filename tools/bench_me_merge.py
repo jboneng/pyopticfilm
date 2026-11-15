@@ -38,6 +38,10 @@ holds scanner noise but no grain, so ``repeat noise`` is what the merge really
 removes. ``spread`` is how far the fits and dense blue move between repeats.
 
 ``--timing-mp N`` also times the merge on that pair tiled up to N megapixels.
+Without ``--real`` it times every alignment and merge stage of multi-exposure and
+Multi-Pass on a synthetic textured N megapixel frame, and prints a checksum of each
+stage's output. The frame is the same on every run, so checksums that match between
+two commits mean the output did not change.
 
 Usage::
 
@@ -45,6 +49,7 @@ Usage::
     uv run python -m tools.bench_me_merge --ref origin/main --ref prev=HEAD~1
     uv run python -m tools.bench_me_merge --case F --seeds 5
     uv run python -m tools.bench_me_merge --ref base=main --real D:/scans/pair --timing-mp 130
+    uv run python -m tools.bench_me_merge --ref base=main --timing-mp 17
 """
 
 from __future__ import annotations
@@ -57,6 +62,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -77,6 +84,8 @@ _REAL_TILE = 32
 _REAL_DENSE_BANDS = ((300, 800), (800, 1200), (1200, 1800), (1800, 3000), (3000, 5000), (5000, 7500))
 # Long readings past this are the merge's own clip region, not a guard's doing.
 _REAL_LONG_CUTOFF = 0.80 * _FULL_SCALE
+# ``--timing-mp`` scene: dx field of the long, as ``quadratic_field`` terms (px).
+_TIMING_FIELD = np.array([0.0, 0.1, 0.05, 0.3, 0.1, 0.05])
 
 _BANDS = (
     ("10-44 (long<floor)", 10, 44),
@@ -480,6 +489,104 @@ def run_real(root: Path, versions: dict[str, ModuleType], timing_mp: float) -> N
             print(f"    {label}: {time.perf_counter() - t0:.1f}s")
 
 
+def _timing_pair(mp: float) -> tuple[np.ndarray, np.ndarray]:
+    """Textured 3:2 short/long pair: row drift, a dx field, and a red that clips in the long."""
+    from pyopticfilm.registration.resample import warp_row_shifts, warp_x_field
+
+    h = max(1024, round(float(np.sqrt(mp * 1e6 / 1.5))))
+    w = round(1.5 * h)
+    rng = np.random.default_rng(0)
+
+    def texture(scale: int) -> np.ndarray:
+        low = rng.random((h // scale + 1, w // scale + 1, 1), dtype=np.float32)
+        return np.kron(low, np.ones((scale, scale, 1), dtype=np.float32))[:h, :w]
+
+    # White noise alone is rejected by registration; blocks at three scales are not.
+    mix = 0.5 * texture(64) + 0.3 * texture(12) + 0.2 * texture(3)
+    base = 800.0 + 20000.0 * mix * _CH_SCALE.astype(np.float32)
+
+    def capture(mean: np.ndarray, sigma: float) -> np.ndarray:
+        noisy = mean + sigma * rng.standard_normal(mean.shape, dtype=np.float32)
+        return np.clip(np.rint(noisy), 0, _FULL_SCALE).astype(np.uint16)
+
+    short = capture(base, 60.0)
+    long = capture(base * 3.0, 90.0)
+    drift = 1.3 + np.linspace(-1.5, 1.5, h)
+    long = warp_x_field(warp_row_shifts(long, 0.0, -drift, method="cubic"), -0.4, _TIMING_FIELD, method="cubic")
+    return short, long
+
+
+def _crc(*arrays: np.ndarray) -> str:
+    crc = 0
+    for a in arrays:
+        crc = zlib.crc32(np.ascontiguousarray(a).tobytes(), crc)
+    return f"{crc:08x}"
+
+
+def _transform_crc(transform: object) -> str:
+    parts = [np.asarray(getattr(transform, name)) for name in ("dx", "dy", "dy_per_row", "dx_coef") if hasattr(transform, name)]
+    return _crc(*(p.astype(np.float64) for p in parts))
+
+
+def _timed(label: str, fn: Callable[[], object], repeats: int, crc: Callable[[object], str]) -> object:
+    best = float("inf")
+    out = None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        out = fn()
+        best = min(best, time.perf_counter() - t0)
+    print(f"    {label:<42}{best:7.2f}s  crc {crc(out)}", flush=True)
+    return out
+
+
+def run_timing(versions: dict[str, ModuleType], timing_mp: float, repeats: int) -> None:
+    """Time each ME and Multi-Pass stage on a synthetic frame; see the module docstring."""
+    from pyopticfilm import pass_align
+    from pyopticfilm.registration.resample import warp_row_shifts
+
+    short, long = _timing_pair(timing_mp)
+    h, w = short.shape[:2]
+    print(f"\n=== timing {w}x{h} ({h * w / 1e6:.0f} MP), best of {repeats}; scene crc {_crc(short, long)}")
+
+    print("  multi-exposure:")
+    transform = _timed(
+        "estimate_me_transform", lambda: pass_align.estimate_me_transform(short, long), repeats, _transform_crc
+    )
+    print(f"      -> {type(transform).__name__}")
+    aligned = _timed(
+        "apply_me_transform",
+        lambda: pass_align.apply_me_transform(long, transform, clip_level=0.95 * _FULL_SCALE),
+        repeats,
+        lambda r: _crc(r[0], r[1]),
+    )[0]
+    for label, mod in versions.items():
+        _timed(
+            f"merge only [{label}]",
+            lambda mod=mod: mod.merge_exposures_result(short, aligned, align_shift=(0.0, 0.0)).rgb,
+            repeats,
+            _crc,
+        )
+    _timed(
+        "end to end [working tree]",
+        lambda: versions["working tree"].merge_exposures_result(short, long, exposure_short=1000, exposure_long=3000).rgb,
+        repeats,
+        _crc,
+    )
+
+    print("  multi-pass, 4 frames:")
+    frames = [short] + [
+        warp_row_shifts(short, 0.3 * i, np.linspace(0.0, 2.0 * i, h), method="cubic") for i in (1, 2, 3)
+    ]
+    stack = _timed(
+        "align_pass_to_reference_banded x3",
+        lambda: [frames[0]] + [pass_align.align_pass_to_reference_banded(frames[0], f)[0] for f in frames[1:]],
+        repeats,
+        lambda r: _crc(*r),
+    )
+    for label, mod in versions.items():
+        _timed(f"merge_n_passes [{label}]", lambda mod=mod: mod.merge_n_passes(stack).rgb, repeats, _crc)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -492,7 +599,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case", action="append", default=[], help="Run only these case keys (A-F)")
     parser.add_argument("--seeds", type=int, default=3, help="Noise realisations per case (default 3)")
     parser.add_argument("--real", type=Path, help="Real color_short*/color_long* TIFF pair, or a folder of them")
-    parser.add_argument("--timing-mp", type=float, default=0.0, help="With --real, also time a frame tiled to N MP")
+    parser.add_argument(
+        "--timing-mp",
+        type=float,
+        default=0.0,
+        help="With --real, also time a frame tiled to N MP; alone, time every stage on a synthetic N MP frame",
+    )
+    parser.add_argument("--timing-repeats", type=int, default=1, help="Runs per timed stage, best kept (default 1)")
     args = parser.parse_args(argv)
 
     np.seterr(all="ignore")
@@ -509,6 +622,10 @@ def main(argv: list[str] | None = None) -> int:
         wanted = {k.upper() for k in args.case}
         if args.real is not None:
             run_real(args.real, versions, args.timing_mp)
+            if not wanted:
+                return 0
+        elif args.timing_mp > 0:
+            run_timing(versions, args.timing_mp, max(1, args.timing_repeats))
             if not wanted:
                 return 0
         for case in CASES:

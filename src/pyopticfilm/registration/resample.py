@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from itertools import pairwise
 
 import numpy as np
 
@@ -360,6 +361,7 @@ def warp_x_field(mov: np.ndarray, dx: float, coef: np.ndarray, *, method: str = 
     phases = 1024
     first, table = _row_tap_weights(np.arange(phases + 1, dtype=np.float64) / phases, method)
     xs = np.arange(w, dtype=np.float64)
+    cols = np.arange(w, dtype=np.int64)
     trail = (None,) * (arr.ndim - 2)
     out = np.empty(arr.shape, dtype=dtype)
 
@@ -368,11 +370,29 @@ def warp_x_field(mov: np.ndarray, dx: float, coef: np.ndarray, *, method: str = 
         pos = xs - dx - quadratic_field(coef, xs, 0.5 * (r0 + r1 - 1), w, h)
         base = np.floor(pos).astype(np.int64)
         phase = np.rint((pos - base) * phases).astype(np.int64)
-        src = arr[r0:r1].astype(np.float32)
-        acc = np.zeros(src.shape, dtype=np.float32)
+        # Tap i of column x reads column x + offset[x] + i, clamped to the frame. The
+        # field is smooth, so offset holds over long runs of columns: each run is a
+        # slice of an edge-padded copy, where a gather per tap cost several times more.
+        offset = base - cols + first
+        left = max(-int(offset.min()), 0)
+        right = max(int(offset.max()) + len(table) - 1, 0)
+        padded = np.empty((r1 - r0, left + w + right, *arr.shape[2:]), dtype=np.float32)
+        padded[:, :left] = arr[r0:r1, :1]
+        padded[:, left : left + w] = arr[r0:r1]
+        padded[:, left + w :] = arr[r0:r1, -1:]
+        cuts = [0, *(np.flatnonzero(np.diff(offset)) + 1).tolist(), w]
+        acc = np.zeros((r1 - r0, *arr.shape[1:]), dtype=np.float32)
+        scaled = np.empty_like(acc)
         for i, taps in enumerate(table):
-            acc += taps[phase][(None, slice(None), *trail)] * src[:, np.clip(base + first + i, 0, w - 1)]
-        out[r0:r1] = np.clip(np.rint(acc), 0, top) if integer else acc
+            weights = taps[phase][(slice(None), *trail)]
+            for c0, c1 in pairwise(cuts):
+                first_col = left + int(offset[c0]) + i + c0
+                np.multiply(padded[:, first_col : first_col + c1 - c0], weights[c0:c1], out=scaled[:, c0:c1])
+            acc += scaled
+        if integer:
+            np.rint(acc, out=acc)
+            np.clip(acc, 0, top, out=acc)
+        out[r0:r1] = acc
 
     with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
         list(pool.map(warp_band, range(0, h, band_rows)))
@@ -406,15 +426,28 @@ def warp_row_shifts(
     shift_x = -float(dx)
     base_x = int(np.floor(shift_x))
     first_x, weights_x = _row_tap_weights(np.asarray([shift_x - base_x]), method)
-    cols = np.arange(arr.shape[1])
-    tap_cols = [np.clip(cols + base_x + first_x + i, 0, arr.shape[1] - 1) for i in range(len(weights_x))]
+    taps_x = [float(w_i[0]) for w_i in weights_x]
+    width = arr.shape[1]
+    # Tap i reads columns start + i onward, clamped to the frame. One edge-padded
+    # float copy serves every tap as a slice; a gather per tap cost several times more.
+    start = base_x + first_x
+    span = width + len(taps_x) - 1
+    left = min(max(-start, 0), span)
+    right = min(max(start + span - width, 0), span)
 
     def horiz(p: np.ndarray) -> np.ndarray:
         if abs(shift_x) < 1e-12:
             return p.astype(np.float32, copy=False)
-        acc = float(weights_x[0][0]) * p[:, tap_cols[0]].astype(np.float32)
-        for w_i, c in zip(weights_x[1:], tap_cols[1:], strict=True):
-            acc += float(w_i[0]) * p[:, c].astype(np.float32)
+        padded = np.empty((p.shape[0], span, *p.shape[2:]), dtype=np.float32)
+        padded[:, :left] = p[:, :1]
+        padded[:, span - right :] = p[:, -1:]
+        if span - left - right > 0:
+            padded[:, left : span - right] = p[:, start + left : start + span - right]
+        acc = taps_x[0] * padded[:, :width]
+        scaled = np.empty_like(acc)
+        for i, w_i in enumerate(taps_x[1:], 1):
+            np.multiply(padded[:, i : i + width], w_i, out=scaled)
+            acc += scaled
         return acc
 
     # Vertical: dst(y) = src(y - dy[y]) ⇒ sample index sy = y - dy[y]
@@ -434,10 +467,18 @@ def warp_row_shifts(
         lo = int(min(t[r0:r1].min() for t in tap_rows))
         hi = int(max(t[r0:r1].max() for t in tap_rows)) + 1
         slab = horiz(arr[lo:hi])
-        acc = weights[0][r0:r1][(slice(None), *trail)] * slab[tap_rows[0][r0:r1] - lo]
-        for w_i, rows in zip(weights[1:], tap_rows[1:], strict=True):
-            acc += w_i[r0:r1][(slice(None), *trail)] * slab[rows[r0:r1] - lo]
-        out[r0:r1] = np.clip(np.rint(acc), 0, top) if integer else acc
+        acc = np.empty((r1 - r0, *slab.shape[1:]), dtype=np.float32)
+        scaled = np.empty_like(acc)
+        for i, (w_i, rows) in enumerate(zip(weights, tap_rows, strict=True)):
+            target = acc if i == 0 else scaled
+            np.take(slab, rows[r0:r1] - lo, axis=0, out=target, mode="clip")
+            np.multiply(target, w_i[r0:r1][(slice(None), *trail)], out=target)
+            if i:
+                acc += scaled
+        if integer:
+            np.rint(acc, out=acc)
+            np.clip(acc, 0, top, out=acc)
+        out[r0:r1] = acc
 
     with ThreadPoolExecutor(max_workers=_warp_workers()) as pool:
         list(pool.map(warp_band, range(0, h, chunk)))

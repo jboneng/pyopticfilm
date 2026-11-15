@@ -61,3 +61,23 @@ def test_guizar_matches_centroid_sign_and_subpixel():
     assert abs(dy_g - dy_c) < 0.15, (dy_g, dy_c)
     assert abs(dx_g - true[0]) < 0.2
     assert abs(dy_g - true[1]) < 0.2
+
+
+def test_phase_correlate_batch_equals_per_tile_calls():
+    """The stacked FFT path returns each tile's refined shift exactly."""
+    from pyopticfilm.registration.phase import phase_correlate_batch
+
+    rng = np.random.default_rng(3)
+    shifts = [(0.0, 0.0), (0.4, -0.7), (-1.3, 0.2), (2.6, 1.9), (-0.05, -2.45), (1.0, -1.0)]
+    for side in (128, 100):  # 100 pads to an FFT-friendly 100; 128 needs no padding
+        refs, movs = [], []
+        for dx, dy in shifts:
+            tile = rng.normal(0.0, 500.0, (side, side)).astype(np.float32)
+            refs.append(tile - tile.mean())
+            moved = warp_shift(tile, -dx, -dy, method="cubic")
+            movs.append(moved - moved.mean())
+        dxs, dys = phase_correlate_batch(np.stack(movs), np.stack(refs), upsample=16)
+        for i, (ref, mov) in enumerate(zip(refs, movs, strict=True)):
+            dx, dy, _ = phase_correlate_shift(ref, mov, upsample=16)
+            assert (float(dxs[i]), float(dys[i])) == (dx, dy)
+        assert len({(float(x), float(y)) for x, y in zip(dxs, dys, strict=True)}) > 1

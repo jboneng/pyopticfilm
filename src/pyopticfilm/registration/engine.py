@@ -14,7 +14,7 @@ from pyopticfilm.registration.models import (
     line_warp_from_profile,
     shift_is_pathological,
 )
-from pyopticfilm.registration.phase import phase_correlate_shift
+from pyopticfilm.registration.phase import phase_correlate_batch, phase_correlate_shift
 from pyopticfilm.registration.preprocess import (
     coarse_luma_registration_pair,
     coarse_registration_pair,
@@ -40,6 +40,8 @@ logger = get_logger(__name__)
 # smaller-|shift| axis value — the larger one is usually a cross-modal lobe.
 _RGB_IR_SEED_AGREE_PX = 0.5
 _RGB_IR_REFINE_KEEP_SEED_PX = 0.25
+# ME shift-field tiles correlated per FFT call; bounds the stack's memory on large frames.
+_FIELD_TILE_BATCH = 32
 
 
 def _rgb_ir_merge_seed_axes(grad_dx: float, grad_dy: float, luma_dx: float, luma_dy: float) -> tuple[float, float]:
@@ -477,16 +479,32 @@ def estimate_shift_field(
         return None
     origins = [(y0, x0) for y0 in range(side // 2, h - side, step) for x0 in range(side // 2, w - side, step)]
 
-    def measure(origin: tuple[int, int]) -> tuple[float, float, float, float] | None:
-        y0, x0 = origin
-        a, b = ref[y0 : y0 + side, x0 : x0 + side], mov[y0 : y0 + side, x0 : x0 + side]
-        if float(b.max()) >= opt.field_clip_level or float(a.std()) < opt.field_min_tile_std:
-            return None
-        dx, dy, _ = phase_correlate_shift(a - a.mean(), b - b.mean(), upsample=opt.subpixel_factor)
-        return x0 + side / 2.0, y0 + side / 2.0, dx, dy
+    def measure(chunk: list[tuple[int, int]]) -> list[tuple[float, float, float, float]]:
+        kept: list[tuple[int, int]] = []
+        refs: list[np.ndarray] = []
+        movs: list[np.ndarray] = []
+        for y0, x0 in chunk:
+            a, b = ref[y0 : y0 + side, x0 : x0 + side], mov[y0 : y0 + side, x0 : x0 + side]
+            if float(b.max()) >= opt.field_clip_level or float(a.std()) < opt.field_min_tile_std:
+                continue
+            kept.append((y0, x0))
+            refs.append(a - a.mean())
+            movs.append(b - b.mean())
+        if not kept:
+            return []
+        if opt.subpixel_factor > 1:
+            dxs, dys = phase_correlate_batch(np.stack(movs), np.stack(refs), upsample=opt.subpixel_factor)
+        else:
+            dxs, dys = zip(*(phase_correlate_shift(a, b)[:2] for a, b in zip(refs, movs, strict=True)), strict=True)
+        return [
+            (x0 + side / 2.0, y0 + side / 2.0, float(dx), float(dy))
+            for (y0, x0), dx, dy in zip(kept, dxs, dys, strict=True)
+        ]
 
+    # Stacks of tiles per FFT call: one call per tile spends its time on overhead.
+    chunks = [origins[i : i + _FIELD_TILE_BATCH] for i in range(0, len(origins), _FIELD_TILE_BATCH)]
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
-        tiles = [t for t in pool.map(measure, origins) if t is not None]
+        tiles = [t for batch in pool.map(measure, chunks) for t in batch]
     if not tiles:
         return None
     arr = np.asarray(tiles, dtype=np.float64)
