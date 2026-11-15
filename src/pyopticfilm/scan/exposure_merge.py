@@ -491,12 +491,26 @@ def _pass_variances(
     return va, vb
 
 
+def _channel_sum(x: np.ndarray, axis: int) -> np.ndarray:
+    """``x.sum(axis)`` over the channel axis, as plane additions in the same order.
+
+    A reduction over an axis three long spends its time on per-pixel loop overhead.
+    """
+    planes = np.moveaxis(x, axis, 0)
+    total = planes[0] + planes[1]
+    for plane in planes[2:]:
+        total = total + plane
+    return total
+
+
 def _confident_luma(
     conf: np.ndarray,
     xa: np.ndarray,
     xb: np.ndarray,
     va: np.ndarray,
     vb: np.ndarray,
+    *,
+    axis: int = 2,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Luma of both passes and its variances over channels confident in both.
 
@@ -507,17 +521,18 @@ def _confident_luma(
     Returns ``(lum_xa, lum_xb, va_lum, vb_lum, has)``; ``has`` is False where
     no channel is confident in both passes. Channel noise is independent, so the
     luma variances are those of a weighted average, not the average variance.
+    ``axis`` is the channel axis of the inputs.
     """
-    wsum = conf.sum(axis=2)
+    wsum = _channel_sum(conf, axis)
     has = wsum > 1e-6
     wsafe = np.maximum(wsum, 1e-6)
     w2 = conf * conf
     w2sum = wsafe * wsafe
     return (
-        (conf * xa).sum(axis=2) / wsafe,
-        (conf * xb).sum(axis=2) / wsafe,
-        (w2 * va).sum(axis=2) / w2sum,
-        (w2 * vb).sum(axis=2) / w2sum,
+        _channel_sum(conf * xa, axis) / wsafe,
+        _channel_sum(conf * xb, axis) / wsafe,
+        _channel_sum(w2 * va, axis) / w2sum,
+        _channel_sum(w2 * vb, axis) / w2sum,
         has,
     )
 
@@ -580,25 +595,40 @@ def _merge_snr_rows(
     beta: np.ndarray,
     long_var_scale: np.ndarray,
     conf_lut: np.ndarray,
-    floor: float,
     clip_start: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """IVW merge for one row band; returns uint16 chunk and stat accumulators.
+) -> tuple[np.ndarray, float, float, int, int, float]:
+    """IVW merge for one row band; returns the uint16 chunk and stat accumulators.
 
     The band carries :data:`_GUARD_RADIUS` extra rows on inner edges so the box
     filter does not see the band split; ``keep`` selects the rows to return.
+    ``curve`` is the transfer LUT with channels first, ``long_var_scale`` the
+    band's per-row factors. The chunk comes back as ``(rows, W, C)``; the rest
+    is ``(short weight sum, long weight sum, weight count, zero-weight pixels,
+    residual confidence sum)``.
+
+    Works on channel-first planes. With channels last, every per-channel term
+    and every sum over channels runs an inner loop three long, which made up
+    most of the band's time.
     """
-    a = short_rows.astype(np.float32)
-    b_raw = long_rows.astype(np.float32)
+    short_c = np.ascontiguousarray(short_rows.transpose(2, 0, 1))
+    long_c = np.ascontiguousarray(long_rows.transpose(2, 0, 1))
+    per_channel = (slice(None), np.newaxis, np.newaxis)
+    r, alpha, beta = r[per_channel], alpha[per_channel], beta[per_channel]
+    a = short_c.astype(np.float32)
+    b_raw = long_c.astype(np.float32)
     xa = a
-    xb = _long_to_short(long_rows, curve)
+    xb = np.empty_like(a)
+    for channel in range(a.shape[0]):
+        xb[channel] = curve[channel][long_c[channel]]
 
-    ca = conf_lut[short_rows]
-    cb = conf_lut[long_rows]
+    ca = conf_lut[short_c]
+    cb = conf_lut[long_c]
 
-    va, vb = _pass_variances(xa, xb, cb, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale)
+    va, vb = _pass_variances(
+        xa, xb, cb, r=r, alpha=alpha, beta=beta, long_var_scale=long_var_scale.reshape(1, -1, 1)
+    )
 
-    lum_xa, lum_xb, va_lum, vb_lum, has = _confident_luma(np.minimum(ca, cb), xa, xb, va, vb)
+    lum_xa, lum_xb, va_lum, vb_lum, has = _confident_luma(np.minimum(ca, cb), xa, xb, va, vb, axis=0)
     var_lum = va_lum + vb_lum
     residual = np.where(has, lum_xa - lum_xb, 0.0)
     z_local = residual / np.sqrt(np.maximum(var_lum, 1e-12)) - z_median
@@ -606,7 +636,7 @@ def _merge_snr_rows(
     # No channel confident in both: nothing to compare, and IVW is one-sided anyway.
     c_res = np.where(has, np.minimum(_residual_confidence(z_local), agreement), 1.0)[keep]
 
-    a, b_raw, xa, xb, ca, cb, va, vb = (x[keep] for x in (a, b_raw, xa, xb, ca, cb, va, vb))
+    a, b_raw, xa, xb, ca, cb, va, vb = (x[:, keep] for x in (a, b_raw, xa, xb, ca, cb, va, vb))
 
     wa = ca / np.maximum(va, 1e-12)
     wb = cb / np.maximum(vb, 1e-12)
@@ -616,7 +646,7 @@ def _merge_snr_rows(
     # Passes disagree: keep the short, the reference geometry, for all channels so
     # no colour fringes appear. Only as far as it has a reading, though: at its
     # noise floor or clip the long is all there is.
-    c = c_res[..., np.newaxis]
+    c = c_res[np.newaxis]
     out = c * ivw + (1.0 - c) * (ca * xa + (1.0 - ca) * ivw)
     # No confident input. A short clipped at the top keeps its reading — 0 there
     # turned clear film / slide highlights black. Below the noise floor an
@@ -629,9 +659,17 @@ def _merge_snr_rows(
     fallback = np.where(a >= clip_start, xa, np.where(b_raw < clip_start, np.maximum(xa, xb), 0.0))
     out = np.where(both_zero, fallback, out)
 
-    both_zero_pix = np.all(both_zero, axis=2)
-    chunk = np.rint(np.clip(out, 0, 65535)).astype(np.uint16)
-    return chunk, wa, wb, both_zero_pix, c_res
+    chunk = np.rint(np.clip(out, 0, 65535)).astype(np.uint16).transpose(1, 2, 0)
+    # The weight sums run with channels last, the order they always had: a float32
+    # sum rounds differently in another order.
+    return (
+        chunk,
+        float(np.ascontiguousarray(wa.transpose(1, 2, 0)).sum()),
+        float(np.ascontiguousarray(wb.transpose(1, 2, 0)).sum()),
+        int(wa.size),
+        int(np.count_nonzero(np.all(both_zero, axis=0))),
+        float(c_res.sum()),
+    )
 
 
 def _merge_snr(
@@ -694,34 +732,29 @@ def _merge_snr(
     out = np.empty_like(short_u)
     total_pixels = int(h * w)
     conf_lut = _confidence_lut(floor=floor, clip_start=clip_start, clip_end=clip_end)
+    curve_by_channel = np.ascontiguousarray(curve.T)
+    row_var_scale = long_var_scale.astype(np.float32)
     band_rows = max(32, min(_MERGE_CHUNK_ROWS, _MERGE_BAND_PIXELS // max(w, 1)))
 
     def merge_band(y0: int) -> tuple[float, float, int, int, float]:
         y1 = min(h, y0 + band_rows)
         pad_y0 = max(0, y0 - _GUARD_RADIUS)
         pad_y1 = min(h, y1 + _GUARD_RADIUS)
-        chunk, wa, wb, both_zero_pix, c_res_eff = _merge_snr_rows(
+        chunk, *sums = _merge_snr_rows(
             short_u[pad_y0:pad_y1],
             long_u[pad_y0:pad_y1],
             keep=slice(y0 - pad_y0, y1 - pad_y0),
             r=r,
-            curve=curve,
+            curve=curve_by_channel,
             z_median=z_median,
             alpha=alpha_c,
             beta=beta_c,
-            long_var_scale=long_var_scale[pad_y0:pad_y1, np.newaxis, np.newaxis].astype(np.float32),
+            long_var_scale=row_var_scale[pad_y0:pad_y1],
             conf_lut=conf_lut,
-            floor=floor,
             clip_start=clip_start,
         )
         out[y0:y1] = chunk
-        return (
-            float(wa.sum()),
-            float(wb.sum()),
-            int(wa.size),
-            int(np.count_nonzero(both_zero_pix)),
-            float(c_res_eff.sum()),
-        )
+        return tuple(sums)
 
     with ThreadPoolExecutor(max_workers=_MERGE_WORKERS) as pool:
         bands = list(pool.map(merge_band, range(0, h, band_rows)))
@@ -849,7 +882,7 @@ def merge_n_passes(
     def merge_band(y0: int) -> tuple[float, int, int, int]:
         y1 = min(h, y0 + _MERGE_CHUNK_ROWS)
         rows = [np.asarray(f[y0:y1]) for f in frames]
-        lumas = [r.astype(np.float32).mean(axis=2) for r in rows]
+        lumas = [_channel_sum(r.astype(np.float32), 2) / r.shape[2] for r in rows]
         luma_median = _median_planes(lumas)
 
         # One frame at a time, so a band holds a few planes however many frames there are.
@@ -861,7 +894,7 @@ def merge_n_passes(
             variance = alpha * np.maximum(x, 0.0) + beta
             w_i = c / np.maximum(variance, 1e-12)
             is_outlier = np.abs(lum - luma_median) > _LUMA_DISAGREE_TAU
-            w_i = np.where(is_outlier[..., np.newaxis], 0.0, w_i)
+            w_i[is_outlier] = 0.0
             outlier_any |= is_outlier
             if acc is None:
                 acc, w_sum, conf_total, all_zero_conf = w_i * x, w_i, c, c <= 1e-6
