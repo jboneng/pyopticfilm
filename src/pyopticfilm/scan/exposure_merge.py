@@ -742,6 +742,27 @@ def _merge_snr(
     return out, stats
 
 
+def _median_planes(planes: list[np.ndarray]) -> np.ndarray:
+    """Per-pixel median of same-shape planes, as ``np.median`` over their stack.
+
+    Two to four planes take min/max selections, which skip the stack's sort.
+    """
+    n = len(planes)
+    if n == 1:
+        return planes[0]
+    if n == 2:
+        return (planes[0] + planes[1]) / np.float32(2.0)
+    if n == 3:
+        a, b, c = planes
+        return np.maximum(np.minimum(a, b), np.minimum(np.maximum(a, b), c))
+    if n == 4:
+        a, b, c, d = planes
+        low = np.maximum(np.minimum(a, b), np.minimum(c, d))
+        high = np.minimum(np.maximum(a, b), np.maximum(c, d))
+        return (low + high) / np.float32(2.0)
+    return np.median(np.stack(planes, axis=0), axis=0)
+
+
 def merge_n_passes(
     frames: list[np.ndarray],
     *,
@@ -814,59 +835,66 @@ def merge_n_passes(
 
     h, w = ref.shape[:2]
     out = np.empty((h, w, 3), dtype=np.uint16)
-    conf_sum = 0.0
-    n_conf = 0
-    zero_count = 0
-    outlier_count = 0
+    n_frames = len(frames)
+    # A lookup beats the ramps, but only uint16 readings index it.
+    conf_lut = None
+    if all(np.asarray(f).dtype == np.uint16 for f in frames):
+        conf_lut = _confidence_lut(floor=_SNR_FLOOR, clip_start=_SNR_CLIP_START, clip_end=_SNR_CLIP_END)
 
-    for y0 in range(0, h, _MERGE_CHUNK_ROWS):
+    def confidence(rows: np.ndarray, x: np.ndarray) -> np.ndarray:
+        if conf_lut is not None:
+            return conf_lut[rows]
+        return _smooth_confidence(x, floor=_SNR_FLOOR, clip_start=_SNR_CLIP_START, clip_end=_SNR_CLIP_END)
+
+    def merge_band(y0: int) -> tuple[float, int, int, int]:
         y1 = min(h, y0 + _MERGE_CHUNK_ROWS)
-        xs = [np.asarray(f[y0:y1], dtype=np.float32) for f in frames]
-        cs = [
-            _smooth_confidence(x, floor=_SNR_FLOOR, clip_start=_SNR_CLIP_START, clip_end=_SNR_CLIP_END)
-            for x in xs
-        ]
-        lumas = [x.mean(axis=2) for x in xs]
-        luma_median = np.median(np.stack(lumas, axis=0), axis=0)
+        rows = [np.asarray(f[y0:y1]) for f in frames]
+        lumas = [r.astype(np.float32).mean(axis=2) for r in rows]
+        luma_median = _median_planes(lumas)
 
-        weights: list[np.ndarray] = []
+        # One frame at a time, so a band holds a few planes however many frames there are.
         outlier_any = np.zeros((y1 - y0, w), dtype=bool)
-        for x, c, lum in zip(xs, cs, lumas, strict=True):
+        acc = w_sum = conf_total = all_zero_conf = None
+        for r, lum in zip(rows, lumas, strict=True):
+            x = r.astype(np.float32)
+            c = confidence(r, x)
             variance = alpha * np.maximum(x, 0.0) + beta
             w_i = c / np.maximum(variance, 1e-12)
             is_outlier = np.abs(lum - luma_median) > _LUMA_DISAGREE_TAU
             w_i = np.where(is_outlier[..., np.newaxis], 0.0, w_i)
             outlier_any |= is_outlier
-            weights.append(w_i)
-
-        acc = weights[0] * xs[0]
-        w_sum = weights[0].copy()
-        all_zero_conf = cs[0] <= 1e-6
-        for x, c, w_i in zip(xs[1:], cs[1:], weights[1:], strict=True):
-            acc += w_i * x
-            w_sum += w_i
-            all_zero_conf &= c <= 1e-6
+            if acc is None:
+                acc, w_sum, conf_total, all_zero_conf = w_i * x, w_i, c, c <= 1e-6
+            else:
+                acc += w_i * x
+                w_sum += w_i
+                conf_total = conf_total + c
+                all_zero_conf &= c <= 1e-6
         merged = acc / np.maximum(w_sum, 1e-12)
         # Every frame's weight collapsed to zero at a pixel (e.g. all
         # flagged outlier) — fall back to the plain mean rather than a
         # near-zero denominator.
         no_weight = w_sum <= 1e-9
-        if np.any(no_weight):
-            plain_mean = np.mean(np.stack(xs, axis=0), axis=0)
-            merged = np.where(no_weight, plain_mean, merged)
         # No confident frame (below the noise floor or clipped in every
         # frame): the plain mean keeps the reading — 0 here crushed the
         # densest areas to black one DN under the floor.
-        if np.any(all_zero_conf):
-            plain_mean = np.mean(np.stack(xs, axis=0), axis=0)
-            merged = np.where(all_zero_conf, plain_mean, merged)
+        use_mean = no_weight | all_zero_conf
+        if np.any(use_mean):
+            plain_mean = np.mean(np.stack([r.astype(np.float32) for r in rows], axis=0), axis=0)
+            merged = np.where(use_mean, plain_mean, merged)
 
         out[y0:y1] = np.clip(merged, 0, 65535).astype(np.uint16)
-        conf_mean_pixel = np.mean(np.stack(cs, axis=0), axis=0)
-        conf_sum += float(conf_mean_pixel.sum())
-        n_conf += int(conf_mean_pixel.size)
-        zero_count += int(np.count_nonzero(np.all(no_weight, axis=-1)))
-        outlier_count += int(np.count_nonzero(outlier_any))
+        conf_mean_pixel = conf_total / np.float32(n_frames)
+        return (
+            float(conf_mean_pixel.sum()),
+            int(conf_mean_pixel.size),
+            int(np.count_nonzero(np.all(no_weight, axis=-1))),
+            int(np.count_nonzero(outlier_any)),
+        )
+
+    with ThreadPoolExecutor(max_workers=_MERGE_WORKERS) as pool:
+        bands = list(pool.map(merge_band, range(0, h, _MERGE_CHUNK_ROWS)))
+    conf_sum, n_conf, zero_count, outlier_count = (sum(column) for column in zip(*bands, strict=True))
 
     stats = PassMergeStats(
         n_frames=len(frames),
