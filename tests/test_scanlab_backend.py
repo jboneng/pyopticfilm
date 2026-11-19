@@ -12,6 +12,7 @@ from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.select import KNOWN_MODELS
 from pyopticfilm.exceptions import DeviceNotFoundError
+from pyopticfilm.usb.device import UsbDeviceInfo
 from tools.scanlab.backend import (
     LabTarget,
     apply_lab_decode_layout,
@@ -47,6 +48,30 @@ def test_list_lab_targets_without_usb(monkeypatch):
     targets = list_lab_targets()
     assert {t.model.name for t in targets} == {m.name for m in KNOWN_MODELS}
     assert all(t.mock and t.device_id is None for t in targets)
+
+
+@pytest.mark.parametrize(
+    ("bcd", "expected_model"),
+    [(0x0400, "OpticFilm 7400 (v1)"), (0x0605, "OpticFilm 7400")],
+)
+def test_list_lab_targets_connected_label_shows_bcd(monkeypatch, bcd, expected_model):
+    info = UsbDeviceInfo(
+        vendor_id=0x07B3,
+        product_id=0x0C3A,
+        bus=1,
+        address=5,
+        product="OpticFilm 7400",
+        bcd_device=bcd,
+    )
+    monkeypatch.setattr("tools.scanlab.backend.list_devices", lambda: [info])
+    connected = [t for t in list_lab_targets() if t.device_id is not None]
+    assert len(connected) == 1
+    label = connected[0].label
+    assert connected[0].model.model == expected_model
+    assert f"bcd 0x{bcd:04x}" in label
+    assert label.endswith("— connected")
+    if expected_model != info.product:
+        assert f"→ {expected_model}" in label
 
 
 def test_with_mock_mode_selects_real():
