@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Scan Lab device list shows `bcdDevice` and the resolved model** for connected scanners, e.g. `OpticFilm 7400 (plustek:usb:07b3:0c3a:001:005, bcd 0x0400) → OpticFilm 7400 (v1) — connected`. The 7400 and 7600i each share one product id across two hardware versions, which only `bcdDevice` tells apart, so the list now shows which one was detected.
+
 ## [1.3.10] - 2026-11-14
 
 ### Added

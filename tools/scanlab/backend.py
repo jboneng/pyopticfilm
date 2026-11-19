@@ -287,6 +287,18 @@ def format_scan_window_log(
     return text
 
 
+def connected_target_label(info: UsbDeviceInfo, model: FilmModel) -> str:
+    """Device-list label for a connected scanner.
+
+    Shows ``bcdDevice`` and the resolved model, since some product ids
+    (``0x0c3a`` 7400, ``0x0c3b`` 7600i) cover two hardware versions that
+    only ``bcdDevice`` tells apart.
+    """
+    name = info.product or model.model
+    resolved = "" if name == model.model else f" → {model.model}"
+    return f"{name} ({info.device_id}, bcd 0x{info.bcd_device:04x}){resolved} — connected"
+
+
 def list_lab_targets() -> list[LabTarget]:
     targets: list[LabTarget] = []
     connected_models: set[str] = set()
@@ -299,10 +311,9 @@ def list_lab_targets() -> list[LabTarget]:
             model = model_for_device(info.product_id, info.bcd_device)
         except Exception:  # noqa: BLE001, S112
             continue
-        name = info.product or model.model
         targets.append(
             LabTarget(
-                label=f"{name} ({info.device_id}) — connected",
+                label=connected_target_label(info, model),
                 model=model,
                 device_id=info.device_id,
             )
