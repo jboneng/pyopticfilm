@@ -45,6 +45,8 @@ FEED_STALL_S = 10.0
 PREFEED_MIN_SPEEDUP = 1.5
 #: Tiny normalized window for the pre-feed scan (a few lines, ~50 px).
 PREFEED_AREA = (0.0, 0.0, 0.05, 0.01)
+#: Shorter moves stay on the scan slope (SANE fast-feeds above 100 steps).
+FAST_FEED_MIN_STEPS = 100
 DATA_TIMEOUT_S = 30.0
 BULK_CHUNK_LINES = 8
 HOME_SCAN_PIXELS = 50
@@ -470,8 +472,13 @@ class ScanSession:
         elif method == "infrared":
             self._drop_ir_host_flatten()
 
+        auto_home = False
         if getattr(self.model, "asic", "") == "GL845":
-            geometry = self._prefeed(geometry, method=method, cancel=cancel)
+            if getattr(self.model, "fast_feed", False):
+                geometry = self._fast_feed(geometry, cancel=cancel)
+            else:
+                geometry = self._prefeed(geometry, method=method, cancel=cancel)
+            auto_home = bool(getattr(self.model, "scan_auto_home", False))
         raw = self.acquire_raw(
             geometry,
             method=method,
@@ -479,6 +486,7 @@ class ScanSession:
             start_motor=True,
             progress=progress,
             cancel=cancel,
+            auto_home=auto_home,
         )
 
         use_host = (
@@ -549,6 +557,83 @@ class ScanSession:
             geometry.starty - moved,
         )
         return replace(geometry, starty=int(geometry.starty) - moved)
+
+    def _fast_feed(
+        self,
+        geometry: ScanGeometry,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> ScanGeometry:
+        """Feed most of the way to the film with one FASTFED move.
+
+        SilverFast moves to the film on the fast table with SCAN off, then
+        starts the image pass with almost no feed left. This does the same
+        and stops ``prefeed_margin_steps`` short; FEEDL is relative, so the
+        image pass feeds the remainder on the scan slope.
+        """
+        model = self.model
+        margin = int(getattr(model, "prefeed_margin_steps", 0) or 0)
+        steps = int(geometry.starty) - margin
+        if margin <= 0 or steps < FAST_FEED_MIN_STEPS:
+            return geometry
+        proto = self.asic.protocol
+        r = self.regs
+        mp = model.motor_profile
+        cache = dict(self.asic._reg_cache) or model.boot_register_map()
+        feedl = steps << mp.step_type
+        fast_payload = slope_table_to_bytes(create_fast_slope_table(profile=mp).table)
+
+        cache[0x01] = cache.get(0x01, 0x22) & ~r.SCAN
+        cache[0x02] = r.MTRPWR | r.FASTFED
+        self._set24(cache, 0x3D, feedl)
+        for addr, value in mp.reg_overrides:
+            cache[addr] = value & 0xFF
+        t0 = time.monotonic()
+        try:
+            for addr in (0x01, 0x3D, 0x3E, 0x3F, *(a for a, _ in mp.reg_overrides), 0x02):
+                proto.write_register(addr, cache[addr])
+            self.asic._reg_cache = cache
+            for table_nr in (3, 4):
+                proto.write_ahb(SLOPE_TABLE_AHB[table_nr], fast_payload)
+            proto.write_register(0x0D, 0x05)  # CLRLNCNT | CLRMCNT
+            proto.write_register(0x0F, 0x01)
+            self._wait_fast_feed(cancel)
+        finally:
+            # SilverFast ends the move by dropping MTRPWR and resetting FEEDL.
+            cache[0x02] = r.FASTFED
+            proto.write_register(0x02, cache[0x02])
+            proto.write_u24(0x3D, 1)
+            self._set24(cache, 0x3D, 1)
+            self.asic._reg_cache = cache
+        counted = self._read_feed_steps()
+        moved = steps + int(getattr(model, "fast_feed_offset_steps", 0))
+        logger.info(
+            "fast feed %d steps (FEEDL %d, counter %d) in %.1fs; image feed %d → %d",
+            moved,
+            feedl,
+            counted,
+            time.monotonic() - t0,
+            geometry.starty,
+            geometry.starty - moved,
+        )
+        return replace(geometry, starty=int(geometry.starty) - moved)
+
+    def _wait_fast_feed(self, cancel: threading.Event | None) -> None:
+        """Poll until FEEDFSH; fail on a stalled counter or a timeout."""
+        start = time.monotonic()
+        last_steps, last_move = -1, start
+        while (now := time.monotonic()) - start < FEED_TIMEOUT_S:
+            if cancel is not None and cancel.is_set():
+                raise ScanCancelled("cancelled during feed")
+            if self.asic.read_status().is_feeding_finished:
+                return
+            steps = self._read_feed_steps()
+            if steps != last_steps:
+                last_steps, last_move = steps, now
+            elif now - last_move > FEED_STALL_S:
+                raise MotorTimeoutError(f"Fast feed stalled at {steps} steps for {FEED_STALL_S:.0f}s")
+            time.sleep(0.02)
+        raise MotorTimeoutError(f"Fast feed did not finish within {FEED_TIMEOUT_S:.0f}s")
 
     def _calib_for_exposure(self, calib, geometry: ScanGeometry, method: str):
         """Scale white when the image LPERIOD differs from the calib LPERIOD.
@@ -650,8 +735,13 @@ class ScanSession:
         start_motor: bool,
         progress: Callable[[float], None] | None = None,
         cancel: threading.Event | None = None,
+        auto_home: bool = False,
     ) -> bytes:
-        """Configure ASIC, run one capture, return raw optical bytes."""
+        """Configure ASIC, run one capture, return raw optical bytes.
+
+        ``auto_home`` sets AGOHOME for the pass and waits for the carriage to
+        return home when it ends.
+        """
         self.asic.set_scan_method(method)  # type: ignore[arg-type]
         # Recorded for subclasses that must reflect lamp state in the register
         # block they write during _configure.
@@ -667,7 +757,11 @@ class ScanSession:
             self.asic.lamp_off()
 
         try:
-            self._configure(geometry)
+            # Subclasses override ``_configure`` / ``_end_scan`` without ``auto_home``.
+            if auto_home:
+                self._configure(geometry, auto_home=True)
+            else:
+                self._configure(geometry)
             self._begin_scan(start_motor=start_motor)
             raw = self._acquire(
                 geometry,
@@ -677,12 +771,18 @@ class ScanSession:
             )
         except BaseException:
             try:
-                self._end_scan()
+                self._finish_capture(auto_home)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("end_scan after failed capture: %s", exc)
             raise
-        self._end_scan()
+        self._finish_capture(auto_home)
         return raw
+
+    def _finish_capture(self, auto_home: bool) -> None:
+        if auto_home:
+            self._end_scan(auto_home=True)
+        else:
+            self._end_scan()
 
     def _lamp_lit(self, method: str) -> bool:
         """True when the light source for ``method`` is already on (cached regs)."""
@@ -745,7 +845,9 @@ class ScanSession:
 
     # --- configure ------------------------------------------------------
 
-    def _configure(self, geometry: ScanGeometry, *, home_seek: bool = False) -> None:
+    def _configure(
+        self, geometry: ScanGeometry, *, home_seek: bool = False, auto_home: bool = False
+    ) -> None:
         proto = self.asic.protocol
         r = self.regs
         if self.asic._reg_cache:
@@ -825,6 +927,8 @@ class ScanSession:
         cache[0x02] = r.MTRPWR
         if home_seek:
             cache[0x02] |= r.AGOHOME | r.NOTHOME | r.MTRREV
+        elif auto_home:
+            cache[0x02] |= r.AGOHOME
         if geometry.disable_buffer_full_move:
             cache[0x02] |= r.ACDCDIS
 
@@ -926,8 +1030,11 @@ class ScanSession:
         self.asic.update_home_sensor_gpio()
         logger.info("scan started motor=%s", start_motor)
 
-    def _end_scan(self) -> None:
-        self.asic.stop_motor()
+    def _end_scan(self, *, auto_home: bool = False) -> None:
+        if auto_home:
+            self.asic.end_scan_auto_home()
+        else:
+            self.asic.stop_motor()
 
     def _read_feed_steps(self) -> int:
         proto = self.asic.protocol

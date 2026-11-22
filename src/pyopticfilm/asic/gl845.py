@@ -420,6 +420,26 @@ class Gl845:
 
         raise MotorTimeoutError(f"Could not stop GL845 motor within {timeout_s:.1f}s")
 
+    def end_scan_auto_home(self, *, timeout_s: float = DEFAULT_HOME_TIMEOUT_S) -> None:
+        """End an AGOHOME scan: clear SCAN, then wait for the carriage to get home.
+
+        With AGOHOME set the ASIC drives back on the home table once the scan
+        stops, so there is nothing to stop here until the home sensor trips.
+        """
+        self.update_home_sensor_gpio()
+        reg01 = self.protocol.read_register(self.registers.REG_0x01)
+        if reg01 & self.registers.SCAN:
+            reg01 &= ~self.registers.SCAN
+            self.protocol.write_register(self.registers.REG_0x01, reg01)
+            self._reg_cache[0x01] = reg01
+        self._wait_until_home(timeout_s)
+        deadline = time.monotonic() + MOTOR_STOP_TIMEOUT_S
+        while not self.is_motor_stopped():
+            if time.monotonic() >= deadline:
+                raise MotorTimeoutError("GL845 motor still running after reaching home")
+            time.sleep(HOME_POLL_S)
+        logger.info("scan ended; carriage returned home")
+
     def _stop_motor_legacy(self) -> None:
         """Unverified stop kept for GL843/GL842 until their home path is re-validated."""
         self.update_home_sensor_gpio()

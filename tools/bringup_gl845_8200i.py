@@ -100,6 +100,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Lab unlock for home/scan/park (required for motor steps)",
     )
     parser.add_argument(
+        "--no-fast-feed",
+        action="store_true",
+        help="Feed to the film with the low-resolution pre-feed scan instead of the fast feed",
+    )
+    parser.add_argument(
+        "--no-auto-home",
+        action="store_true",
+        help="Return home with the reverse home seek instead of AGOHOME on the image pass",
+    )
+    parser.add_argument(
         "--log",
         type=Path,
         default=None,
@@ -159,6 +169,20 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 f"Expected {model_label} GL845, got {scanner.model.model} "
                 f"({scanner.model.asic}); select its exact USB device with --device-id"
+            )
+        if args.no_fast_feed or args.no_auto_home:
+            from dataclasses import replace
+
+            # Scans read these flags from the scanner's model.
+            scanner._model = replace(
+                scanner.model,
+                fast_feed=scanner.model.fast_feed and not args.no_fast_feed,
+                scan_auto_home=scanner.model.scan_auto_home and not args.no_auto_home,
+                prefeed_offset_steps=6,
+            )
+            print(
+                f"motor: fast_feed={scanner.model.fast_feed} "
+                f"scan_auto_home={scanner.model.scan_auto_home}"
             )
         if args.allow_unvalidated:
             scanner._allow_unvalidated_scan = True  # lab harness unlock

@@ -290,6 +290,12 @@ class Model8200i:
     prefeed_margin_steps: int = 0
     #: Measured extra travel of the pre-feed scan beyond its nominal distance.
     prefeed_offset_steps: int = 0
+    #: Feed to the film with one FASTFED move on the fast table instead of a pre-feed scan.
+    fast_feed: bool = False
+    #: Measured extra travel of the fast feed beyond its nominal distance.
+    fast_feed_offset_steps: int = 0
+    #: Image passes set AGOHOME: the carriage returns home by itself when the scan ends.
+    scan_auto_home: bool = False
     #: Single-pass prescan target for the film peak (raw counts); ``None`` disables.
     auto_exposure_target: float | None = None
 
@@ -350,8 +356,10 @@ MODEL_8200I = Model8200i(
     # SilverFast searches the PGA gains every pass (about 33/25/36 colour,
     # 53/56/55 infrared); the table codes are only the seed.
     afe_white_target=60000,
-    # Feed at low-res speed first; the image pass feeds the last 400 steps.
+    # SilverFast fast-feeds to the film and scans with AGOHOME set. The image
+    # pass feeds the last 400 steps on the scan slope.
     prefeed_margin_steps=400,
-    prefeed_offset_steps=6,
+    fast_feed=True,
+    scan_auto_home=True,
     motor_profile=MOTOR_8200I,
 )

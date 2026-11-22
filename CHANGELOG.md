@@ -9,14 +9,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **`tools/dump_gl845_capture.py`** summarises a GL845 USB capture: the register state, front-end codes and image bytes at every motor start, and the motor slope tables. It streams the file, so large captures are fine.
-- **`tools/bringup_gl845_8200i.py --log FILE`** writes a DEBUG log of the run, to attach to a hardware report.
+- **`tools/bringup_gl845_8200i.py --log FILE`** writes a DEBUG log of the run, to attach to a hardware report. `--no-fast-feed` and `--no-auto-home` switch the 8200i back to the pre-feed scan and the reverse home seek, to compare the two on hardware.
 
 ### Changed
 
 - **OpticFilm 8200i** (`07b3:130d`, GL845) now follows SilverFast captures of a real unit instead of the plain SANE tables. Still not scan-ready (`scan_ready=False`); hardware testing is tracked in issue #181.
   - **Motor:** the fast-feed and return-home table is SilverFast's (256 steps, top speed word 625). The SANE-derived table reached 400 in 100 steps, faster than SilverFast ever moves this carriage. Motor registers `0x5F`, `0x67`, `0x68` and `0x6A` take the captured values.
   - **Calibration:** dark and white are taken near home (`calib_white_home_y_mm=1.5`) with a 1024-line dark, and the white-strip PGA gain search is on (`afe_white_target=60000`), as on the 7600i v2.
-  - **Feed:** a low-resolution pre-feed covers the travel to the film before slow image passes.
+  - **Feed:** one fast feed (`0x02` FASTFED, SCAN off) covers the travel to the film and stops 400 steps short; the image pass feeds the rest. This replaces the low-resolution pre-feed scan on the 8200i.
+  - **Return home:** image passes set AGOHOME, so the carriage returns by itself when the scan ends, also after a cancel or a failed read. The driver waits for the home sensor instead of running the reverse home seek.
   - The 7600i v2 is unchanged: these are overrides on `MODEL_8200I`, and `MotorProfile` gained optional `fast_table` / `reg_overrides` fields that default to the old behaviour.
 - **Scan Lab device list shows `bcdDevice` and the resolved model** for connected scanners, e.g. `OpticFilm 7400 (plustek:usb:07b3:0c3a:001:005, bcd 0x0400) → OpticFilm 7400 (v1) — connected`. The 7400 and 7600i each share one product id across two hardware versions, which only `bcdDevice` tells apart, so the list now shows which one was detected.
 
