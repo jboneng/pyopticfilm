@@ -28,6 +28,10 @@ class MotorProfile:
     fast_table: tuple[int, ...] | None = None
     #: ``(register, value)`` pairs applied over the computed motor registers.
     reg_overrides: tuple[tuple[int, int], ...] = ()
+    #: Scan-slot table loaded for a fast feed (the move starts on it), with the
+    #: step-count registers that go with it. Both are needed for ``fast_feed``.
+    feed_start_table: tuple[int, ...] | None = None
+    feed_regs: tuple[tuple[int, int], ...] = ()
 
 
 # Default GL845 OpticFilm profile (8200i / 7400 / …)

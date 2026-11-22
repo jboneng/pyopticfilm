@@ -574,25 +574,35 @@ class ScanSession:
         model = self.model
         margin = int(getattr(model, "prefeed_margin_steps", 0) or 0)
         steps = int(geometry.starty) - margin
-        if margin <= 0 or steps < FAST_FEED_MIN_STEPS:
+        mp = model.motor_profile
+        if margin <= 0 or steps < FAST_FEED_MIN_STEPS or mp.feed_start_table is None:
             return geometry
         proto = self.asic.protocol
         r = self.regs
-        mp = model.motor_profile
         cache = dict(self.asic._reg_cache) or model.boot_register_map()
         feedl = steps << mp.step_type
+        start_payload = slope_table_to_bytes(list(mp.feed_start_table))
         fast_payload = slope_table_to_bytes(create_fast_slope_table(profile=mp).table)
 
-        cache[0x01] = cache.get(0x01, 0x22) & ~r.SCAN
-        cache[0x02] = r.MTRPWR | r.FASTFED
-        self._set24(cache, 0x3D, feedl)
-        for addr, value in mp.reg_overrides:
-            cache[addr] = value & 0xFF
+        # The whole motor block is written here: nothing may depend on what an
+        # earlier capture left behind (a cached calibration runs none).
+        motor: dict[int, int] = {0x01: cache.get(0x01, 0x22) & ~r.SCAN}
+        self._set24(motor, 0x3D, feedl)
+        step_sel = mp.step_type << 5
+        self._set24(motor, 0x60, step_sel << 16)  # Z1MOD 0, as SilverFast
+        self._set24(motor, 0x63, step_sel << 16)
+        motor[0x80] = (mp.vref | (mp.vref << 2) | (mp.vref << 4) | (mp.vref << 6)) & 0xFF
+        motor.update((addr, value & 0xFF) for addr, value in mp.feed_regs)
+        motor.update((addr, value & 0xFF) for addr, value in mp.reg_overrides)
+        motor[0x02] = r.MTRPWR | r.FASTFED
+        cache.update(motor)
         t0 = time.monotonic()
         try:
-            for addr in (0x01, 0x3D, 0x3E, 0x3F, *(a for a, _ in mp.reg_overrides), 0x02):
-                proto.write_register(addr, cache[addr])
+            for addr, value in motor.items():
+                proto.write_register(addr, value)
             self.asic._reg_cache = cache
+            for table_nr in (0, 1, 2):
+                proto.write_ahb(SLOPE_TABLE_AHB[table_nr], start_payload)
             for table_nr in (3, 4):
                 proto.write_ahb(SLOPE_TABLE_AHB[table_nr], fast_payload)
             proto.write_register(0x0D, 0x05)  # CLRLNCNT | CLRMCNT

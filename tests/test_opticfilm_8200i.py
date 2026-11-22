@@ -177,3 +177,34 @@ def test_7600i_v2_does_not_fast_feed_or_auto_home():
     usb, _asic, _image = _scan(MODEL_7600I_V2)
     starts = _motor_starts(_register_writes(usb))
     assert all(regs[0x02] not in (0x18, 0x30) for regs in starts)
+
+
+def test_fast_feed_writes_the_captured_motor_setup_from_a_fresh_init():
+    """With a cached calibration nothing is configured before the feed."""
+    usb = MockScannerTransport()
+    asic = create_asic(GenesysUsbProtocol(usb), MODEL_8200I)
+    asic.init()
+    create_session(asic, MODEL_8200I)._fast_feed(compute_geometry(1800, model=MODEL_8200I))
+
+    (feed,) = _motor_starts(_register_writes(usb))
+    vendor = REFERENCE["fast_feed"]
+    for name, value in vendor["regs"].items():
+        addr = int(name, 16)
+        if addr == 0x01:
+            assert not feed[addr] & 0x01  # SCAN off; DVDSET differs by design
+            continue
+        assert feed[addr] == value, name
+    assert feed[0x61] == feed[0x62] == feed[0x64] == feed[0x65] == 0
+
+    uploads = {}
+    preamble = None
+    for txn in usb.transactions:
+        if txn.operation == "control_write" and txn.value == 0x82:
+            preamble = int.from_bytes(txn.data[:4], "little")
+        elif txn.operation == "bulk_write" and preamble is not None:
+            uploads[preamble] = txn.data
+            preamble = None
+    start = b"".join(v.to_bytes(2, "little") for v in vendor["scan_slot_table"])
+    fast = b"".join(v.to_bytes(2, "little") for v in REFERENCE["fast_table"])
+    assert uploads[0x10000000] == uploads[0x10004000] == uploads[0x10008000] == start
+    assert uploads[0x1000C000] == uploads[0x10010000] == fast

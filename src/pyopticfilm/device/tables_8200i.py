@@ -32,10 +32,25 @@ FAST_SLOPE_TABLE_8200I: tuple[int, ...] = (
 )
 
 #: Motor registers SilverFast holds for every feed and image pass:
-#: ``0x5F`` FMOVDEC, ``0x67``/``0x68`` motor PWM, ``0x6A`` FSHDEC.
+#: ``0x5F`` FMOVDEC (fast-move deceleration steps), ``0x67``/``0x68`` motor
+#: PWM, ``0x6A`` FMOVNO (fast-move acceleration steps).
 MOTOR_REG_OVERRIDES_8200I: tuple[tuple[int, int], ...] = (
     (0x5F, 0x01),
     (0x67, 0x80),
     (0x68, 0x80),
     (0x6A, 0xFF),
+)
+
+#: Scan-slot table (ASIC slots 0-2) SilverFast has loaded during a fast feed:
+#: one start word, then the line period.
+FEED_START_TABLE_8200I: tuple[int, ...] = (25252,) + (14000,) * 255
+
+#: Step counts that go with :data:`FEED_START_TABLE_8200I` during a fast feed:
+#: ``0x21`` STEPNO, ``0x22`` FWDSTEP, ``0x23`` BWDSTEP, ``0x24`` FASTNO, ``0x69`` FSHDEC.
+FEED_REGS_8200I: tuple[tuple[int, int], ...] = (
+    (0x21, 0x02),
+    (0x22, 0x01),
+    (0x23, 0x01),
+    (0x24, 0x02),
+    (0x69, 0x01),
 )

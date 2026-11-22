@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, replace
 from pyopticfilm.device.protocol import DEFAULT_GL845_MOTOR, MotorProfile
 from pyopticfilm.device.tables_8200i import (
     FAST_SLOPE_TABLE_8200I,
+    FEED_REGS_8200I,
+    FEED_START_TABLE_8200I,
     MOTOR_REG_OVERRIDES_8200I,
 )
 
@@ -345,6 +347,8 @@ MOTOR_8200I = replace(
     DEFAULT_GL845_MOTOR,
     fast_table=FAST_SLOPE_TABLE_8200I,
     reg_overrides=MOTOR_REG_OVERRIDES_8200I,
+    feed_start_table=FEED_START_TABLE_8200I,
+    feed_regs=FEED_REGS_8200I,
 )
 
 # Class defaults stay the SANE tables (the 7600i v2 is built from them in
