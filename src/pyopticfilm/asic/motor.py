@@ -112,6 +112,8 @@ def create_fast_slope_table(
     profile: FilmModel | MotorProfile | None = None,
 ) -> MotorSlopeTable:
     mp = _profile_of(profile)
+    if mp.fast_table is not None:
+        return MotorSlopeTable(table=list(mp.fast_table))
     slope = MotorSlope.create_from_steps(mp.initial_w, mp.max_w, mp.slope_steps)
     return create_slope_table_for_speed(
         slope,

@@ -107,14 +107,24 @@ def test_ensure_host_calib_reuses_cache(tmp_path: Path):
     assert asic.last_afe_offsets == (0x10, 0x11, 0x12)
 
 
-def test_8200i_calib_geometry_matches_sane_white_offset():
+def test_sane_table_calib_geometry_matches_sane_white_offset():
+    from pyopticfilm.device.model_8200i import Model8200i
     from pyopticfilm.scan.geometry import MM_PER_INCH, compute_calib_geometry
 
-    geo = compute_calib_geometry(1800, model=MODEL_8200I)
-    # SANE: y_offset_ta=28.5, y_offset_calib_white_ta=0 → feed at TA only.
-    expect = int((MODEL_8200I.y_offset_ta_mm * MODEL_8200I.motor_base_ydpi) / MM_PER_INCH)
+    sane = Model8200i()  # class defaults are the SANE tables
+    geo = compute_calib_geometry(1800, model=sane)
+    # SANE: y_offset_ta=28.5, y_offset_calib_white_ta=0, so the feed is the TA offset only.
+    expect = int((sane.y_offset_ta_mm * sane.motor_base_ydpi) / MM_PER_INCH)
     assert geo.starty == expect
-    assert MODEL_8200I.y_offset_calib_white_ta_mm == 0.0
+    assert sane.y_offset_calib_white_ta_mm == 0.0
+
+
+def test_8200i_white_strip_is_near_home():
+    from pyopticfilm.scan.geometry import compute_calib_geometry
+
+    # SilverFast takes dark and white at home, before any feed.
+    geo = compute_calib_geometry(1800, model=MODEL_8200I)
+    assert geo.starty == int(1.5 * 3600 / 25.4)
 
 
 def test_host_stretch_applied_on_genesys_assemble():
@@ -153,13 +163,14 @@ def test_host_calib_chunked_at_large_geometry():
 
 
 def test_7600i_v2_white_strip_uses_open_light_zone_near_home():
+    from pyopticfilm.device.model_8200i import Model8200i
     from pyopticfilm.device.select import MODEL_7600I_V2
     from pyopticfilm.scan.geometry import compute_calib_geometry
 
     geo = compute_calib_geometry(1800, model=MODEL_7600I_V2)
     # 1.5 mm from home in 3600-dpi motor steps, not the 28.5 mm TA offset (holder edge).
     assert geo.starty == int(1.5 * 3600 / 25.4)
-    assert compute_calib_geometry(1800, model=MODEL_8200I).starty == int(28.5 * 3600 / 25.4)
+    assert compute_calib_geometry(1800, model=Model8200i()).starty == int(28.5 * 3600 / 25.4)
 
 
 def test_pga_gain_matches_ad9826_law():
@@ -172,9 +183,10 @@ def test_pga_gain_matches_ad9826_law():
 
 
 def test_7600i_v2_dark_reference_averages_more_lines():
+    from pyopticfilm.device.model_8200i import Model8200i
     from pyopticfilm.device.select import MODEL_7600I_V2
 
-    for model, expected_taller in ((MODEL_7600I_V2, True), (MODEL_8200I, False)):
+    for model, expected_taller in ((MODEL_7600I_V2, True), (Model8200i(), False)):
         cal = Calibrator(None, model=model)
         scan = compute_geometry(1800, model=model, area=(0.0, 0.0, 0.2, 0.2))
         white = cal._calib_geometry_for(scan, method="transparency")

@@ -100,6 +100,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Lab unlock for home/scan/park (required for motor steps)",
     )
     parser.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="Write a DEBUG log of the run to this file (attach it to a hardware report)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the planned sequence without opening USB",
@@ -127,6 +133,18 @@ def main(argv: list[str] | None = None) -> int:
     from pyopticfilm.device.model_8200i import MODEL_8200I
     from pyopticfilm.device.select import MODEL_7600I_V2
     from pyopticfilm.scanner import Scanner
+
+    if args.log is not None:
+        import logging
+
+        from pyopticfilm.logging import get_logger
+
+        args.log.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(args.log, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        get_logger().addHandler(handler)
+        get_logger().setLevel(logging.DEBUG)
+        print(f"log: {args.log}")
 
     target_model = {
         "8200i": MODEL_8200I,

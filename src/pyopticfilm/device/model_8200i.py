@@ -7,9 +7,13 @@ Tables ported from SANE genesys ``tables_*.cpp`` / ``gl846.cpp`` (GPL). See NOTI
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from pyopticfilm.device.protocol import DEFAULT_GL845_MOTOR, MotorProfile
+from pyopticfilm.device.tables_8200i import (
+    FAST_SLOPE_TABLE_8200I,
+    MOTOR_REG_OVERRIDES_8200I,
+)
 
 # --- genesys tables (8200i / GL845) ---
 
@@ -330,4 +334,24 @@ class Model8200i:
         return regs
 
 
-MODEL_8200I = Model8200i()
+#: SANE profile with SilverFast's fast/home table and motor registers.
+MOTOR_8200I = replace(
+    DEFAULT_GL845_MOTOR,
+    fast_table=FAST_SLOPE_TABLE_8200I,
+    reg_overrides=MOTOR_REG_OVERRIDES_8200I,
+)
+
+# Class defaults stay the SANE tables (the 7600i v2 is built from them in
+# ``device/select.py``). These overrides follow the SilverFast captures.
+MODEL_8200I = Model8200i(
+    # SilverFast takes dark and white at home; the SANE TA offset is the holder edge.
+    calib_white_home_y_mm=1.5,
+    calib_dark_lines=1024,
+    # SilverFast searches the PGA gains every pass (about 33/25/36 colour,
+    # 53/56/55 infrared); the table codes are only the seed.
+    afe_white_target=60000,
+    # Feed at low-res speed first; the image pass feeds the last 400 steps.
+    prefeed_margin_steps=400,
+    prefeed_offset_steps=6,
+    motor_profile=MOTOR_8200I,
+)

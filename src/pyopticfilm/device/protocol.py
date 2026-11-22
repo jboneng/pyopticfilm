@@ -24,6 +24,10 @@ class MotorProfile:
     step_type: int  # StepType::QUARTER = 2
     vref: int
     slope_table_max: int
+    #: Fast-feed / return-home table written as-is instead of the computed one.
+    fast_table: tuple[int, ...] | None = None
+    #: ``(register, value)`` pairs applied over the computed motor registers.
+    reg_overrides: tuple[tuple[int, int], ...] = ()
 
 
 # Default GL845 OpticFilm profile (8200i / 7400 / …)

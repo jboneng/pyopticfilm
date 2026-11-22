@@ -870,6 +870,8 @@ class ScanSession:
             | (mp.vref << 6)
         )
         cache[0x80] = vref & 0xFF
+        for addr, value in mp.reg_overrides:
+            cache[addr] = value & 0xFF
 
         pairs = [(a, v) for a, v in sorted(cache.items()) if a != 0x0B]
         for addr, value in pairs:
