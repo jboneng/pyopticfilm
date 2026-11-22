@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **`tools/dump_gl845_capture.py`** summarises a GL845 USB capture: the register state, front-end codes and image bytes at every motor start, and the motor slope tables. It streams the file, so large captures are fine.
-- **`tools/bringup_gl845_8200i.py --log FILE`** writes a DEBUG log of the run, to attach to a hardware report. `--no-fast-feed` and `--no-auto-home` switch the 8200i back to the pre-feed scan and the reverse home seek, to compare the two on hardware.
+- **`tools/bringup_gl845_8200i.py --log FILE`** writes a DEBUG log of the run, to attach to a hardware report. `--no-fast-feed` and `--no-auto-home` switch the 8200i back to the pre-feed scan and the reverse home seek, to compare the two on hardware; `--reverse-home` does the same for homing.
 
 ### Changed
 
@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Calibration:** dark and white are taken near home (`calib_white_home_y_mm=1.5`) with a 1024-line dark, and the white-strip PGA gain search is on (`afe_white_target=60000`), as on the 7600i v2.
   - **Feed:** one fast feed (`0x02` FASTFED, SCAN off) covers the travel to the film and stops 400 steps short; the image pass feeds the rest. This replaces the low-resolution pre-feed scan on the 8200i.
   - **Return home:** image passes set AGOHOME, so the carriage returns by itself when the scan ends, also after a cancel or a failed read. The driver waits for the home sensor instead of running the reverse home seek.
+  - **Homing:** every return home is forward (`forward_home`): a three-line AGOHOME capture, then SCAN is cleared and the ASIC brings the carriage back. The reverse home seek, which could drive the carriage against its end stop for 30 s if the home sensor was missed, is no longer used on the 8200i. If the return does not start, the carriage stays where it is and the call times out.
+  - **Fast feed safety:** it homes first when the carriage is not at home, and waits for the motor to report idle before the image pass is set up.
   - **Sensor sampling:** `0x58` / `0x59` are `0x2A` / `0x72` (SANE: `0x31` / `0x79`), the sampling point SilverFast uses at every resolution. Cached 8200i calibration is invalidated by this.
   - **Lamp watchdog:** `0x03` bit 7 is cleared for the image pass and set again for every other capture.
   - **GPIO `0x6C`** stays at its boot value `0x4C`; bit 0 is no longer set on scan start and motor stop.

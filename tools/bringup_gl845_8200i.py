@@ -110,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Return home with the reverse home seek instead of AGOHOME on the image pass",
     )
     parser.add_argument(
+        "--reverse-home",
+        action="store_true",
+        help="Home with the reverse home seek instead of the forward AGOHOME capture",
+    )
+    parser.add_argument(
         "--log",
         type=Path,
         default=None,
@@ -170,19 +175,22 @@ def main(argv: list[str] | None = None) -> int:
                 f"Expected {model_label} GL845, got {scanner.model.model} "
                 f"({scanner.model.asic}); select its exact USB device with --device-id"
             )
-        if args.no_fast_feed or args.no_auto_home:
+        if args.no_fast_feed or args.no_auto_home or args.reverse_home:
             from dataclasses import replace
 
-            # Scans read these flags from the scanner's model.
+            # Scans read these flags from the scanner's model, homing from the ASIC's.
             scanner._model = replace(
                 scanner.model,
                 fast_feed=scanner.model.fast_feed and not args.no_fast_feed,
                 scan_auto_home=scanner.model.scan_auto_home and not args.no_auto_home,
+                forward_home=scanner.model.forward_home and not args.reverse_home,
                 prefeed_offset_steps=6,
             )
+            scanner.asic.model = scanner.model
             print(
                 f"motor: fast_feed={scanner.model.fast_feed} "
-                f"scan_auto_home={scanner.model.scan_auto_home}"
+                f"scan_auto_home={scanner.model.scan_auto_home} "
+                f"forward_home={scanner.model.forward_home}"
             )
         if args.allow_unvalidated:
             scanner._allow_unvalidated_scan = True  # lab harness unlock

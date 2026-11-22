@@ -577,6 +577,10 @@ class ScanSession:
         mp = model.motor_profile
         if margin <= 0 or steps < FAST_FEED_MIN_STEPS or mp.feed_start_table is None:
             return geometry
+        # The distance is measured from home. home() raises if it cannot get there.
+        if not self.asic.is_at_home():
+            logger.warning("carriage not at home before the fast feed; homing first")
+            self.asic.home()
         proto = self.asic.protocol
         r = self.regs
         cache = dict(self.asic._reg_cache) or model.boot_register_map()
@@ -615,6 +619,7 @@ class ScanSession:
             proto.write_u24(0x3D, 1)
             self._set24(cache, 0x3D, 1)
             self.asic._reg_cache = cache
+        self.asic.wait_motor_idle()
         counted = self._read_feed_steps()
         moved = steps + int(getattr(model, "fast_feed_offset_steps", 0))
         logger.info(
@@ -805,9 +810,17 @@ class ScanSession:
         return bool(cache.get(0x03, 0) & self.regs.LAMPPWR)
 
     def start_home_seek(self, *, starty: int) -> None:
-        """Start the short reverse scan used by the GL845 home-sensor seek."""
+        """Start the short scan used by the GL845 home-sensor seek.
+
+        Reverse with a long feed by default. ``forward_home`` models run it
+        forward with no feed and AGOHOME only: clearing SCAN then lets the
+        ASIC return the carriage, as after an image pass.
+        """
         if not self.asic.is_initialized:
             raise AsicError("Call init()/warmup() before home()")
+        forward = bool(getattr(self.model, "forward_home", False))
+        if forward:
+            starty = 0
 
         resolution = min(self.model.resolutions_dpi)
         width_mm = HOME_SCAN_PIXELS * MM_PER_INCH / resolution + 0.01
@@ -849,7 +862,8 @@ class ScanSession:
             self.asic.set_scan_method(prior_method)
         self._begin_scan(start_motor=True)
         logger.info(
-            "started reverse home scan pixels=%d lines=%d starty=%d",
+            "started %s home scan pixels=%d lines=%d starty=%d",
+            "forward" if forward else "reverse",
             geometry.pixels,
             geometry.lines,
             starty,
@@ -943,7 +957,9 @@ class ScanSession:
         fast_slope = create_fast_slope_table(step_multiplier=step_mult, profile=mp)
 
         cache[0x02] = r.MTRPWR
-        if home_seek:
+        if home_seek and getattr(self.model, "forward_home", False):
+            cache[0x02] |= r.AGOHOME
+        elif home_seek:
             cache[0x02] |= r.AGOHOME | r.NOTHOME | r.MTRREV
         elif image_pass and getattr(self.model, "scan_auto_home", False):
             cache[0x02] |= r.AGOHOME
@@ -962,6 +978,8 @@ class ScanSession:
         feedl = feed_steps << mp.step_type
         dist = len(scan_slope.table)
         feedl = feedl - dist if dist < feedl else 0
+        if home_seek and getattr(self.model, "forward_home", False):
+            feedl = 1  # SilverFast never starts a capture with FEEDL 0
         self._set24(cache, 0x3D, feedl)
 
         min_restep = max(1, (len(scan_slope.table) // step_mult) // 2 - 1)

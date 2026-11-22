@@ -298,6 +298,9 @@ class Model8200i:
     fast_feed_offset_steps: int = 0
     #: Image passes set AGOHOME: the carriage returns home by itself when the scan ends.
     scan_auto_home: bool = False
+    #: Home with a short forward AGOHOME capture (the ASIC returns the carriage)
+    #: instead of the reverse home seek. If it fails the carriage stays put.
+    forward_home: bool = False
     #: Clear the lamp watchdog (``0x03`` bit 7) for image passes, as SilverFast does.
     image_pass_lamp_watchdog_off: bool = False
     #: Bits ORed into GPIO ``0x6C`` on every scan start and motor stop (SANE: ``0x41``).
@@ -369,6 +372,8 @@ MODEL_8200I = Model8200i(
     prefeed_margin_steps=400,
     fast_feed=True,
     scan_auto_home=True,
+    # SilverFast never drives this carriage in reverse; every return is AGOHOME.
+    forward_home=True,
     motor_profile=MOTOR_8200I,
     # SilverFast samples the sensor one clock earlier and twice as wide
     # (0x58 video sample, 0x59 black sample) at every resolution.

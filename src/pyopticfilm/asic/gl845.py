@@ -427,11 +427,7 @@ class Gl845:
         stops, so there is nothing to stop here until the home sensor trips.
         """
         self.update_home_sensor_gpio()
-        reg01 = self.protocol.read_register(self.registers.REG_0x01)
-        if reg01 & self.registers.SCAN:
-            reg01 &= ~self.registers.SCAN
-            self.protocol.write_register(self.registers.REG_0x01, reg01)
-            self._reg_cache[0x01] = reg01
+        self._clear_scan()
         self._wait_until_home(timeout_s)
         deadline = time.monotonic() + MOTOR_STOP_TIMEOUT_S
         while not self.is_motor_stopped():
@@ -482,11 +478,18 @@ class Gl845:
 
         if not wait:
             self._start_home_seek()
+            if self._forward_home():
+                self._wait_scan_started()
+                self._clear_scan()
             return
 
         try:
             self._start_home_seek()
-            self._wait_until_home(timeout_s)
+            if self._forward_home():
+                self._wait_scan_started()
+                self.end_scan_auto_home(timeout_s=timeout_s)
+            else:
+                self._wait_until_home(timeout_s)
             logger.info("reached home")
         finally:
             self.stop_motor()
@@ -495,6 +498,33 @@ class Gl845:
             raise MotorTimeoutError(
                 f"Head did not reach home within {timeout_s:.0f}s — motor stopped for safety."
             )
+
+    def _forward_home(self) -> bool:
+        return self.REVERSE_SCAN_HOME and bool(getattr(self.model, "forward_home", False))
+
+    def _clear_scan(self) -> None:
+        reg01 = self.protocol.read_register(self.registers.REG_0x01)
+        if reg01 & self.registers.SCAN:
+            reg01 &= ~self.registers.SCAN
+            self.protocol.write_register(self.registers.REG_0x01, reg01)
+            self._reg_cache[0x01] = reg01
+
+    def _wait_scan_started(self, timeout_s: float = 0.5) -> None:
+        """Give a just-started capture a moment to run before SCAN is cleared."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            status = self.read_status()
+            if status.is_motor_enabled or not status.is_buffer_empty:
+                return
+            time.sleep(0.02)
+
+    def wait_motor_idle(self, timeout_s: float = 2.0) -> None:
+        """Poll until the status reports the motor off (SilverFast does after a feed)."""
+        deadline = time.monotonic() + timeout_s
+        while self.read_status().is_motor_enabled:
+            if time.monotonic() >= deadline:
+                raise MotorTimeoutError(f"GL845 motor still enabled {timeout_s:.1f}s after a feed")
+            time.sleep(0.02)
 
     def _start_home_seek(self) -> None:
         if not self.REVERSE_SCAN_HOME:

@@ -242,3 +242,81 @@ def test_7600i_v2_keeps_the_watchdog_and_gpio_behaviour():
     writes = _register_writes(usb)
     assert 0x4D in {value for addr, value in writes if addr == 0x6C}
     assert all(regs[0x03] & 0x80 for regs in _motor_starts(writes))
+
+
+def _calibrated_scan(model, tmp_path):
+    from pyopticfilm.scanner import Scanner
+
+    usb = MockScannerTransport()
+    scanner = Scanner.open_fake(model, usb, calib_cache=tmp_path / "calib.json")
+    scanner.scan(resolution=900, mode="color")
+    return usb, scanner
+
+
+def test_calibrated_scan_never_drives_in_reverse(tmp_path):
+    """Every return home is an AGOHOME capture; SilverFast never sets MTRREV."""
+    usb, scanner = _calibrated_scan(MODEL_8200I, tmp_path)
+    starts = _motor_starts(_register_writes(usb))
+    homes = [regs for regs in starts if regs[0x02] == 0x30 and regs[0x01] & 0x01 and regs[0x27] == 3]
+    assert homes, "expected forward home captures after the calibration strips"
+    assert all(not regs[0x02] & 0x04 for regs in starts)  # MTRREV
+    for regs in homes:
+        assert (regs[0x3D], regs[0x3E], regs[0x3F]) == (0, 0, 1)
+    assert scanner.asic.read_status().is_at_home
+
+
+def test_7600i_v2_still_homes_in_reverse(tmp_path):
+    usb, _scanner = _calibrated_scan(MODEL_7600I_V2, tmp_path)
+    assert any(regs[0x02] == 0xB4 for regs in _motor_starts(_register_writes(usb)))
+
+
+def test_fast_feed_homes_first_when_not_at_home():
+    usb = MockScannerTransport()
+    asic = create_asic(GenesysUsbProtocol(usb), MODEL_8200I)
+    asic.init()
+    usb.at_home = False
+    create_session(asic, MODEL_8200I)._fast_feed(compute_geometry(900, model=MODEL_8200I))
+    home, feed = _motor_starts(_register_writes(usb))
+    assert home[0x02] == 0x30 and feed[0x02] == 0x18
+
+
+def test_fast_feed_does_not_start_when_homing_fails(monkeypatch):
+    usb = MockScannerTransport()
+    asic = create_asic(GenesysUsbProtocol(usb), MODEL_8200I)
+    asic.init()
+    usb.at_home = False
+
+    def no_home(**_kwargs):
+        raise MotorTimeoutError("Head did not reach home")
+
+    monkeypatch.setattr(asic, "home", no_home)
+    try:
+        create_session(asic, MODEL_8200I)._fast_feed(compute_geometry(900, model=MODEL_8200I))
+    except MotorTimeoutError:
+        pass
+    else:
+        raise AssertionError("expected MotorTimeoutError")
+    assert all(regs[0x02] != 0x18 for regs in _motor_starts(_register_writes(usb)))
+
+
+def test_fast_feed_waits_for_the_motor_to_go_idle(monkeypatch):
+    usb = MockScannerTransport()
+    asic = create_asic(GenesysUsbProtocol(usb), MODEL_8200I)
+    asic.init()
+    waited = []
+    monkeypatch.setattr(asic, "wait_motor_idle", lambda *a, **k: waited.append(usb.registers[0x02]))
+    create_session(asic, MODEL_8200I)._fast_feed(compute_geometry(900, model=MODEL_8200I))
+    assert waited == [0x08]  # after MTRPWR is dropped
+
+
+def test_wait_motor_idle_times_out():
+    usb = MockScannerTransport()
+    asic = create_asic(GenesysUsbProtocol(usb), MODEL_8200I)
+    usb.motor_enabled = True
+    usb._tick_motion = lambda: None
+    try:
+        asic.wait_motor_idle(timeout_s=0.05)
+    except MotorTimeoutError:
+        pass
+    else:
+        raise AssertionError("expected MotorTimeoutError")
