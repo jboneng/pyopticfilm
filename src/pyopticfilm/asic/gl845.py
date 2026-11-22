@@ -388,7 +388,7 @@ class Gl845:
     def update_home_sensor_gpio(self) -> None:
         """``CommandSetGl846::update_home_sensor_gpio``."""
         val = self.protocol.read_register(self.registers.REG_0x6C)
-        val |= 0x41
+        val |= int(getattr(self.model, "home_sensor_gpio_mask", 0x41))
         self.protocol.write_register(self.registers.REG_0x6C, val)
         self._reg_cache[0x6C] = val
 

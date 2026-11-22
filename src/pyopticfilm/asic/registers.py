@@ -42,6 +42,7 @@ class Gl845Registers:
     HOMENEG: int = 0x02
 
     # 0x03 lamp
+    LAMPDOG: int = 0x80
     LAMPPWR: int = 0x10
     XPASEL: int = 0x20
 

@@ -298,6 +298,10 @@ class Model8200i:
     fast_feed_offset_steps: int = 0
     #: Image passes set AGOHOME: the carriage returns home by itself when the scan ends.
     scan_auto_home: bool = False
+    #: Clear the lamp watchdog (``0x03`` bit 7) for image passes, as SilverFast does.
+    image_pass_lamp_watchdog_off: bool = False
+    #: Bits ORed into GPIO ``0x6C`` on every scan start and motor stop (SANE: ``0x41``).
+    home_sensor_gpio_mask: int = 0x41
     #: Single-pass prescan target for the film peak (raw counts); ``None`` disables.
     auto_exposure_target: float | None = None
 
@@ -366,4 +370,10 @@ MODEL_8200I = Model8200i(
     fast_feed=True,
     scan_auto_home=True,
     motor_profile=MOTOR_8200I,
+    # SilverFast samples the sensor one clock earlier and twice as wide
+    # (0x58 video sample, 0x59 black sample) at every resolution.
+    sensor_custom_regs={**_SENSOR_CUSTOM_8200I, 0x58: 0x2A, 0x59: 0x72},
+    image_pass_lamp_watchdog_off=True,
+    # SilverFast leaves 0x6C at its boot value (0x4C); it never sets bit 0.
+    home_sensor_gpio_mask=0x40,
 )

@@ -472,13 +472,13 @@ class ScanSession:
         elif method == "infrared":
             self._drop_ir_host_flatten()
 
-        auto_home = False
+        image_pass = False
         if getattr(self.model, "asic", "") == "GL845":
             if getattr(self.model, "fast_feed", False):
                 geometry = self._fast_feed(geometry, cancel=cancel)
             else:
                 geometry = self._prefeed(geometry, method=method, cancel=cancel)
-            auto_home = bool(getattr(self.model, "scan_auto_home", False))
+            image_pass = True
         raw = self.acquire_raw(
             geometry,
             method=method,
@@ -486,7 +486,7 @@ class ScanSession:
             start_motor=True,
             progress=progress,
             cancel=cancel,
-            auto_home=auto_home,
+            image_pass=image_pass,
         )
 
         use_host = (
@@ -745,13 +745,15 @@ class ScanSession:
         start_motor: bool,
         progress: Callable[[float], None] | None = None,
         cancel: threading.Event | None = None,
-        auto_home: bool = False,
+        image_pass: bool = False,
     ) -> bytes:
         """Configure ASIC, run one capture, return raw optical bytes.
 
-        ``auto_home`` sets AGOHOME for the pass and waits for the carriage to
-        return home when it ends.
+        ``image_pass`` marks the film pass (not a calibration, pre-feed or
+        home capture). The model's image-pass options then apply: AGOHOME
+        with a wait for the carriage to return home, and the lamp watchdog.
         """
+        auto_home = image_pass and bool(getattr(self.model, "scan_auto_home", False))
         self.asic.set_scan_method(method)  # type: ignore[arg-type]
         # Recorded for subclasses that must reflect lamp state in the register
         # block they write during _configure.
@@ -767,9 +769,9 @@ class ScanSession:
             self.asic.lamp_off()
 
         try:
-            # Subclasses override ``_configure`` / ``_end_scan`` without ``auto_home``.
-            if auto_home:
-                self._configure(geometry, auto_home=True)
+            # Subclasses override ``_configure`` / ``_end_scan`` without these arguments.
+            if image_pass:
+                self._configure(geometry, image_pass=True)
             else:
                 self._configure(geometry)
             self._begin_scan(start_motor=start_motor)
@@ -856,7 +858,7 @@ class ScanSession:
     # --- configure ------------------------------------------------------
 
     def _configure(
-        self, geometry: ScanGeometry, *, home_seek: bool = False, auto_home: bool = False
+        self, geometry: ScanGeometry, *, home_seek: bool = False, image_pass: bool = False
     ) -> None:
         proto = self.asic.protocol
         r = self.regs
@@ -886,6 +888,12 @@ class ScanSession:
         else:
             cache[0x03] = cache.get(0x03, 0xBF) | r.LAMPPWR
         cache[0x03] = cache[0x03] & ~0x40  # clear AVEENB
+        if getattr(self.model, "image_pass_lamp_watchdog_off", False):
+            # Off for the film pass only; every other capture puts it back.
+            if image_pass:
+                cache[0x03] &= ~r.LAMPDOG
+            else:
+                cache[0x03] |= r.LAMPDOG
 
         if home_seek:
             # SANE's reverse-home mini-scan is 8-bit green-only.
@@ -937,7 +945,7 @@ class ScanSession:
         cache[0x02] = r.MTRPWR
         if home_seek:
             cache[0x02] |= r.AGOHOME | r.NOTHOME | r.MTRREV
-        elif auto_home:
+        elif image_pass and getattr(self.model, "scan_auto_home", False):
             cache[0x02] |= r.AGOHOME
         if geometry.disable_buffer_full_move:
             cache[0x02] |= r.ACDCDIS

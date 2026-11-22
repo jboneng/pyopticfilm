@@ -93,10 +93,10 @@ def _register_writes(usb) -> list[tuple[int, int]]:
     return out
 
 
-def _scan(model, **kwargs):
+def _scan(model, resolution: int = 900, **kwargs):
     usb = MockScannerTransport()
     asic = create_asic(GenesysUsbProtocol(usb), model)
-    image = create_session(asic, model).run(resolution=900, apply_calib=False, **kwargs)
+    image = create_session(asic, model).run(resolution=resolution, apply_calib=False, **kwargs)
     return usb, asic, image
 
 
@@ -208,3 +208,37 @@ def test_fast_feed_writes_the_captured_motor_setup_from_a_fresh_init():
     fast = b"".join(v.to_bytes(2, "little") for v in REFERENCE["fast_table"])
     assert uploads[0x10000000] == uploads[0x10004000] == uploads[0x10008000] == start
     assert uploads[0x1000C000] == uploads[0x10010000] == fast
+
+
+def test_sensor_sampling_point_matches_capture():
+    usb, _geo = run_8200i_setup(dpi=1800)
+    regs = extract_register_writes(usb.transactions)
+    assert (regs[0x58], regs[0x59]) == (0x2A, 0x72)
+    # The SANE tables (and the 7600i v2 built from them) keep their values.
+    assert (MODEL_7600I_V2.sensor_custom_regs[0x58], MODEL_7600I_V2.sensor_custom_regs[0x59]) == (0x31, 0x79)
+
+
+def test_lamp_watchdog_is_off_for_the_image_pass_only():
+    plain = replace(MODEL_8200I, fast_feed=False)  # 1800 dpi then runs a pre-feed capture
+    usb, _asic, _image = _scan(plain, resolution=1800)
+    starts = _motor_starts(_register_writes(usb))
+    image = [regs for regs in starts if regs[0x02] == 0x30]
+    others = [regs for regs in starts if regs[0x02] != 0x30]
+    vendor = _image_pass("06_900ppi_color.pcapng")["regs"]
+    assert image and others
+    assert all(not regs[0x03] & 0x80 for regs in image)
+    assert image[-1][0x03] & 0xF0 == vendor["0x03"] & 0xF0 == 0x30
+    assert all(regs[0x03] & 0x80 for regs in others)
+
+
+def test_home_sensor_gpio_stays_at_the_boot_value():
+    usb, _asic, _image = _scan(MODEL_8200I)
+    values = {value for addr, value in _register_writes(usb) if addr == 0x6C}
+    assert values == {0x4C}
+
+
+def test_7600i_v2_keeps_the_watchdog_and_gpio_behaviour():
+    usb, _asic, _image = _scan(MODEL_7600I_V2)
+    writes = _register_writes(usb)
+    assert 0x4D in {value for addr, value in writes if addr == 0x6C}
+    assert all(regs[0x03] & 0x80 for regs in _motor_starts(writes))
