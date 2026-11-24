@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.11] - 2026-11-24
+
 ### Added
 
 - **OpticFilm 8200i** (`07b3:130d`, GL845) is hardware-tested and scan-ready (`scan_ready=True`). `Scanner.open()` scans, calibrates and homes it without a lab override, and Scan Lab no longer limits it to a short strip. Tested on a real unit (bcdDevice `0x0605`, issue #181): calibration and full-frame colour at 900, 1800, 3600 and 7200 dpi, colour + infrared at 1800 dpi, home/park and cancel. Multi-exposure is enabled with a 42000 long-pass limit but has not been run on 8200i hardware yet. Lock oracles are in `tests/model_lock/opticfilm_8200i/`; notes are in [docs/opticfilm-8200i.md](docs/opticfilm-8200i.md).
@@ -24,7 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Fast feed safety:** it homes first when the carriage is not at home, and waits for the motor to report idle before the image pass is set up.
   - **Sensor sampling:** `0x58` / `0x59` are `0x2A` / `0x72` (SANE: `0x31` / `0x79`), the sampling point SilverFast uses at every resolution. Cached 8200i calibration is invalidated by this.
   - **Lamp watchdog:** `0x03` bit 7 is cleared for the image pass and set again for every other capture.
-  - **GPIO `0x6C`** stays at its boot value `0x4C`; bit 0 is no longer set on scan start and motor stop.
+  - **GPIO `0x6C`:** bit 0 is no longer forced on at scan start and motor stop. On hardware the register reads back `0xFF` and that value is written back, so it does not stay at SilverFast's `0x4C`; no effect was seen.
   - The 7600i v2 is unchanged: these are overrides on `MODEL_8200I`, and `MotorProfile` gained optional `fast_table` / `reg_overrides` fields that default to the old behaviour.
 - **Scan Lab device list shows `bcdDevice` and the resolved model** for connected scanners, e.g. `OpticFilm 7400 (plustek:usb:07b3:0c3a:001:005, bcd 0x0400) → OpticFilm 7400 (v1) — connected`. The 7400 and 7600i each share one product id across two hardware versions, which only `bcdDevice` tells apart, so the list now shows which one was detected.
 
