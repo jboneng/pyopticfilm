@@ -73,7 +73,7 @@ def test_infrared_pass_uses_the_ir_led_gpio():
 def test_calibration_follows_the_capture():
     assert MODEL_8200I.calib_white_home_y_mm == 1.5
     assert MODEL_8200I.afe_white_target == 60000
-    assert MODEL_8200I.scan_ready is False
+    assert MODEL_8200I.scan_ready is True
 
 
 def test_7600i_v2_and_sane_defaults_keep_the_sane_motor_profile():

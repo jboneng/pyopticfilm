@@ -8,12 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **OpticFilm 8200i** (`07b3:130d`, GL845) is hardware-tested and scan-ready (`scan_ready=True`). `Scanner.open()` scans, calibrates and homes it without a lab override, and Scan Lab no longer limits it to a short strip. Tested on a real unit (bcdDevice `0x0605`, issue #181): calibration and full-frame colour at 900, 1800, 3600 and 7200 dpi, colour + infrared at 1800 dpi, home/park and cancel. Multi-exposure is enabled with a 42000 long-pass limit but has not been run on 8200i hardware yet. Lock oracles are in `tests/model_lock/opticfilm_8200i/`; notes are in [docs/opticfilm-8200i.md](docs/opticfilm-8200i.md).
 - **`tools/dump_gl845_capture.py`** summarises a GL845 USB capture: the register state, front-end codes and image bytes at every motor start, and the motor slope tables. It streams the file, so large captures are fine.
 - **`tools/bringup_gl845_8200i.py --log FILE`** writes a DEBUG log of the run, to attach to a hardware report. `--no-fast-feed` and `--no-auto-home` switch the 8200i back to the pre-feed scan and the reverse home seek, to compare the two on hardware; `--forward-home` homes with a forward AGOHOME capture instead of the reverse home seek (`--reverse-home` is accepted and does nothing, it is the default).
 
 ### Changed
 
-- **OpticFilm 8200i** (`07b3:130d`, GL845) now follows SilverFast captures of a real unit instead of the plain SANE tables. Still not scan-ready (`scan_ready=False`); hardware testing is tracked in issue #181.
+- **OpticFilm 8200i** (`07b3:130d`, GL845) now follows SilverFast captures of a real unit instead of the plain SANE tables. The details below were confirmed on hardware in issue #181.
   - **Motor:** the fast-feed and return-home table is SilverFast's (256 steps, top speed word 625). The SANE-derived table reached 400 in 100 steps, faster than SilverFast ever moves this carriage. Motor registers `0x5F`, `0x67`, `0x68` and `0x6A` take the captured values.
   - **Calibration:** dark and white are taken near home (`calib_white_home_y_mm=1.5`) with a 1024-line dark, and the white-strip PGA gain search is on (`afe_white_target=60000`), as on the 7600i v2.
   - **Feed:** one fast feed (`0x02` FASTFED, SCAN off) covers the travel to the film and stops 400 steps short; the image pass feeds the rest. This replaces the low-resolution pre-feed scan on the 8200i.
@@ -26,6 +27,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **GPIO `0x6C`** stays at its boot value `0x4C`; bit 0 is no longer set on scan start and motor stop.
   - The 7600i v2 is unchanged: these are overrides on `MODEL_8200I`, and `MotorProfile` gained optional `fast_table` / `reg_overrides` fields that default to the old behaviour.
 - **Scan Lab device list shows `bcdDevice` and the resolved model** for connected scanners, e.g. `OpticFilm 7400 (plustek:usb:07b3:0c3a:001:005, bcd 0x0400) → OpticFilm 7400 (v1) — connected`. The 7400 and 7600i each share one product id across two hardware versions, which only `bcdDevice` tells apart, so the list now shows which one was detected.
+
+### Contributors
+
+- [@moritzglb](https://github.com/moritzglb) for OpticFilm 8200i support: the SilverFast USB captures and the hardware testing.
 
 ## [1.3.10] - 2026-11-14
 

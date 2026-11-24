@@ -109,6 +109,7 @@ def test_scan_ready_validate_set():
         id(MODEL_8300I_SE),
         id(MODEL_7600I_V1),
         id(MODEL_7600I_V2),
+        id(MODEL_8200I),
     }
     for m in KNOWN_MODELS:
         if m in (
@@ -117,6 +118,7 @@ def test_scan_ready_validate_set():
             MODEL_8300I_SE,
             MODEL_7600I_V1,
             MODEL_7600I_V2,
+            MODEL_8200I,
         ):
             assert m.scan_ready is True
             continue

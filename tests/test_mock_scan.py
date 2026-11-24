@@ -10,6 +10,7 @@ import pytest
 
 from pyopticfilm.asic.registers import Gl845Registers
 from pyopticfilm.asic.status import ScannerStatus
+from pyopticfilm.device.model_7400 import MODEL_8100
 from pyopticfilm.device.model_8200i import MODEL_8200I
 from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 from pyopticfilm.device.select import create_asic, model_is_scan_ready
@@ -24,8 +25,8 @@ _TINY = (0.0, 0.0, 0.08, 0.08)
 
 
 def test_scan_ready_unchanged_by_open_fake():
-    assert model_is_scan_ready(MODEL_8200I) is False
-    scanner = Scanner.open_fake(MODEL_8200I)
+    assert model_is_scan_ready(MODEL_8100) is False
+    scanner = Scanner.open_fake(MODEL_8100)
     try:
         assert model_is_scan_ready(scanner.model) is False
         assert scanner._allow_unvalidated_scan is True
@@ -34,9 +35,9 @@ def test_scan_ready_unchanged_by_open_fake():
 
 
 def test_real_path_still_locks_non_se_without_open_fake():
-    handle = FakeDeviceHandle.for_model(MODEL_8200I)
+    handle = FakeDeviceHandle.for_model(MODEL_8100)
     proto = GenesysUsbProtocol(MockScannerTransport())
-    scanner = Scanner(handle, proto, model=MODEL_8200I)
+    scanner = Scanner(handle, proto, model=MODEL_8100)
     try:
         with pytest.raises(AsicError, match="locked out"):
             scanner.scan(resolution=900, area=_TINY, apply_calib=False)

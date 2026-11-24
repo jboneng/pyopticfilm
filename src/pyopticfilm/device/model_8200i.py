@@ -365,6 +365,8 @@ MOTOR_8200I = replace(
 # Class defaults stay the SANE tables (the 7600i v2 is built from them in
 # ``device/select.py``). These overrides follow the SilverFast captures.
 MODEL_8200I = Model8200i(
+    # Hardware sign-off: issue #181 (bcdDevice 0x0605) and docs/opticfilm-8200i.md.
+    scan_ready=True,
     # SilverFast takes dark and white at home; the SANE TA offset is the holder edge.
     calib_white_home_y_mm=1.5,
     calib_dark_lines=1024,

@@ -19,8 +19,8 @@ Support is one of:
 | OpticFilm 8300i SE | `07b3:181f` | GL128 | **Hardware tested** (IR capable) |
 | OpticFilm 7600i v1 | `07b3:0c3b` | GL843 | **Hardware tested** ([notes](docs/opticfilm-7600i-v1.md)) |
 | OpticFilm 7600i v2 | `07b3:0c3b` | GL845 | **Hardware tested** (IR capable; [notes](docs/opticfilm-7600i-v2.md)) |
+| OpticFilm 8200i | `07b3:130d` | GL845 | **Hardware tested** (IR capable; [notes](docs/opticfilm-8200i.md)) |
 | OpticFilm 135i | `07b3:1436` | GL128 | Experimental (film loader, RGB+IR in one pass; scan locked, [status](#opticfilm-135i-status), [notes](docs/gl128-model-comparison.md#11-opticfilm-135i-07b31436--capture-synthesis)) |
-| OpticFilm 8200i | `07b3:130d` | GL845 | Protocol validated (setup traces; scan locked) |
 | OpticFilm 8100 | `07b3:130c` | GL845 | Experimental |
 | OpticFilm 7500i | `07b3:0c13` | GL843 | Experimental |
 | OpticFilm 7400 (v1 / v2) | `07b3:0c3a` | GL845 / GL843 | Experimental |
@@ -31,14 +31,14 @@ The GL845 **OpticFilm 8100** (`07b3:130c`) is a different product from the GL128
 
 Other OpticFilm models **enumerate and open**: you can read status, turn the lamp on/off (where implemented), and dump registers for bring-up. **`scan()`, `calibrate()`, `home()`, and `park()` stay gated** until a model is hardware-tested—calling them raises `AsicError` rather than risking carriage or lamp damage. Protocol validation does **not** flip that gate. See [docs/scanner-validation.md](docs/scanner-validation.md).
 
-`Scanner.open()` prefers a scan-ready device (8200i SE, 8100 V2, 8300i SE, 7600i v1, or 7600i v2) when several Plustek film scanners are connected.
+`Scanner.open()` prefers a scan-ready device (8200i SE, 8100 V2, 8300i SE, 7600i v1, 7600i v2, or 8200i) when several Plustek film scanners are connected.
 
 ## Features 
 
 - Color and infrared transparency scans at 150–7200 dpi (ASIC programs at ≥600 dpi; lower PPI shares the 600 dpi register set and is downsampled on the host; infrared is available only on supported hardware)
-- Infrared as a dust plane on `ScanImage.ir` (`mode="infrared"`, or `infrared=True` with colour; 8200i SE, 8300i SE, 7600i v1, and 7600i v2 among the hardware-tested set)
+- Infrared as a dust plane on `ScanImage.ir` (`mode="infrared"`, or `infrared=True` with colour; 8200i SE, 8300i SE, 7600i v1, 7600i v2, and 8200i among the hardware-tested set)
 - Multi-exposure (ME) on GL128 hardware-tested models (8200i SE, 8100 V2, and 8300i SE): short + adaptive long colour passes with host SNR/IVW merge into `ScanImage.rgb` (`multi_exposure=True`), or a SilverFast-style fixed long pass (`me_long_mode="fixed"`); bracket planes via `Scanner.last_me_debug`. Available at every resolution, 7200 dpi included
-- Multi-exposure on the GL845 7600i v2 at every resolution: the long pass raises the line period (up to 65000) and uses the same merge; see the [7600i v2 notes](docs/opticfilm-7600i-v2.md)
+- Multi-exposure on the GL845 7600i v2 at every resolution: the long pass raises the line period (up to 65000) and uses the same merge; see the [7600i v2 notes](docs/opticfilm-7600i-v2.md). The GL845 8200i uses the same path with a 42000 limit; multi-exposure has not been run on 8200i hardware yet ([8200i notes](docs/opticfilm-8200i.md))
 - Multi-Pass on GL128: repeat an already-validated exposure `n_passes` times (1–9) and stack the aligned repeats for an SNR gain — no new exposure/speed value is ever introduced, only repeats of the short pass (`n_passes>1`) or, combined with `multi_exposure=True`, of both the short and long ME passes (Adaptive Multi-Pass); per-slot stacking stats via `Scanner.last_multi_pass_debug`. Available at every resolution, 7200 dpi included
 - Manual exposure overrides on GL128 (`single_pass_exposure` / `me_short_exposure` / `me_long_exposure`) for testing/debugging: bypass the adaptive/hardware-max clamps and write an exact `REG_EXPOSURE` value (24-bit register range)
 - Optional crop via normalized `area` (`x1, y1, x2, y2` in 0–1)
@@ -121,7 +121,7 @@ For the 7600i v1, explicitly use 1440, 3600 or 7200 dpi for colour; IR supports 
 The shared `scan()` default of 1800 dpi is unsupported on this model. See the
 [7600i notes](docs/opticfilm-7600i-v1.md) for calibration and acquisition limits.
 
-Infrared scan (8200i SE, 8300i SE, or 7600i v2):
+Infrared scan (8200i SE, 8300i SE, 7600i v2, or 8200i):
 
 ```python
 with Scanner.open() as scanner:
@@ -244,7 +244,7 @@ The three manual exposure overrides above are lab/debug-only —
 Scan Lab (`tools/scanlab/`) is the reference implementation exposing the full, unrestricted
 parameter set; NegPy is the reference implementation of the simplified 4-combination surface.
 
-Colour + IR in one call (8200i SE, 8300i SE, or 7600i v2; IR after the colour / ME passes):
+Colour + IR in one call (8200i SE, 8300i SE, 7600i v2, or 8200i; IR after the colour / ME passes):
 
 ```python
 image = scanner.scan(
@@ -353,7 +353,7 @@ The cache key includes resolution, crop geometry, and scan method (transparency 
 
 Code for additional OpticFilm variants is included so enumeration, model selection, SANE-derived geometry tables, and hardwareless USB traces can be exercised without hardware. These paths are **deliberately locked** for motor moves and image acquisition:
 
-- `model.scan_ready` is `True` only for the 8200i SE, 8100 (V2), 8300i SE, 7600i v1, and 7600i v2; all other models stay `False`
+- `model.scan_ready` is `True` only for the 8200i SE, 8100 (V2), 8300i SE, 7600i v1, 7600i v2, and 8200i; all other models stay `False`
 - `Scanner._ensure_scan_ready()` blocks scan, calibrate, home, and park on non-scan-ready models
 - GL128 motor moves stay disabled unless the model is scan-ready
 - Protocol-validated (currently OpticFilm 8200i setup traces) is not hardware support
