@@ -253,16 +253,39 @@ def _calibrated_scan(model, tmp_path):
     return usb, scanner
 
 
-def test_calibrated_scan_never_drives_in_reverse(tmp_path):
-    """Every return home is an AGOHOME capture; SilverFast never sets MTRREV."""
+def test_calibrated_scan_homes_with_the_reverse_seek(tmp_path):
+    """Hardware (issue #181): the reverse home seek reached home every time."""
     usb, scanner = _calibrated_scan(MODEL_8200I, tmp_path)
     starts = _motor_starts(_register_writes(usb))
-    homes = [regs for regs in starts if regs[0x02] == 0x30 and regs[0x01] & 0x01 and regs[0x27] == 3]
-    assert homes, "expected forward home captures after the calibration strips"
-    assert all(not regs[0x02] & 0x04 for regs in starts)  # MTRREV
-    for regs in homes:
-        assert (regs[0x3D], regs[0x3E], regs[0x3F]) == (0, 0, 1)
+    assert any(regs[0x02] == 0xB4 for regs in starts)
     assert scanner.asic.read_status().is_at_home
+
+
+def test_forward_home_stays_available_as_an_option(tmp_path):
+    usb, _scanner = _calibrated_scan(replace(MODEL_8200I, forward_home=True), tmp_path)
+    starts = _motor_starts(_register_writes(usb))
+    homes = [regs for regs in starts if regs[0x02] == 0x30 and regs[0x27] == 3]
+    assert homes
+    assert all(not regs[0x02] & 0x04 for regs in starts)  # MTRREV
+
+
+def test_stationary_captures_run_with_motor_power_off(tmp_path):
+    """SilverFast's dark captures: 0x02 = 0, FEEDL 1, SCAN set, start written."""
+    usb, _scanner = _calibrated_scan(MODEL_8200I, tmp_path)
+    starts = _motor_starts(_register_writes(usb))
+    held = [regs for regs in starts if regs[0x02] == 0x00]
+    assert held, "expected the dark captures to run with motor power off"
+    for regs in held:
+        assert regs[0x01] & 0x01  # SCAN
+        assert (regs[0x3D], regs[0x3E], regs[0x3F]) == (0, 0, 1)
+        assert not regs[0x03] & 0x10  # lamp off: these are the dark frames
+
+
+def test_7600i_v2_keeps_motor_power_on_for_stationary_captures(tmp_path):
+    usb, _scanner = _calibrated_scan(MODEL_7600I_V2, tmp_path)
+    writes = _register_writes(usb)
+    assert all(regs[0x02] & 0x10 for regs in _motor_starts(writes))  # MTRPWR
+    assert 0x00 not in {value for addr, value in writes if addr == 0x02}
 
 
 def test_7600i_v2_still_homes_in_reverse(tmp_path):
@@ -277,7 +300,7 @@ def test_fast_feed_homes_first_when_not_at_home():
     usb.at_home = False
     create_session(asic, MODEL_8200I)._fast_feed(compute_geometry(900, model=MODEL_8200I))
     home, feed = _motor_starts(_register_writes(usb))
-    assert home[0x02] == 0x30 and feed[0x02] == 0x18
+    assert home[0x02] == 0xB4 and feed[0x02] == 0x18
 
 
 def test_fast_feed_does_not_start_when_homing_fails(monkeypatch):

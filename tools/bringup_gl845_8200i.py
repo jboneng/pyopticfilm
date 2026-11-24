@@ -112,7 +112,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--reverse-home",
         action="store_true",
-        help="Home with the reverse home seek instead of the forward AGOHOME capture",
+        help="No effect: the reverse home seek is the default (kept for older command lines)",
+    )
+    parser.add_argument(
+        "--forward-home",
+        action="store_true",
+        help="Home with a forward AGOHOME capture instead of the reverse home seek (experimental)",
     )
     parser.add_argument(
         "--log",
@@ -175,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Expected {model_label} GL845, got {scanner.model.model} "
                 f"({scanner.model.asic}); select its exact USB device with --device-id"
             )
-        if args.no_fast_feed or args.no_auto_home or args.reverse_home:
+        if args.no_fast_feed or args.no_auto_home or args.forward_home:
             from dataclasses import replace
 
             # Scans read these flags from the scanner's model, homing from the ASIC's.
@@ -183,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
                 scanner.model,
                 fast_feed=scanner.model.fast_feed and not args.no_fast_feed,
                 scan_auto_home=scanner.model.scan_auto_home and not args.no_auto_home,
-                forward_home=scanner.model.forward_home and not args.reverse_home,
+                forward_home=args.forward_home,
                 prefeed_offset_steps=6,
             )
             scanner.asic.model = scanner.model

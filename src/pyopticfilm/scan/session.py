@@ -779,7 +779,10 @@ class ScanSession:
                 self._configure(geometry, image_pass=True)
             else:
                 self._configure(geometry)
-            self._begin_scan(start_motor=start_motor)
+            hold = not start_motor and bool(getattr(self.model, "stationary_motor_off", False))
+            if hold:
+                self._hold_motor_off()
+            self._begin_scan(start_motor=start_motor or hold)
             raw = self._acquire(
                 geometry,
                 progress=progress,
@@ -794,6 +797,22 @@ class ScanSession:
             raise
         self._finish_capture(auto_home)
         return raw
+
+    def _hold_motor_off(self) -> None:
+        """Set up a capture that leaves the carriage where it is.
+
+        SilverFast takes its stationary captures with ``0x02 = 0`` and FEEDL 1,
+        and still writes the start register. Leaving MTRPWR set moves the
+        carriage one line per scanned line.
+        """
+        proto = self.asic.protocol
+        cache = self.asic._reg_cache
+        cache[0x02] = 0x00
+        proto.write_register(0x02, 0x00)
+        proto.write_u24(0x3D, 1)
+        self._set24(cache, 0x3D, 1)
+        self._feedl = 1
+        logger.info("stationary capture: motor power off")
 
     def _finish_capture(self, auto_home: bool) -> None:
         if auto_home:

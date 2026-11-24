@@ -351,6 +351,11 @@ class MockScannerTransport(FakeUsbTransport):
             self._sync_status()
             return
         if addr == 0x0F and value == 0x01:
+            if not self.registers.get(0x02, 0) & _R.MTRPWR:
+                # Motor power off: the capture runs, the carriage stays put.
+                self.feed_finished = True
+                self._sync_status()
+                return
             self.at_home = False
             self.motor_enabled = True
             self.feed_finished = False
