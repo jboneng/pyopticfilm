@@ -50,6 +50,7 @@ Frozen model-lock tests must not be retargeted to fit other-model code.
 - `tests/model_lock/opticfilm_8300i_se/`
 - `tests/model_lock/opticfilm_7600i_v1/`
 - `tests/model_lock/opticfilm_7600i_v2/`
+- `tests/model_lock/opticfilm_8200i/`
 
 ### Never without an explicit user request
 

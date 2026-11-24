@@ -93,7 +93,7 @@ def test_with_hw_override_sets_flag():
 
 def test_device_banner_override_vs_locked():
     locked = with_mock_mode(
-        LabTarget(label="x", model=MODEL_8200I, device_id="id"),
+        LabTarget(label="x", model=MODEL_8100, device_id="id"),
         False,
     )
     text = device_banner(locked)

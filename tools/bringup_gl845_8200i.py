@@ -100,6 +100,32 @@ def main(argv: list[str] | None = None) -> int:
         help="Lab unlock for home/scan/park (required for motor steps)",
     )
     parser.add_argument(
+        "--no-fast-feed",
+        action="store_true",
+        help="Feed to the film with the low-resolution pre-feed scan instead of the fast feed",
+    )
+    parser.add_argument(
+        "--no-auto-home",
+        action="store_true",
+        help="Return home with the reverse home seek instead of AGOHOME on the image pass",
+    )
+    parser.add_argument(
+        "--reverse-home",
+        action="store_true",
+        help="No effect: the reverse home seek is the default (kept for older command lines)",
+    )
+    parser.add_argument(
+        "--forward-home",
+        action="store_true",
+        help="Home with a forward AGOHOME capture instead of the reverse home seek (experimental)",
+    )
+    parser.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="Write a DEBUG log of the run to this file (attach it to a hardware report)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the planned sequence without opening USB",
@@ -128,6 +154,18 @@ def main(argv: list[str] | None = None) -> int:
     from pyopticfilm.device.select import MODEL_7600I_V2
     from pyopticfilm.scanner import Scanner
 
+    if args.log is not None:
+        import logging
+
+        from pyopticfilm.logging import get_logger
+
+        args.log.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(args.log, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        get_logger().addHandler(handler)
+        get_logger().setLevel(logging.DEBUG)
+        print(f"log: {args.log}")
+
     target_model = {
         "8200i": MODEL_8200I,
         "7600i-v2": MODEL_7600I_V2,
@@ -141,6 +179,23 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 f"Expected {model_label} GL845, got {scanner.model.model} "
                 f"({scanner.model.asic}); select its exact USB device with --device-id"
+            )
+        if args.no_fast_feed or args.no_auto_home or args.forward_home:
+            from dataclasses import replace
+
+            # Scans read these flags from the scanner's model, homing from the ASIC's.
+            scanner._model = replace(
+                scanner.model,
+                fast_feed=scanner.model.fast_feed and not args.no_fast_feed,
+                scan_auto_home=scanner.model.scan_auto_home and not args.no_auto_home,
+                forward_home=args.forward_home,
+                prefeed_offset_steps=6,
+            )
+            scanner.asic.model = scanner.model
+            print(
+                f"motor: fast_feed={scanner.model.fast_feed} "
+                f"scan_auto_home={scanner.model.scan_auto_home} "
+                f"forward_home={scanner.model.forward_home}"
             )
         if args.allow_unvalidated:
             scanner._allow_unvalidated_scan = True  # lab harness unlock

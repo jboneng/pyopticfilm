@@ -39,6 +39,7 @@ def test_scan_ready_validate_set():
             MODEL_8300I_SE,
             MODEL_7600I_V1,
             MODEL_7600I_V2,
+            MODEL_8200I,
         ):
             assert model_is_scan_ready(m) is True
         else:

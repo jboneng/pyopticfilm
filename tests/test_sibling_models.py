@@ -21,8 +21,8 @@ def test_gl845_aliases_use_gl845_asic_and_session():
         assert isinstance(asic, Gl845)
         session = create_session(asic, model, None)
         assert session.__class__.__name__ == "ScanSession"
-        # The 7600i v2 is hardware-tested; the other GL845 aliases stay locked.
-        assert model.scan_ready is (model is MODEL_7600I_V2)
+        # The 7600i v2 and 8200i are hardware-tested; the other GL845 aliases stay locked.
+        assert model.scan_ready is (model in (MODEL_7600I_V2, MODEL_8200I))
 
 
 def test_gl843_7200i_swap_flag_and_gl842_last():

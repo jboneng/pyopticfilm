@@ -6,7 +6,9 @@ until a model is **hardware-tested**. Protocol-validated traces (see
 [scanner-validation.md](scanner-validation.md)) do not flip that gate. The
 GL128 models (8200i SE, 8100 V2, and 8300i SE) and GL843 7600i v1 are
 capture-derived, not completed from SANE. The GL845 7600i v2 uses the
-SANE-derived 8200i tables and is hardware-tested.
+SANE-derived 8200i tables and is hardware-tested. The GL845 8200i uses the same
+tables with capture-derived motor and sensor overrides and is hardware-tested
+([notes](opticfilm-8200i.md)).
 
 ## Model → ASIC → SANE sources
 
@@ -70,7 +72,7 @@ These matter when sizing the ASIC line buffer:
 - Sheet-fed document detect
 - Non-Plustek genesys scanners
 - Any GL128 / 8200i SE / 8100 V2 behaviour (use captures instead)
-- GL845 `send_shading_data` DVDSET shading (host stretch first; revisit after 8200i HW)
+- GL845 `send_shading_data` DVDSET shading (the 8200i and 7600i v2 flat-field on the host)
 
 ## Bring-up policy
 
@@ -87,7 +89,7 @@ These matter when sizing the ASIC line buffer:
 | 8200i SE | capture-derived | ASIC shading | **True** |
 | 8100 (V2) | capture-derived (SE sibling; no IR) | ASIC shading | **True** |
 | 8300i SE | capture-derived (SE sibling; IR) | ASIC shading | **True** |
-| 8200i (GL845) | setup USB golden | wired | False until HW image+park |
+| 8200i (GL845) | SANE tables + capture-derived overrides | host dark/white, AFE gain search | **True** |
 | 7600i v2 (GL845) | 8200i tables + v2 overrides | host dark/white, AFE gain search | **True** |
 | Other GL845 aliases | share 8200i session | wired | False |
 | 7600i v1 (GL843) | capture-derived | live ASIC calibration per scan | **True** |

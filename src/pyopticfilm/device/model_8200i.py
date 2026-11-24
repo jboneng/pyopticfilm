@@ -7,9 +7,15 @@ Tables ported from SANE genesys ``tables_*.cpp`` / ``gl846.cpp`` (GPL). See NOTI
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from pyopticfilm.device.protocol import DEFAULT_GL845_MOTOR, MotorProfile
+from pyopticfilm.device.tables_8200i import (
+    FAST_SLOPE_TABLE_8200I,
+    FEED_REGS_8200I,
+    FEED_START_TABLE_8200I,
+    MOTOR_REG_OVERRIDES_8200I,
+)
 
 # --- genesys tables (8200i / GL845) ---
 
@@ -286,6 +292,23 @@ class Model8200i:
     prefeed_margin_steps: int = 0
     #: Measured extra travel of the pre-feed scan beyond its nominal distance.
     prefeed_offset_steps: int = 0
+    #: Feed to the film with one FASTFED move on the fast table instead of a pre-feed scan.
+    fast_feed: bool = False
+    #: Measured extra travel of the fast feed beyond its nominal distance.
+    fast_feed_offset_steps: int = 0
+    #: Image passes set AGOHOME: the carriage returns home by itself when the scan ends.
+    scan_auto_home: bool = False
+    #: Home with a short forward AGOHOME capture (the ASIC returns the carriage)
+    #: instead of the reverse home seek. If it fails the carriage stays put.
+    forward_home: bool = False
+    #: Captures taken without a motor start run with motor power off (``0x02 = 0``,
+    #: FEEDL 1), as SilverFast does. With MTRPWR set the carriage travels at
+    #: scan speed for the whole capture even though no feed was started.
+    stationary_motor_off: bool = False
+    #: Clear the lamp watchdog (``0x03`` bit 7) for image passes, as SilverFast does.
+    image_pass_lamp_watchdog_off: bool = False
+    #: Bits ORed into GPIO ``0x6C`` on every scan start and motor stop (SANE: ``0x41``).
+    home_sensor_gpio_mask: int = 0x41
     #: Single-pass prescan target for the film peak (raw counts); ``None`` disables.
     auto_exposure_target: float | None = None
 
@@ -330,4 +353,39 @@ class Model8200i:
         return regs
 
 
-MODEL_8200I = Model8200i()
+#: SANE profile with SilverFast's fast/home table and motor registers.
+MOTOR_8200I = replace(
+    DEFAULT_GL845_MOTOR,
+    fast_table=FAST_SLOPE_TABLE_8200I,
+    reg_overrides=MOTOR_REG_OVERRIDES_8200I,
+    feed_start_table=FEED_START_TABLE_8200I,
+    feed_regs=FEED_REGS_8200I,
+)
+
+# Class defaults stay the SANE tables (the 7600i v2 is built from them in
+# ``device/select.py``). These overrides follow the SilverFast captures.
+MODEL_8200I = Model8200i(
+    # Hardware sign-off: issue #181 (bcdDevice 0x0605) and docs/opticfilm-8200i.md.
+    scan_ready=True,
+    # SilverFast takes dark and white at home; the SANE TA offset is the holder edge.
+    calib_white_home_y_mm=1.5,
+    calib_dark_lines=1024,
+    # SilverFast searches the PGA gains every pass (about 33/25/36 colour,
+    # 53/56/55 infrared); the table codes are only the seed.
+    afe_white_target=60000,
+    # SilverFast fast-feeds to the film and scans with AGOHOME set. The image
+    # pass feeds the last 400 steps on the scan slope.
+    prefeed_margin_steps=400,
+    fast_feed=True,
+    scan_auto_home=True,
+    # Homing is the reverse home seek: on hardware the forward AGOHOME capture
+    # never moved the carriage, while the reverse seek reached home every time.
+    stationary_motor_off=True,
+    motor_profile=MOTOR_8200I,
+    # SilverFast samples the sensor one clock earlier and twice as wide
+    # (0x58 video sample, 0x59 black sample) at every resolution.
+    sensor_custom_regs={**_SENSOR_CUSTOM_8200I, 0x58: 0x2A, 0x59: 0x72},
+    image_pass_lamp_watchdog_off=True,
+    # SilverFast leaves 0x6C at its boot value (0x4C); it never sets bit 0.
+    home_sensor_gpio_mask=0x40,
+)

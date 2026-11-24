@@ -6,7 +6,7 @@ without a physical device, and how that differs from hardware bring-up.
 Protocol tests **do not** prove that a physical scanner works. Motor timing,
 lamp/AFE analogue behaviour, firmware quirks, and real USB races are out of
 scope. The OpticFilm 8200i SE, OpticFilm 8100 (V2), OpticFilm 8300i SE,
-OpticFilm 7600i v1, and OpticFilm 7600i v2 are hardware-tested
+OpticFilm 7600i v1, OpticFilm 7600i v2, and OpticFilm 8200i are hardware-tested
 (`scan_ready=True`). Every other model keeps `scan_ready=False` until it has
 produced a real image and a successful park.
 
@@ -14,7 +14,7 @@ produced a real image and a successful park.
 
 | Level | Meaning |
 |-------|---------|
-| **Hardware tested** | Live scan + park on physical hardware. Currently the 8200i SE, 8100 (V2), 8300i SE, 7600i v1, and 7600i v2. |
+| **Hardware tested** | Live scan + park on physical hardware. Currently the 8200i SE, 8100 (V2), 8300i SE, 7600i v1, 7600i v2, and 8200i. |
 | **Protocol validated** | Python USB traffic for a documented setup matches a golden trace, and optical registers match independently computed geometry. A SANE genesys register dump, when present, is an additional oracle. |
 | **Experimental** | Tables and session code exist; `scan()`, `home()`, `park()`, and `calibrate()` stay locked. |
 
@@ -180,7 +180,7 @@ fixture drift is explainable.
 Parser coverage is exercised in CI against
 `tests/data/sane_debug_sample.log` (a canned snippet, not a full scan).
 
-### Lab bring-up (GL845 8200i / 7600i v2, does not flip `scan_ready`)
+### Lab bring-up (GL845 8200i / 7600i v2)
 
 ```bash
 uv run python tools/bringup_gl845_8200i.py --dry-run
@@ -192,8 +192,8 @@ uv run python tools/bringup_gl845_8200i.py --model 7600i-v2 \
 The 7600i v2 shares the GL845 8200i session/tables in this release. The tool
 checks the selected model identity before issuing commands. Use `--device-id`
 when multiple Plustek scanners are connected. ASIC init and motor/image steps
-require the explicit lab override and do not change `scan_ready` (the 7600i v2
-is already scan-ready; the 8200i is not).
+require the explicit lab override and do not change `scan_ready` (both models
+are already scan-ready).
 
 Flip only the tested model's `scan_ready` flag after its hardware sign-off
 checklist below passes; a tiny scan alone is not sufficient.
@@ -213,6 +213,16 @@ device release number (`bcdDevice`):
 `0x0605` resolves to `MODEL_7600I_V2`. To verify `bcdDevice` on an attached
 scanner, print `bcd_device` and `asic_hint` from
 `pyopticfilm.usb.device.list_devices()`, or inspect PyUSB device descriptors.
+
+### 8200i bring-up status
+
+Hardware-tested (`scan_ready=True`; lock oracles in
+`tests/model_lock/opticfilm_8200i/`). Tested on one physical OpticFilm 8200i
+(`07b3:130d`, `bcdDevice=0x0605`) by an external tester, recorded in
+[issue #181](https://github.com/jboneng/pyopticfilm/issues/181): calibration and
+full-frame colour at 900, 1800, 3600 and 7200 dpi, colour + infrared at 1800 dpi,
+home/park, and cancel. Multi-exposure has not been run on this model. Details and
+open work are in [opticfilm-8200i.md](opticfilm-8200i.md).
 
 ### 7600i v2 bring-up status
 

@@ -2,13 +2,16 @@
 
 Hardware-tested models today: the GL128 trio (OpticFilm 8200i SE, OpticFilm
 8100 V2, OpticFilm 8300i SE), the GL843 OpticFilm 7600i v1, and the GL845
-OpticFilm 7600i v2. The GL128 models share one driver path (`asic/gl128.py`,
+OpticFilm 7600i v2 and OpticFilm 8200i. The GL128 models share one driver path (`asic/gl128.py`,
 `scan/session_gl128.py`, geometry, pipeline, calibration). Slope ROMs are
 leaf-specific (`tables_8200i_se.py` for SE/V2; `tables_8300i_se.py` for 8300i).
 The 7600i v1 uses its own leaf and session (`device/model_7600i_v1.py`,
 `scan/session_7600i_v1.py`). The 7600i v2 is `MODEL_7600I_V2` in
 `device/select.py`, an instance of the GL845 8200i model class with its own
-overrides, on the shared `asic/gl845.py` / `scan/session.py` path. A change
+overrides, on the shared `asic/gl845.py` / `scan/session.py` path. The 8200i is
+`MODEL_8200I` in `device/model_8200i.py`, the same class with its own overrides;
+the class defaults are shared with the 7600i v2, so 8200i changes go on the
+instance. A change
 that is correct for one model is not automatically correct for the others.
 
 Adding a model or an ASIC? See
@@ -19,8 +22,9 @@ layout, registration points and tests, using the GL128 siblings as the template.
 
 - Put model-specific constants and flags on **that model's** class
   (`device/model_8200i_se.py`, `device/model_8100_v2.py`,
-  `device/model_8300i_se.py`, `device/model_7600i_v1.py`, or the
-  `MODEL_7600I_V2` overrides in `device/select.py`). Do not change a sibling's
+  `device/model_8300i_se.py`, `device/model_7600i_v1.py`, the
+  `MODEL_7600I_V2` overrides in `device/select.py`, or the `MODEL_8200I`
+  overrides in `device/model_8200i.py`). Do not change a sibling's
   defaults to make a fix work.
 - The 8100 V2 does **not** subclass the SE tables. Shared identical tables live
   in `device/gl128_common.py`. Capture-proven differences are listed in
